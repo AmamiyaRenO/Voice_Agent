@@ -1,0 +1,8 @@
+{
+  "WakeWord": "robot",
+  "LaunchKeywords": ["open", "play"],
+  "ExitKeywords": ["quit", "back to lobby"],
+  "SynonymOverrides": [
+    { "Spoken": "notebook", "GameName": "记事本" }
+  ]
+}
