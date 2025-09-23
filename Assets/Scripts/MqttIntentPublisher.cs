@@ -3,10 +3,7 @@ using System;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using MQTTnet;
-using MQTTnet.Client;
-using MQTTnet.Client.Options;
-using MQTTnet.Protocol;
+using RobotVoice.Mqtt;
 using UnityEngine;
 
 namespace RobotVoice
@@ -20,13 +17,19 @@ namespace RobotVoice
         [SerializeField] private string password = string.Empty;
         [SerializeField] private string intentTopic = "robot/intent";
         [SerializeField] private string clientId = "unity-voice";
+        [Header("MQTT TLS")]
+        [SerializeField] private bool useTls;
+        [SerializeField] private string tlsTargetHost = string.Empty;
+        [SerializeField] private bool allowUntrustedCertificates;
+        [Header("MQTT Options")]
         [SerializeField] private bool autoConnectOnStart = true;
         [SerializeField] private string sourceLabel = "unity_vosk";
 
-        private IMqttClient client;
-        private IMqttClientOptions options;
+        private SimpleMqttClient client;
+        private SimpleMqttClientOptions options;
         private readonly SemaphoreSlim connectLock = new SemaphoreSlim(1, 1);
-        private MqttFactory factory;
+        private CancellationTokenSource reconnectCts;
+        private bool isDisposing;
 
         private void Awake()
         {
@@ -43,20 +46,17 @@ namespace RobotVoice
 
         private void InitialiseClient()
         {
-            factory = new MqttFactory();
-            client = factory.CreateMqttClient();
-            client.ConnectedAsync += e =>
+            client = new SimpleMqttClient();
+            client.Connected += () =>
             {
                 Debug.Log($"[RobotVoice] Connected to MQTT {host}:{port}");
-                return Task.CompletedTask;
             };
-            client.DisconnectedAsync += async e =>
+            client.Disconnected += reason =>
             {
-                Debug.LogWarning($"[RobotVoice] Disconnected from MQTT: {e.Reason}");
-                if (autoConnectOnStart)
+                Debug.LogWarning($"[RobotVoice] Disconnected from MQTT: {reason}");
+                if (!isDisposing)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(2));
-                    await EnsureConnectedAsync();
+                    ScheduleReconnect();
                 }
             };
         }
@@ -76,7 +76,7 @@ namespace RobotVoice
                     return;
                 }
 
-                var builder = new MqttClientOptionsBuilder()
+                var builder = new SimpleMqttClientOptionsBuilder()
                     .WithTcpServer(host, port)
                     .WithClientId(string.IsNullOrWhiteSpace(clientId) ? Guid.NewGuid().ToString("N") : clientId)
                     .WithKeepAlivePeriod(TimeSpan.FromSeconds(15))
@@ -85,6 +85,22 @@ namespace RobotVoice
                 if (!string.IsNullOrEmpty(username))
                 {
                     builder = builder.WithCredentials(username, password ?? string.Empty);
+                }
+
+                if (useTls)
+                {
+                    builder = builder.WithTls(tls =>
+                    {
+                        if (!string.IsNullOrWhiteSpace(tlsTargetHost))
+                        {
+                            tls.WithTargetHost(tlsTargetHost.Trim());
+                        }
+
+                        if (allowUntrustedCertificates)
+                        {
+                            tls.AllowUntrustedCertificates();
+                        }
+                    });
                 }
 
                 options = builder.Build();
@@ -125,10 +141,10 @@ namespace RobotVoice
                 return;
             }
 
-            var message = new MqttApplicationMessageBuilder()
+            var message = new SimpleMqttApplicationMessageBuilder()
                 .WithTopic(intentTopic)
                 .WithPayload(payload)
-                .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                .WithQualityOfServiceLevel(SimpleMqttQualityOfServiceLevel.AtLeastOnce)
                 .Build();
 
             try
@@ -205,13 +221,42 @@ namespace RobotVoice
             return sb.ToString();
         }
 
+        private void ScheduleReconnect()
+        {
+            if (!autoConnectOnStart || !isActiveAndEnabled)
+            {
+                return;
+            }
+
+            reconnectCts?.Cancel();
+            reconnectCts = new CancellationTokenSource();
+            var token = reconnectCts.Token;
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2), token);
+                    if (!token.IsCancellationRequested)
+                    {
+                        await EnsureConnectedAsync();
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            });
+        }
+
         private async void OnDestroy()
         {
+            isDisposing = true;
+            reconnectCts?.Cancel();
             if (client != null && client.IsConnected)
             {
                 try
                 {
-                    await client.DisconnectAsync();
+                    await client.DisconnectAsync(CancellationToken.None);
                 }
                 catch (Exception ex)
                 {
@@ -221,6 +266,7 @@ namespace RobotVoice
 
             client?.Dispose();
             connectLock?.Dispose();
+            reconnectCts?.Dispose();
         }
     }
 }
