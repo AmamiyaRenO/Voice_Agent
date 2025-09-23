@@ -13,7 +13,18 @@ The project contains third‑party libraries inside the `Assets/ThirdParty` fold
 - **SimpleJSON** for JSON parsing
 - **Vosk** native libraries for Windows, macOS and Android
 
-No additional packages are required beyond the dependencies included in this repository.
+MQTT intent publishing (`ROBOTVOICE_USE_MQTT`) now ships with a first‑party client implementation, so
+no external DLLs are required for connecting to a broker, publishing intents with QoS 0/1, keeping
+the session alive or performing simple TLS handshakes. Simply enable the scripting define and
+configure the broker/TLS fields in `MqttIntentPublisher` to start sending intents.
+
+If your project requires more advanced MQTT features (subscriptions, managed clients, WebSockets,
+etc.) you can still drop the official [MQTTnet](https://github.com/dotnet/MQTTnet) assemblies into
+`Assets/ThirdParty/Plugins/MQTTnet/` and update the publisher to use them instead of the built‑in
+client.
+
+No additional packages are required beyond the dependencies included in this repository unless you
+choose to replace the bundled MQTT client with an alternative implementation.
 
 ## Importing
 
