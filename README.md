@@ -1,6 +1,6 @@
 # Vosk Unity Package
 
-Offline speech recognition using the [Vosk](https://github.com/alphacep/vosk-api) library with a pluggable speech-to-text engine pipeline.
+Offline speech recognition using the [Vosk](https://github.com/alphacep/vosk-api) library.
 
 ## Requirements
 
@@ -34,18 +34,17 @@ After opening the project Unity will import the native plugins for your platform
 
 ## ModelPath
 
-`VoskSpeechToText` expects a model archive inside the **StreamingAssets** folder when the built-in Vosk engine is used. The `ModelPath` field contains the relative path (e.g. `vosk-model-small-en-us-0.15.zip`). On the first run the archive is extracted to `Application.persistentDataPath`.
+`VoskSpeechToText` expects a model archive inside the **StreamingAssets** folder. The `ModelPath` field contains the relative path (e.g. `vosk-model-small-en-us-0.15.zip`). On the first run the archive is extracted to `Application.persistentDataPath`.
 
-You can assign a different model by changing `ModelPath` in the inspector or through script before calling `StartSpeechRecognition` (or the legacy `StartVoskStt`). Custom engines may choose to interpret the model path differently, so consult the engine's documentation.
+You can assign a different model by changing `ModelPath` in the inspector or through script before calling `StartVoskStt`.
 
 ## Usage
 
 1. Add the **VoskSpeechToText** component to a GameObject in your scene.
-2. (Optional) Add a component that inherits from `SpeechToTextEngineBase` to the same GameObject and assign it to the **Speech Engine** field. If left empty the default `VoskSpeechToTextEngine` is created automatically.
-3. Provide the model assets required by the engine (for Vosk this means copying the archive into `Assets/StreamingAssets/` and assigning its filename to `ModelPath`) and adjust the `Sample Rate` field if your engine expects a different capture rate.
-4. A `VoiceProcessor` component is required for microphone input. If one isn't present on the same GameObject, `VoskSpeechToText` adds it automatically.
-5. Call `StartSpeechRecognition` (optionally with `startMicrophone: true`) to initialise the recogniser. The legacy `StartVoskStt` method remains available for existing integrations.
-6. Subscribe to `OnTranscriptionResult` to receive the recognised text.
+2. Place a Vosk model archive into `Assets/StreamingAssets/` and assign its filename to `ModelPath`.
+3. A `VoiceProcessor` component is required for microphone input. If one isn't present on the same GameObject, `VoskSpeechToText` adds it automatically.
+4. Call `StartVoskStt` (optionally with `startMicrophone: true`) to initialise the recogniser.
+5. Subscribe to `OnTranscriptionResult` to receive the recognised text.
 
 ```csharp
 using UnityEngine;
@@ -58,29 +57,10 @@ public class VoskExample : MonoBehaviour
     {
         speech.ModelPath = "vosk-model-small-en-us-0.15.zip"; // relative to StreamingAssets
         speech.OnTranscriptionResult += result => Debug.Log(result);
-        speech.StartSpeechRecognition(startMicrophone: true);
+        speech.StartVoskStt(startMicrophone: true);
     }
 }
 ```
-
-## Creating custom speech engines
-
-`VoskSpeechToText` delegates audio processing to components that inherit from `SpeechToTextEngineBase`. The built-in
-`VoskSpeechToTextEngine` is provided for backwards compatibility, but you can plug in alternative providers (including online
-services or other offline SDKs) by implementing the following contract:
-
-1. Create a new `MonoBehaviour` that inherits from `SpeechToTextEngineBase` and override the `EngineName`,
-   `InitialiseAsync` and `TryRecognise` members.
-2. Use the supplied `SpeechToTextEngineConfiguration` to load your model assets. The configuration includes the resolved
-   model path, requested key phrases, maximum alternatives and the microphone sample rate.
-3. Add your component to the same GameObject as `VoskSpeechToText` and assign it to the **Speech Engine** field in the
-   inspector.
-4. Call `StartSpeechRecognition` as usual. The controller will invoke your engine instead of the default Vosk
-   implementation.
-
-This design makes it possible to experiment with Hugging Face, Azure, Google Cloud or any other service without modifying
-the controller. Each engine controls its own initialisation and waveform processing pipeline while the controller handles
-microphone management and result dispatching.
 
 ## Hello World Example
 
@@ -96,7 +76,7 @@ public class HelloWorldExample : MonoBehaviour
     void Start()
     {
         speech.OnTranscriptionResult += OnResult;
-        speech.StartSpeechRecognition(startMicrophone: true);
+        speech.StartVoskStt(startMicrophone: true);
     }
 
     void OnResult(string json)
