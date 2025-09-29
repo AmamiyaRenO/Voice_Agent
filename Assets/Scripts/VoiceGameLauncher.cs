@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using UnityEngine;
+using SimpleJSON;
 
 namespace RobotVoice
 {
@@ -24,6 +25,13 @@ namespace RobotVoice
 
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
+        private readonly List<KeywordPhrase> keywordPhrases = new List<KeywordPhrase>();
+
+        private sealed class KeywordPhrase
+        {
+            public string Text = string.Empty;
+            public string LowerInvariant = string.Empty;
+        }
 
         private void Awake()
         {
@@ -160,6 +168,7 @@ namespace RobotVoice
             TryAddRange(speech.KeyPhrases);
 
             speech.KeyPhrases = aggregated;
+            RebuildKeywordPhrases(aggregated);
         }
 
         public void HandleVoskResult(string message)
@@ -170,18 +179,33 @@ namespace RobotVoice
                 return;
             }
 
-            var recognised = ExtractRecognisedText(message);
+            var masked = FilterTranscript(message, out var rawRecognisedText);
+            if (string.IsNullOrWhiteSpace(masked))
+            {
+                return;
+            }
+
+            if (logDebugMessages)
+            {
+                Debug.Log($"[RobotVoice] Recognised: {masked}");
+            }
+
+            if (masked == "*")
+            {
+                return;
+            }
+
+            var recognised = RemoveMaskPlaceholders(masked);
             if (string.IsNullOrWhiteSpace(recognised))
             {
                 return;
             }
 
-            recognised = recognised.Trim();
-            if (logDebugMessages)
-            {
-                Debug.Log($"[RobotVoice] Recognised: {recognised}");
-            }
+            var rawRecognised = string.IsNullOrWhiteSpace(rawRecognisedText)
+                ? recognised
+                : rawRecognisedText.Trim();
 
+            recognised = recognised.Trim();
             if (IsOnCooldown())
             {
                 if (logDebugMessages)
@@ -199,17 +223,17 @@ namespace RobotVoice
 
             if (IsExitIntent(processed))
             {
-                PublishExit(recognised);
+                PublishExit(rawRecognised);
                 return;
             }
 
             if (TryExtractGameName(processed, out var gameName))
             {
-                PublishLaunch(gameName, recognised);
+                PublishLaunch(gameName, rawRecognised);
             }
             else if (!requireLaunchKeyword && !string.IsNullOrWhiteSpace(processed))
             {
-                PublishLaunch(runtimeConfig.ResolveGameName(processed), recognised);
+                PublishLaunch(runtimeConfig.ResolveGameName(processed), rawRecognised);
             }
         }
 
@@ -315,6 +339,237 @@ namespace RobotVoice
         {
             lastIntentTime = Time.realtimeSinceStartup;
             _ = publisher.PublishExitIntentAsync(rawText);
+        }
+
+        private void RebuildKeywordPhrases(List<string> phrases)
+        {
+            keywordPhrases.Clear();
+            if (phrases == null)
+            {
+                return;
+            }
+
+            foreach (var phrase in phrases)
+            {
+                if (string.IsNullOrWhiteSpace(phrase))
+                {
+                    continue;
+                }
+
+                var trimmed = phrase.Trim();
+                if (trimmed.Length == 0)
+                {
+                    continue;
+                }
+
+                keywordPhrases.Add(new KeywordPhrase
+                {
+                    Text = trimmed,
+                    LowerInvariant = trimmed.ToLowerInvariant()
+                });
+            }
+        }
+
+        private string FilterTranscript(string message, out string rawRecognised)
+        {
+            rawRecognised = ExtractRecognisedText(message);
+
+            var transcript = ExtractTranscriptFromJson(message);
+            if (string.IsNullOrWhiteSpace(transcript))
+            {
+                transcript = rawRecognised;
+            }
+
+            if (string.IsNullOrWhiteSpace(transcript))
+            {
+                return string.Empty;
+            }
+
+            if (keywordPhrases.Count == 0)
+            {
+                return transcript;
+            }
+
+            var filtered = MaskTranscriptToKeywords(transcript);
+            if (string.IsNullOrWhiteSpace(filtered))
+            {
+                return transcript;
+            }
+
+            return filtered;
+        }
+
+        private string ExtractTranscriptFromJson(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return string.Empty;
+            }
+
+            var trimmed = message.Trim();
+            if (!trimmed.StartsWith("{"))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                var node = JSONNode.Parse(message);
+                var obj = node?.AsObject;
+                if (obj == null)
+                {
+                    return string.Empty;
+                }
+
+                if (obj.HasKey("text"))
+                {
+                    return obj["text"].Value;
+                }
+
+                if (obj.HasKey("partial"))
+                {
+                    return obj["partial"].Value;
+                }
+
+                if (obj.HasKey("result"))
+                {
+                    var array = obj["result"].AsArray;
+                    if (array != null)
+                    {
+                        var words = new List<string>();
+                        foreach (var item in array)
+                        {
+                            var word = item["word"]?.Value;
+                            if (!string.IsNullOrWhiteSpace(word))
+                            {
+                                words.Add(word.Trim());
+                            }
+                        }
+
+                        if (words.Count > 0)
+                        {
+                            return string.Join(" ", words);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore parsing errors and fall back to raw text.
+            }
+
+            return string.Empty;
+        }
+
+        private string MaskTranscriptToKeywords(string transcript)
+        {
+            if (string.IsNullOrWhiteSpace(transcript))
+            {
+                return string.Empty;
+            }
+
+            var text = transcript;
+            var lower = text.ToLowerInvariant();
+            var keep = new bool[text.Length];
+            var hasKeyword = false;
+
+            for (int i = 0; i < keywordPhrases.Count; i++)
+            {
+                var phrase = keywordPhrases[i];
+                if (string.IsNullOrEmpty(phrase.LowerInvariant))
+                {
+                    continue;
+                }
+
+                var keyword = phrase.LowerInvariant;
+                var searchIndex = 0;
+
+                while (searchIndex < lower.Length)
+                {
+                    var matchIndex = lower.IndexOf(keyword, searchIndex, StringComparison.Ordinal);
+                    if (matchIndex < 0)
+                    {
+                        break;
+                    }
+
+                    for (int j = 0; j < keyword.Length && matchIndex + j < keep.Length; j++)
+                    {
+                        keep[matchIndex + j] = true;
+                    }
+
+                    hasKeyword = true;
+                    searchIndex = matchIndex + 1;
+                }
+            }
+
+            if (!hasKeyword)
+            {
+                return "*";
+            }
+
+            var builder = new StringBuilder(text.Length);
+            var lastWasMask = false;
+
+            for (int i = 0; i < text.Length; i++)
+            {
+                var ch = text[i];
+                if (char.IsWhiteSpace(ch))
+                {
+                    builder.Append(ch);
+                    lastWasMask = false;
+                }
+                else if (keep[i])
+                {
+                    builder.Append(ch);
+                    lastWasMask = false;
+                }
+                else if (!lastWasMask)
+                {
+                    builder.Append('*');
+                    lastWasMask = true;
+                }
+            }
+
+            var result = builder.ToString().Trim();
+
+            return string.IsNullOrEmpty(result) ? "*" : result;
+        }
+        
+
+        private static string RemoveMaskPlaceholders(string recognised)
+        {
+            if (string.IsNullOrWhiteSpace(recognised))
+            {
+                return recognised;
+            }
+
+            var builder = new StringBuilder(recognised.Length);
+            var previousWasSpace = false;
+
+            for (int i = 0; i < recognised.Length; i++)
+            {
+                var ch = recognised[i];
+                if (ch == '*')
+                {
+                    continue;
+                }
+
+                if (char.IsWhiteSpace(ch))
+                {
+                    if (!previousWasSpace && builder.Length > 0)
+                    {
+                        builder.Append(' ');
+                        previousWasSpace = true;
+                    }
+                }
+                else
+                {
+                    builder.Append(ch);
+                    previousWasSpace = false;
+                }
+            }
+
+            return builder.ToString().Trim();
         }
 
         private static string ExtractRecognisedText(string message)
