@@ -31,16 +31,25 @@ def _environment(key: str, default: str) -> str:
 
 @lru_cache(maxsize=1)
 def _load_model() -> WhisperModel:
-    model_path = "D:/unityproject/faster-whisper-large-v3"
-    device = _environment("WHISPER_DEVICE", "cpu")
+    model_path = _environment("WHISPER_MODEL_PATH", "small.en")
+    device = _environment("WHISPER_DEVICE", "cpu").lower()
+
+    if device == "cuda":
+        compute_type = _environment("WHISPER_COMPUTE_TYPE", "float16")
+        return WhisperModel(model_path, device=device, compute_type=compute_type)
+
     compute_type = _environment("WHISPER_COMPUTE_TYPE", "int8")
+    try:
+        cpu_threads = int(_environment("WHISPER_CPU_THREADS", "8"))
+    except ValueError:
+        cpu_threads = 8
 
-    if not os.path.exists(model_path):
-        raise RuntimeError(
-            f"Model path '{model_path}' does not exist. Configure WHISPER_MODEL_PATH to point to the downloaded weights."
-        )
-
-    return WhisperModel(model_path, device=device, compute_type=compute_type)
+    return WhisperModel(
+        model_path,
+        device=device,
+        compute_type=compute_type,
+        cpu_threads=cpu_threads,
+    )
 
 
 @app.on_event("startup")
@@ -77,9 +86,7 @@ def _build_vosk_result(words: Iterable[dict]) -> List[dict]:
 async def transcribe(
     request: Request,
     sample_rate: int = Query(DEFAULT_SAMPLE_RATE, ge=8000, le=48000),
-    language: Optional[str] = Query(None, min_length=1, max_length=8),
-    beam_size: int = Query(5, ge=1, le=10),
-    translate: bool = Query(False),
+    language: Optional[str] = Query("en", min_length=1, max_length=8),
 ) -> JSONResponse:
     payload = await request.body()
     if not payload:
@@ -95,13 +102,12 @@ async def transcribe(
 
     model = _load_model()
 
-    task = "translate" if translate else "transcribe"
     segments_generator, info = model.transcribe(
         audio,
-        beam_size=beam_size,
-        language=language,
-        task=task,
-        word_timestamps=True,
+        beam_size=1,
+        language=language or "en",
+        task="transcribe",
+        word_timestamps=False,
     )
 
     segments = list(segments_generator)
@@ -138,7 +144,7 @@ async def transcribe(
         "language": info.language,
         "duration": info.duration,
         "language_probability": info.language_probability,
-        "translation": translate,
+        "translation": False,
     }
 
     return JSONResponse(response)
