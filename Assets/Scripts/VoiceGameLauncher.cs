@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using UnityEngine;
@@ -27,12 +28,14 @@ namespace RobotVoice
         private void Awake()
         {
             runtimeConfig = BuildRuntimeConfig();
+            ApplySpeechKeyPhrases();
         }
 
 #if UNITY_EDITOR
         private void OnValidate()
         {
             runtimeConfig = BuildRuntimeConfig();
+            ApplySpeechKeyPhrases();
         }
 #endif
 
@@ -74,6 +77,263 @@ namespace RobotVoice
             }
 
             return config;
+        }
+
+        private void ApplySpeechKeyPhrases()
+        {
+            var speech = GetComponent<VoskSpeechToText>();
+            if (speech == null)
+            {
+                return;
+            }
+
+            string Normalise(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return null;
+                }
+
+                var trimmed = value.Trim();
+                return trimmed.Length == 0 ? null : trimmed;
+            }
+
+            var phrases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            void AddPhrase(params string[] parts)
+            {
+                if (parts == null || parts.Length == 0)
+                {
+                    return;
+                }
+
+                var builder = new List<string>(parts.Length);
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    var segment = Normalise(parts[i]);
+                    if (segment != null)
+                    {
+                        builder.Add(segment);
+                    }
+                }
+
+                if (builder.Count == 0)
+                {
+                    return;
+                }
+
+                var phrase = string.Join(" ", builder);
+                phrases.Add(phrase);
+            }
+
+            List<string> CollectDistinct(IEnumerable<string> values)
+            {
+                var collected = new List<string>();
+                if (values == null)
+                {
+                    return collected;
+                }
+
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var value in values)
+                {
+                    var normalised = Normalise(value);
+                    if (normalised != null && seen.Add(normalised))
+                    {
+                        collected.Add(normalised);
+                    }
+                }
+
+                return collected;
+            }
+
+            var wakeWordValue = Normalise(runtimeConfig?.WakeWord);
+            var launchKeywordsList = CollectDistinct(runtimeConfig?.LaunchKeywords);
+            var exitKeywordsList = CollectDistinct(runtimeConfig?.ExitKeywords);
+
+            var gameNames = new List<string>();
+            var gameSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (runtimeConfig?.SynonymOverrides != null)
+            {
+                for (int i = 0; i < runtimeConfig.SynonymOverrides.Length; i++)
+                {
+                    var synonym = runtimeConfig.SynonymOverrides[i];
+                    if (synonym == null)
+                    {
+                        continue;
+                    }
+
+                    var canonical = Normalise(synonym.Canonical);
+                    if (canonical != null && gameSeen.Add(canonical))
+                    {
+                        gameNames.Add(canonical);
+                    }
+
+                    if (synonym.Variants == null)
+                    {
+                        continue;
+                    }
+
+                    for (int j = 0; j < synonym.Variants.Length; j++)
+                    {
+                        var variant = Normalise(synonym.Variants[j]);
+                        if (variant != null && gameSeen.Add(variant))
+                        {
+                            gameNames.Add(variant);
+                        }
+                    }
+                }
+            }
+
+            if (speech.KeyPhrases != null)
+            {
+                for (int i = 0; i < speech.KeyPhrases.Count; i++)
+                {
+                    AddPhrase(speech.KeyPhrases[i]);
+                }
+            }
+
+            var hasGames = gameNames.Count > 0;
+            var hasLaunchKeywords = launchKeywordsList.Count > 0;
+            var hasExitKeywords = exitKeywordsList.Count > 0;
+
+            if (requireWakeWord)
+            {
+                if (wakeWordValue != null)
+                {
+                    if (hasExitKeywords)
+                    {
+                        for (int i = 0; i < exitKeywordsList.Count; i++)
+                        {
+                            AddPhrase(wakeWordValue, exitKeywordsList[i]);
+                        }
+                    }
+
+                    if (requireLaunchKeyword)
+                    {
+                        if (hasLaunchKeywords)
+                        {
+                            if (hasGames)
+                            {
+                                for (int i = 0; i < launchKeywordsList.Count; i++)
+                                {
+                                    for (int j = 0; j < gameNames.Count; j++)
+                                    {
+                                        AddPhrase(wakeWordValue, launchKeywordsList[i], gameNames[j]);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                for (int i = 0; i < launchKeywordsList.Count; i++)
+                                {
+                                    AddPhrase(wakeWordValue, launchKeywordsList[i]);
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (hasGames)
+                        {
+                            for (int i = 0; i < gameNames.Count; i++)
+                            {
+                                AddPhrase(wakeWordValue, gameNames[i]);
+                            }
+
+                            if (hasLaunchKeywords)
+                            {
+                                for (int i = 0; i < launchKeywordsList.Count; i++)
+                                {
+                                    for (int j = 0; j < gameNames.Count; j++)
+                                    {
+                                        AddPhrase(wakeWordValue, launchKeywordsList[i], gameNames[j]);
+                                    }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            AddPhrase(wakeWordValue);
+
+                            if (hasLaunchKeywords)
+                            {
+                                for (int i = 0; i < launchKeywordsList.Count; i++)
+                                {
+                                    AddPhrase(wakeWordValue, launchKeywordsList[i]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                if (hasExitKeywords)
+                {
+                    for (int i = 0; i < exitKeywordsList.Count; i++)
+                    {
+                        AddPhrase(exitKeywordsList[i]);
+                    }
+                }
+
+                if (requireLaunchKeyword)
+                {
+                    if (hasLaunchKeywords)
+                    {
+                        if (hasGames)
+                        {
+                            for (int i = 0; i < launchKeywordsList.Count; i++)
+                            {
+                                for (int j = 0; j < gameNames.Count; j++)
+                                {
+                                    AddPhrase(launchKeywordsList[i], gameNames[j]);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            for (int i = 0; i < launchKeywordsList.Count; i++)
+                            {
+                                AddPhrase(launchKeywordsList[i]);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    if (hasGames)
+                    {
+                        for (int i = 0; i < gameNames.Count; i++)
+                        {
+                            AddPhrase(gameNames[i]);
+                        }
+                    }
+
+                    if (hasLaunchKeywords)
+                    {
+                        for (int i = 0; i < launchKeywordsList.Count; i++)
+                        {
+                            AddPhrase(launchKeywordsList[i]);
+
+                            if (hasGames)
+                            {
+                                for (int j = 0; j < gameNames.Count; j++)
+                                {
+                                    AddPhrase(launchKeywordsList[i], gameNames[j]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (phrases.Count == 0 && wakeWordValue != null)
+            {
+                AddPhrase(wakeWordValue);
+            }
+
+            speech.KeyPhrases = new List<string>(phrases);
         }
 
         public void HandleVoskResult(string message)
