@@ -236,9 +236,13 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f217616079a9a74489a1ae3cd9178787, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
+  m_Name:
+  m_EditorClassIdentifier:
   ModelPath: vosk-model-small-en-us-0.15.zip
+  UsePythonService: 1
+  PythonServiceUrl: http://127.0.0.1:8000/transcribe
+  PythonServiceLanguage:
+  PythonServiceBeamSize: 5
   VoiceProcessor: {fileID: 1558954883}
   MaxAlternatives: 3
   MaxRecordLength: 5
@@ -342,12 +346,12 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: cf39116cc6db44d47b2eaf534e0f6682, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
+  m_Name:
+  m_EditorClassIdentifier:
   MicrophoneIndex: 0
   _minimumSpeakingSampleValue: 0.05
   _silenceTimer: 1
-  _autoDetect: 0
+  _autoDetect: 1
 --- !u!4 &1558954884
 Transform:
   m_ObjectHideFlags: 0
