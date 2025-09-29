@@ -1,8 +1,10 @@
 {
   "WakeWord": "robot",
   "LaunchKeywords": ["open", "play"],
-  "ExitKeywords": ["quit", "back to lobby"],
+  "ExitKeywords": ["quit", "close"],
   "SynonymOverrides": [
-    { "Spoken": "notebook", "GameName": "Notebook" }
+    { "Spoken": "notebook", "GameName": "Notebook" },
+    { "Spoken": "flippy bird", "GameName": "Flippy Bird" },
+    { "Spoken": "slow boat", "GameName": "Slow Boat" }
   ]
 }
