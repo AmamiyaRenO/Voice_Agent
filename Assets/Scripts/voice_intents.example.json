@@ -3,8 +3,17 @@
   "LaunchKeywords": ["open", "play"],
   "ExitKeywords": ["quit", "close"],
   "SynonymOverrides": [
-    { "Spoken": "notebook", "GameName": "Notebook" },
-    { "Spoken": "flippy bird", "GameName": "Flippy Bird" },
-    { "Spoken": "slow boat", "GameName": "Slow Boat" }
+    {
+      "Canonical": "Notebook",
+      "Variants": ["notebook"]
+    },
+    {
+      "Canonical": "Flappy Bird",
+      "Variants": ["flappy bird", "flappybird"]
+    },
+    {
+      "Canonical": "Slow Boat",
+      "Variants": ["slow boat", "slowboat"]
+    }
   ]
 }
