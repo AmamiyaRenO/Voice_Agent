@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
@@ -27,8 +28,19 @@ namespace RobotVoice
 
         private void Awake()
         {
+            ApplyFullscreenMode();
             runtimeConfig = BuildRuntimeConfig();
             ApplySpeechKeyPhrases();
+        }
+
+        private void Start()
+        {
+            if (Application.isEditor)
+            {
+                return;
+            }
+
+            StartCoroutine(EnsureFullscreenAfterFirstFrame());
         }
 
 #if UNITY_EDITOR
@@ -38,6 +50,34 @@ namespace RobotVoice
             ApplySpeechKeyPhrases();
         }
 #endif
+
+        private void ApplyFullscreenMode()
+        {
+            if (Application.isEditor)
+            {
+                return;
+            }
+
+            var resolution = Screen.currentResolution;
+            Screen.fullScreenMode = FullScreenMode.ExclusiveFullScreen;
+            Screen.SetResolution(
+                resolution.width,
+                resolution.height,
+                FullScreenMode.ExclusiveFullScreen,
+                resolution.refreshRate
+            );
+
+            if (!Screen.fullScreen)
+            {
+                Screen.fullScreen = true;
+            }
+        }
+
+        private IEnumerator EnsureFullscreenAfterFirstFrame()
+        {
+            yield return null;
+            ApplyFullscreenMode();
+        }
 
         private VoiceIntentConfig BuildRuntimeConfig()
         {
