@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using UnityEngine;
@@ -27,12 +28,14 @@ namespace RobotVoice
         private void Awake()
         {
             runtimeConfig = BuildRuntimeConfig();
+            ApplySpeechKeyPhrases();
         }
 
 #if UNITY_EDITOR
         private void OnValidate()
         {
             runtimeConfig = BuildRuntimeConfig();
+            ApplySpeechKeyPhrases();
         }
 #endif
 
@@ -74,6 +77,76 @@ namespace RobotVoice
             }
 
             return config;
+        }
+
+        private void ApplySpeechKeyPhrases()
+        {
+            var speech = GetComponent<VoskSpeechToText>();
+            if (speech == null)
+            {
+                return;
+            }
+
+            var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var aggregated = new List<string>();
+
+            void TryAdd(string value)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    return;
+                }
+
+                var trimmed = value.Trim();
+                if (trimmed.Length == 0)
+                {
+                    return;
+                }
+
+                if (unique.Add(trimmed))
+                {
+                    aggregated.Add(trimmed);
+                }
+            }
+
+            void TryAddRange(IEnumerable<string> values)
+            {
+                if (values == null)
+                {
+                    return;
+                }
+
+                foreach (var value in values)
+                {
+                    TryAdd(value);
+                }
+            }
+
+            if (runtimeConfig != null)
+            {
+                TryAdd(runtimeConfig.WakeWord);
+                TryAddRange(runtimeConfig.LaunchKeywords);
+                TryAddRange(runtimeConfig.ExitKeywords);
+
+                if (runtimeConfig.SynonymOverrides != null)
+                {
+                    for (int i = 0; i < runtimeConfig.SynonymOverrides.Length; i++)
+                    {
+                        var synonym = runtimeConfig.SynonymOverrides[i];
+                        if (synonym == null)
+                        {
+                            continue;
+                        }
+
+                        TryAdd(synonym.Canonical);
+                        TryAddRange(synonym.Variants);
+                    }
+                }
+            }
+
+            TryAddRange(speech.KeyPhrases);
+
+            speech.KeyPhrases = aggregated;
         }
 
         public void HandleVoskResult(string message)
