@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using UnityEngine;
-using SimpleJSON;
 
 namespace RobotVoice
 {
@@ -437,7 +436,7 @@ namespace RobotVoice
                     if (array != null)
                     {
                         var words = new List<string>();
-                        foreach (var item in array)
+                        foreach (var item in array.Children)
                         {
                             var word = item["word"]?.Value;
                             if (!string.IsNullOrWhiteSpace(word))
