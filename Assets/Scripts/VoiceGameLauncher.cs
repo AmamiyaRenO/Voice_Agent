@@ -14,11 +14,11 @@ namespace RobotVoice
 
         [Header("Configuration")]
         [SerializeField] private TextAsset intentConfigJson;
-        [SerializeField] private string wakeWord = "嘿机器人";
+        [SerializeField] private string wakeWord = "hey robot";
         [SerializeField] private bool requireWakeWord = true;
         [SerializeField] private bool requireLaunchKeyword = false;
-        [SerializeField] private string[] launchKeywords = { "打开", "启动", "open", "play" };
-        [SerializeField] private string[] exitKeywords = { "退出", "回到大厅", "quit", "back to lobby" };
+        [SerializeField] private string[] launchKeywords = { "open", "play" };
+        [SerializeField] private string[] exitKeywords = { "quit", "back to lobby" };
         [SerializeField] private SynonymOverride[] synonymOverrides = Array.Empty<SynonymOverride>();
         [SerializeField] private float intentCooldownSeconds = 1.5f;
         [SerializeField] private bool logDebugMessages = true;
@@ -77,14 +77,14 @@ namespace RobotVoice
             {
                 config.LaunchKeywords = launchKeywords != null && launchKeywords.Length > 0
                     ? launchKeywords
-                    : new[] { "打开", "启动", "open", "play" };
+                    : new[] { "open", "play" };
             }
 
             if (config.ExitKeywords == null || config.ExitKeywords.Length == 0)
             {
                 config.ExitKeywords = exitKeywords != null && exitKeywords.Length > 0
                     ? exitKeywords
-                    : new[] { "退出", "回到大厅", "quit", "stop" };
+                    : new[] { "quit", "stop" };
             }
 
             if (config.SynonymOverrides == null || config.SynonymOverrides.Length == 0)
