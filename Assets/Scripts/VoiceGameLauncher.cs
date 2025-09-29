@@ -27,6 +27,7 @@ namespace RobotVoice
 
         private void Awake()
         {
+            ApplyFullscreenMode();
             runtimeConfig = BuildRuntimeConfig();
             ApplySpeechKeyPhrases();
         }
@@ -38,6 +39,18 @@ namespace RobotVoice
             ApplySpeechKeyPhrases();
         }
 #endif
+
+        private void ApplyFullscreenMode()
+        {
+            if (Application.isEditor)
+            {
+                return;
+            }
+
+            var resolution = Screen.currentResolution;
+            Screen.fullScreenMode = FullScreenMode.ExclusiveFullScreen;
+            Screen.SetResolution(resolution.width, resolution.height, true);
+        }
 
         private VoiceIntentConfig BuildRuntimeConfig()
         {
