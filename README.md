@@ -62,6 +62,17 @@ public class VoskExample : MonoBehaviour
 }
 ```
 
+## Python Voice Service
+
+The project now supports streaming microphone audio to an external Python
+service that runs [Faster-Whisper](https://github.com/guillaumekln/faster-whisper).
+Enable **Use Python Service** on the `VoskSpeechToText` component and set
+`PythonServiceUrl` to the `transcribe` endpoint exposed by the service
+(defaults to `http://127.0.0.1:8000/transcribe`). See
+[`python_voice_service/README.md`](python_voice_service/README.md) for
+setup instructions, including pointing the service at the downloaded
+model directory shown in the screenshots.
+
 ## Hello World Example
 
 The following example shows how to detect the word `"hello"` and print `"hello world"` to the console.

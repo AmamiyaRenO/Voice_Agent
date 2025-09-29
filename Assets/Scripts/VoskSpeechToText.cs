@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Ionic.Zip;
@@ -16,6 +17,19 @@ public class VoskSpeechToText : MonoBehaviour
 {
         [Tooltip("Location of the model, relative to the Streaming Assets folder.")]
         public string ModelPath = "vosk-model-small-ru-0.22.zip";
+
+        [Header("Python Speech Service")]
+        [Tooltip("If enabled, audio is sent to an external Python service that performs speech recognition using Faster-Whisper.")]
+        public bool UsePythonService;
+
+        [Tooltip("HTTP endpoint for the Python speech service transcribe API.")]
+        public string PythonServiceUrl = "http://127.0.0.1:8000/transcribe";
+
+        [Tooltip("Optional language hint passed to the Python speech service (e.g. 'zh').")]
+        public string PythonServiceLanguage = string.Empty;
+
+        [Tooltip("Beam size used by the Python speech service.")]
+        public int PythonServiceBeamSize = 5;
 
         [Tooltip("The source of the microphone input.")]
         public VoiceProcessor VoiceProcessor;
@@ -73,8 +87,17 @@ public class VoskSpeechToText : MonoBehaviour
 	//Thread safe queue of microphone data.
 	private readonly ConcurrentQueue<short[]> _threadedBufferQueue = new ConcurrentQueue<short[]>();
 
-	//Thread safe queue of resuts
-	private readonly ConcurrentQueue<string> _threadedResultQueue = new ConcurrentQueue<string>();
+        //Thread safe queue of resuts
+        private readonly ConcurrentQueue<string> _threadedResultQueue = new ConcurrentQueue<string>();
+
+        // Python speech service state
+        private bool _usePythonService;
+        private readonly object _pythonBufferLock = new object();
+        private readonly List<short> _pythonBuffer = new List<short>();
+        private bool _pythonSegmentActive;
+        private float _pythonSegmentStartTime;
+        private bool _pythonForceFlushRequested;
+        private bool _pythonRequestInFlight;
         void Awake()
         {
                 if (VoiceProcessor == null)
@@ -110,12 +133,12 @@ public class VoskSpeechToText : MonoBehaviour
 	/// <param name="modelPath">The path to the model folder relative to StreamingAssets. If the path has a .zip ending, it will be decompressed into the application data persistent folder.</param>
 	/// <param name="startMicrophone">"Should the microphone after vosk initializes?</param>
 	/// <param name="maxAlternatives">The maximum number of alternative phrases detected</param>
-	public void StartVoskStt(List<string> keyPhrases = null, string modelPath = default, bool startMicrophone = false, int maxAlternatives = 3)
-	{
-		if (_isInitializing)
-		{
-			Debug.LogError("Initializing in progress!");
-			return;
+        public void StartVoskStt(List<string> keyPhrases = null, string modelPath = default, bool startMicrophone = false, int maxAlternatives = 3)
+        {
+                if (_isInitializing)
+                {
+                        Debug.LogError("Initializing in progress!");
+                        return;
 		}
 		if (_didInit)
 		{
@@ -123,19 +146,49 @@ public class VoskSpeechToText : MonoBehaviour
 			return;
 		}
 
-		if (!string.IsNullOrEmpty(modelPath))
-		{
-			ModelPath = modelPath;
-		}
+                _usePythonService = UsePythonService;
 
-		if (keyPhrases != null)
+                if (!_usePythonService && !string.IsNullOrEmpty(modelPath))
+                {
+                        ModelPath = modelPath;
+                }
+
+                if (keyPhrases != null)
 		{
 			KeyPhrases = keyPhrases;
 		}
 
-		MaxAlternatives = maxAlternatives;
-		StartCoroutine(DoStartVoskStt(startMicrophone));
-	}
+                MaxAlternatives = maxAlternatives;
+
+                if (_usePythonService)
+                {
+                        StartCoroutine(StartPythonStt(startMicrophone));
+                }
+                else
+                {
+                        StartCoroutine(DoStartVoskStt(startMicrophone));
+                }
+        }
+
+        private IEnumerator StartPythonStt(bool startMicrophone)
+        {
+                _isInitializing = true;
+
+                yield return WaitForMicrophoneInput();
+
+                OnStatusUpdated?.Invoke("Initialising Python speech service");
+
+                VoiceProcessor.OnFrameCaptured += VoiceProcessorOnOnFrameCaptured;
+                VoiceProcessor.OnRecordingStop += VoiceProcessorOnOnRecordingStop;
+                VoiceProcessor.OnRecordingStart += VoiceProcessorOnRecordingStart;
+
+                _isInitializing = false;
+                _didInit = true;
+
+                OnStatusUpdated?.Invoke("Python speech service ready");
+
+                ToggleRecording();
+        }
 
 	//Decompress model, load settings, start Vosk and optionally start the microphone
 	private IEnumerator DoStartVoskStt(bool startMicrophone)
@@ -151,9 +204,10 @@ public class VoskSpeechToText : MonoBehaviour
 
 		yield return null;
 
-		OnStatusUpdated?.Invoke("Initialized");
-		VoiceProcessor.OnFrameCaptured += VoiceProcessorOnOnFrameCaptured;
-		VoiceProcessor.OnRecordingStop += VoiceProcessorOnOnRecordingStop;
+                OnStatusUpdated?.Invoke("Initialized");
+                VoiceProcessor.OnFrameCaptured += VoiceProcessorOnOnFrameCaptured;
+                VoiceProcessor.OnRecordingStop += VoiceProcessorOnOnRecordingStop;
+                VoiceProcessor.OnRecordingStart += VoiceProcessorOnRecordingStart;
 
 		if (startMicrophone)
 			VoiceProcessor.StartRecording();
@@ -266,52 +320,242 @@ public class VoskSpeechToText : MonoBehaviour
 	}
 
 	//Can be called from a script or a GUI button to start detection.
-	public void ToggleRecording()
-	{
-		Debug.Log("Toogle Recording");
-		if (!VoiceProcessor.IsRecording)
-		{
-			Debug.Log("Start Recording");
-			_running = true;
-			VoiceProcessor.StartRecording();
-    	                Task.Run(ThreadedWork).ConfigureAwait(false);
-		}
-		else
-		{
-			Debug.Log("Stop Recording");
-			_running = false;
-			VoiceProcessor.StopRecording();
-		}
-	}
+        public void ToggleRecording()
+        {
+                Debug.Log("Toogle Recording");
+                if (!VoiceProcessor.IsRecording)
+                {
+                        Debug.Log("Start Recording");
+                        _running = true;
+
+                        if (_usePythonService)
+                        {
+                                ClearPythonBuffer();
+                                var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
+                                var frameLength = VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512;
+                                VoiceProcessor.StartRecording(sampleRate, frameLength, true);
+                        }
+                        else
+                        {
+                                VoiceProcessor.StartRecording();
+                                Task.Run(ThreadedWork).ConfigureAwait(false);
+                        }
+                }
+                else
+                {
+                        Debug.Log("Stop Recording");
+                        _running = false;
+                        VoiceProcessor.StopRecording();
+                }
+        }
 
 	//Calls the On Phrase Recognized event on the Unity Thread
-	void Update()
-	{
-		if (_threadedResultQueue.TryDequeue(out string voiceResult))
-		{
-		    OnTranscriptionResult?.Invoke(voiceResult);
-		}
-	}
+        void Update()
+        {
+                if (_usePythonService && _pythonForceFlushRequested)
+                {
+                        _pythonForceFlushRequested = false;
+                        if (_running)
+                        {
+                                VoiceProcessor.StopRecording();
+                        }
+                }
+
+                if (_threadedResultQueue.TryDequeue(out string voiceResult))
+                {
+                    OnTranscriptionResult?.Invoke(voiceResult);
+                }
+        }
 
 	//Callback from the voice processor when new audio is detected
-	private void VoiceProcessorOnOnFrameCaptured(short[] samples)
-	{	
+        private void VoiceProcessorOnOnFrameCaptured(short[] samples)
+        {
+                if (_usePythonService)
+                {
+                        lock (_pythonBufferLock)
+                        {
+                                _pythonBuffer.AddRange(samples);
+                        }
+
+                        if (!_pythonSegmentActive)
+                        {
+                                _pythonSegmentActive = true;
+                                _pythonSegmentStartTime = Time.realtimeSinceStartup;
+                        }
+
+                        if (MaxRecordLength > 0 && _pythonSegmentActive)
+                        {
+                                var elapsed = Time.realtimeSinceStartup - _pythonSegmentStartTime;
+                                if (elapsed >= MaxRecordLength)
+                                {
+                                        _pythonForceFlushRequested = true;
+                                }
+                        }
+
+                        return;
+                }
+
                 _threadedBufferQueue.Enqueue(samples);
-	}
+        }
 
 	//Callback from the voice processor when recording stops
-	private void VoiceProcessorOnOnRecordingStop()
-	{
-                Debug.Log("Stopped");
-	}
+        private void VoiceProcessorOnRecordingStart()
+        {
+                if (_usePythonService)
+                {
+                        ClearPythonBuffer();
+                        _pythonSegmentActive = false;
+                        _pythonSegmentStartTime = 0f;
+                }
+        }
 
-	//Feeds the autio logic into the vosk recorgnizer
-	private async Task ThreadedWork()
-	{
-		voskRecognizerCreateMarker.Begin();
-		if (!_recognizerReady)
-		{
-			UpdateGrammar();
+        private void VoiceProcessorOnOnRecordingStop()
+        {
+                if (_usePythonService)
+                {
+                        StartCoroutine(HandlePythonRecordingStop(_running));
+                        return;
+                }
+
+                Debug.Log("Stopped");
+        }
+
+        private void ClearPythonBuffer()
+        {
+                lock (_pythonBufferLock)
+                {
+                        _pythonBuffer.Clear();
+                }
+
+                _pythonSegmentActive = false;
+                _pythonSegmentStartTime = 0f;
+        }
+
+        private IEnumerator HandlePythonRecordingStop(bool restartRecording)
+        {
+                short[] samples = null;
+
+                lock (_pythonBufferLock)
+                {
+                        if (_pythonBuffer.Count > 0)
+                        {
+                                samples = _pythonBuffer.ToArray();
+                                _pythonBuffer.Clear();
+                        }
+
+                        _pythonSegmentActive = false;
+                        _pythonSegmentStartTime = 0f;
+                }
+
+                if (samples != null && samples.Length > 0)
+                {
+                        yield return SendAudioToPython(samples);
+                }
+
+                if (restartRecording && _running)
+                {
+                        var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
+                        var frameLength = VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512;
+                        VoiceProcessor.StartRecording(sampleRate, frameLength, true);
+                }
+        }
+
+        private IEnumerator SendAudioToPython(short[] samples)
+        {
+                if (samples == null || samples.Length == 0)
+                {
+                        yield break;
+                }
+
+                while (_pythonRequestInFlight)
+                {
+                        yield return null;
+                }
+
+                _pythonRequestInFlight = true;
+
+                var payload = new byte[samples.Length * sizeof(short)];
+                Buffer.BlockCopy(samples, 0, payload, 0, payload.Length);
+
+                var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
+                var url = BuildPythonServiceUrl(sampleRate);
+                if (string.IsNullOrEmpty(url))
+                {
+                        Debug.LogError("Python speech service URL is not configured");
+                        _pythonRequestInFlight = false;
+                        yield break;
+                }
+
+                OnStatusUpdated?.Invoke("Sending audio to Python speech service...");
+
+                using (var request = new UnityWebRequest(url, UnityWebRequest.kHttpVerbPOST))
+                {
+                        request.uploadHandler = new UploadHandlerRaw(payload)
+                        {
+                                contentType = "application/octet-stream"
+                        };
+                        request.downloadHandler = new DownloadHandlerBuffer();
+
+                        yield return request.SendWebRequest();
+
+                        if (request.result == UnityWebRequest.Result.ConnectionError || request.result == UnityWebRequest.Result.ProtocolError)
+                        {
+                                var error = string.IsNullOrEmpty(request.error) ? request.result.ToString() : request.error;
+                                Debug.LogError($"Python speech service request failed: {error}");
+                                OnStatusUpdated?.Invoke($"Python speech service error: {error}");
+                        }
+                        else
+                        {
+                                var response = request.downloadHandler.text;
+                                if (!string.IsNullOrEmpty(response))
+                                {
+                                        OnStatusUpdated?.Invoke("Python speech service transcription ready");
+                                        _threadedResultQueue.Enqueue(response);
+                                }
+                                else
+                                {
+                                        OnStatusUpdated?.Invoke("Python speech service returned empty result");
+                                }
+                        }
+                }
+
+                _pythonRequestInFlight = false;
+        }
+
+        private string BuildPythonServiceUrl(int sampleRate)
+        {
+                if (string.IsNullOrWhiteSpace(PythonServiceUrl))
+                {
+                        return string.Empty;
+                }
+
+                var builder = new StringBuilder(PythonServiceUrl);
+                builder.Append(PythonServiceUrl.Contains("?") ? "&" : "?");
+                builder.Append("sample_rate=");
+                builder.Append(sampleRate);
+
+                if (!string.IsNullOrWhiteSpace(PythonServiceLanguage))
+                {
+                        builder.Append("&language=");
+                        builder.Append(UnityWebRequest.EscapeURL(PythonServiceLanguage.Trim()));
+                }
+
+                if (PythonServiceBeamSize > 0)
+                {
+                        builder.Append("&beam_size=");
+                        builder.Append(PythonServiceBeamSize);
+                }
+
+                return builder.ToString();
+        }
+
+        //Feeds the autio logic into the vosk recorgnizer
+        private async Task ThreadedWork()
+        {
+                voskRecognizerCreateMarker.Begin();
+                if (!_recognizerReady)
+                {
+                        UpdateGrammar();
 
 			//Only detect defined keywords if they are specified.
 			if (string.IsNullOrEmpty(_grammar))
