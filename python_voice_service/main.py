@@ -31,7 +31,7 @@ def _environment(key: str, default: str) -> str:
 
 @lru_cache(maxsize=1)
 def _load_model() -> WhisperModel:
-    model_path = _environment("WHISPER_MODEL_PATH", "./models/faster-whisper-large-v3")
+    model_path = "D:/unityproject/faster-whisper-large-v3"
     device = _environment("WHISPER_DEVICE", "cpu")
     compute_type = _environment("WHISPER_COMPUTE_TYPE", "int8")
 
@@ -137,7 +137,6 @@ async def transcribe(
         "result": _build_vosk_result(words),
         "language": info.language,
         "duration": info.duration,
-        "avg_logprob": info.avg_logprob,
         "language_probability": info.language_probability,
         "translation": translate,
     }
