@@ -80,3 +80,28 @@ python_voice_service/.venv/
 python_voice_service/__pycache__/
 python_voice_service/.pytest_cache/
 
+# NuGet for Unity generated assets
+/[Aa]ssets/NuGetEditor/
+/[Aa]ssets/NuGetEditor.meta
+/[Aa]ssets/NuGet.config
+/[Aa]ssets/NuGet.config.meta
+/[Aa]ssets/NuGet/
+/[Aa]ssets/NuGet.meta
+/[Aa]ssets/packages.config
+/[Aa]ssets/packages.config.meta
+/[Aa]ssets/packages.lock.json
+/[Aa]ssets/packages.lock.json.meta
+
+# NuGet package downloads
+/[Aa]ssets/Packages/
+/[Aa]ssets/Packages.meta
+/[Aa]ssets/Plugins/System.Speech.dll
+/[Aa]ssets/Plugins/System.Speech.dll.meta
+/[Aa]ssets/Plugins/manifest.json
+/[Aa]ssets/Plugins/manifest.json.meta
+
+# Downloaded speech models
+/[Aa]ssets/StreamingAssets/vosk*
+/[Aa]ssets/StreamingAssets/vosk*/*.zip
+/[Aa]ssets/StreamingAssets/vosk*/*.zip.meta
+
