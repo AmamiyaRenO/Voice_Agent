@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+using System.Speech.Synthesis;
+#endif
 using UnityEngine;
 
 namespace RobotVoice
@@ -25,6 +28,9 @@ namespace RobotVoice
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
         private readonly List<KeywordPhrase> keywordPhrases = new List<KeywordPhrase>();
+#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+        private SpeechSynthesizer speechSynthesizer;
+#endif
 
         private sealed class KeywordPhrase
         {
@@ -37,6 +43,16 @@ namespace RobotVoice
             ApplyFullscreenMode();
             runtimeConfig = BuildRuntimeConfig();
             ApplySpeechKeyPhrases();
+        }
+
+        private void Start()
+        {
+            InitializeSpeechSynthesizer();
+        }
+
+        private void OnDestroy()
+        {
+            DisposeSpeechSynthesizer();
         }
 
 #if UNITY_EDITOR
@@ -332,6 +348,7 @@ namespace RobotVoice
 
             lastIntentTime = Time.realtimeSinceStartup;
             _ = publisher.PublishLaunchIntentAsync(gameName, rawText);
+            SpeakLaunchResponse(gameName);
         }
 
         private void PublishExit(string rawText)
@@ -339,6 +356,98 @@ namespace RobotVoice
             lastIntentTime = Time.realtimeSinceStartup;
             _ = publisher.PublishExitIntentAsync(rawText);
         }
+
+#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+        private void InitializeSpeechSynthesizer()
+        {
+            if (speechSynthesizer != null)
+            {
+                return;
+            }
+
+            if (Application.platform != RuntimePlatform.WindowsPlayer &&
+                Application.platform != RuntimePlatform.WindowsEditor)
+            {
+                return;
+            }
+
+            try
+            {
+                speechSynthesizer = new SpeechSynthesizer();
+                speechSynthesizer.SetOutputToDefaultAudioDevice();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[RobotVoice] Failed to initialise Windows speech synthesizer: {ex.Message}");
+                speechSynthesizer = null;
+            }
+        }
+
+        private void DisposeSpeechSynthesizer()
+        {
+            if (speechSynthesizer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                speechSynthesizer.SpeakAsyncCancelAll();
+                speechSynthesizer.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[RobotVoice] Failed to dispose Windows speech synthesizer: {ex.Message}");
+            }
+            finally
+            {
+                speechSynthesizer = null;
+            }
+        }
+
+        private void SpeakLaunchResponse(string gameName)
+        {
+            if (speechSynthesizer == null)
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(gameName))
+            {
+                return;
+            }
+
+            var trimmedName = gameName.Trim();
+            if (trimmedName.Length == 0)
+            {
+                return;
+            }
+
+            var message = $"I'm opening {trimmedName}.";
+
+            try
+            {
+                speechSynthesizer.SpeakAsyncCancelAll();
+                speechSynthesizer.SpeakAsync(message);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[RobotVoice] Failed to speak launch response: {ex.Message}");
+            }
+        }
+#else
+        private void InitializeSpeechSynthesizer()
+        {
+        }
+
+        private void DisposeSpeechSynthesizer()
+        {
+        }
+
+        private void SpeakLaunchResponse(string gameName)
+        {
+        }
+#endif
 
         private void RebuildKeywordPhrases(List<string> phrases)
         {
