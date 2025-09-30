@@ -24,6 +24,13 @@ namespace RobotVoice
         [SerializeField] private SynonymOverride[] synonymOverrides = Array.Empty<SynonymOverride>();
         [SerializeField] private float intentCooldownSeconds = 1.5f;
         [SerializeField] private bool logDebugMessages = true;
+        [Header("Speech")]
+        [SerializeField] private string[] launchResponseTemplates =
+        {
+            "I'm opening {0}.",
+            "Launching {0} now.",
+            "Starting {0}."
+        };
 
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
@@ -412,18 +419,11 @@ namespace RobotVoice
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(gameName))
+            var message = BuildLaunchResponse(gameName);
+            if (string.IsNullOrWhiteSpace(message))
             {
                 return;
             }
-
-            var trimmedName = gameName.Trim();
-            if (trimmedName.Length == 0)
-            {
-                return;
-            }
-
-            var message = $"I'm opening {trimmedName}.";
 
             try
             {
@@ -448,6 +448,67 @@ namespace RobotVoice
         {
         }
 #endif
+
+        private string BuildLaunchResponse(string gameName)
+        {
+            if (string.IsNullOrWhiteSpace(gameName))
+            {
+                return string.Empty;
+            }
+
+            var trimmedName = gameName.Trim();
+            if (trimmedName.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            string selectedTemplate = null;
+            if (launchResponseTemplates != null && launchResponseTemplates.Length > 0)
+            {
+                var candidates = new List<string>();
+                for (int i = 0; i < launchResponseTemplates.Length; i++)
+                {
+                    var template = launchResponseTemplates[i];
+                    if (string.IsNullOrWhiteSpace(template))
+                    {
+                        continue;
+                    }
+
+                    var trimmedTemplate = template.Trim();
+                    if (trimmedTemplate.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    candidates.Add(trimmedTemplate);
+                }
+
+                if (candidates.Count > 0)
+                {
+                    var index = UnityEngine.Random.Range(0, candidates.Count);
+                    selectedTemplate = candidates[index];
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(selectedTemplate))
+            {
+                return $"I'm opening {trimmedName}.";
+            }
+
+            try
+            {
+                return string.Format(CultureInfo.InvariantCulture, selectedTemplate, trimmedName);
+            }
+            catch (FormatException ex)
+            {
+                if (logDebugMessages)
+                {
+                    Debug.LogWarning($"[RobotVoice] Launch response template '{selectedTemplate}' is invalid: {ex.Message}");
+                }
+
+                return $"I'm opening {trimmedName}.";
+            }
+        }
 
         private void RebuildKeywordPhrases(List<string> phrases)
         {
