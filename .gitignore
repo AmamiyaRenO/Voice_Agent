@@ -84,6 +84,13 @@ python_voice_service/.pytest_cache/
 /[Aa]ssets/NuGetEditor/
 /[Aa]ssets/NuGetEditor.meta
 /[Aa]ssets/NuGet.config
+/[Aa]ssets/NuGet.config.meta
+/[Aa]ssets/NuGet/
+/[Aa]ssets/NuGet.meta
+/[Aa]ssets/packages.config
+/[Aa]ssets/packages.config.meta
+/[Aa]ssets/packages.lock.json
+/[Aa]ssets/packages.lock.json.meta
 /[Aa]ssets/packages.config
 /[Aa]ssets/packages.lock.json
 
@@ -92,6 +99,8 @@ python_voice_service/.pytest_cache/
 /[Aa]ssets/Packages.meta
 /[Aa]ssets/Plugins/System.Speech.dll
 /[Aa]ssets/Plugins/System.Speech.dll.meta
+/[Aa]ssets/Plugins/manifest.json
+/[Aa]ssets/Plugins/manifest.json.meta
 
 # Downloaded speech models
 /[Aa]ssets/StreamingAssets/vosk*
