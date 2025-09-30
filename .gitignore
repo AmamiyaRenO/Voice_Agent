@@ -87,6 +87,7 @@ python_voice_service/.pytest_cache/
 /[Aa]ssets/NuGet.config.meta
 /[Aa]ssets/NuGet/
 /[Aa]ssets/NuGet.meta
+/[Aa]ssets/Plugins.meta
 /[Aa]ssets/packages.config
 /[Aa]ssets/packages.config.meta
 /[Aa]ssets/packages.lock.json
@@ -107,3 +108,5 @@ python_voice_service/.pytest_cache/
 /[Aa]ssets/StreamingAssets/vosk*/*.zip
 /[Aa]ssets/StreamingAssets/vosk*/*.zip.meta
 
+/[Pp]ackages/manifest.json
+/[Pp]ackages/packages-lock.json
