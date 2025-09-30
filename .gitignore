@@ -91,6 +91,8 @@ python_voice_service/.pytest_cache/
 /[Aa]ssets/packages.config.meta
 /[Aa]ssets/packages.lock.json
 /[Aa]ssets/packages.lock.json.meta
+/[Aa]ssets/packages.config
+/[Aa]ssets/packages.lock.json
 
 # NuGet package downloads
 /[Aa]ssets/Packages/
