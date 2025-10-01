@@ -73,6 +73,39 @@ Enable **Use Python Service** on the `VoskSpeechToText` component and set
 setup instructions, including pointing the service at the downloaded
 model directory shown in the screenshots.
 
+### One-command local stack
+
+If you frequently start the messaging hub, the orchestrator that
+bootstraps Mosquitto, and the Python voice service, run them together
+with:
+
+```bash
+python scripts/start_local_services.py --hub-cmd "<command to start your hub>"
+```
+
+Pass `--orchestrator-cmd "<command to start your orchestrator>"` (or set
+`VOICE_AGENT_ORCH_CMD`) to include the orchestrator alongside the hub
+and voice service. The helper keeps the processes alive, forwards
+`Ctrl+C` to them and automatically stops the remaining services if one
+of them exits. You can
+customise the launch behaviour with environment variables instead of
+command-line flags:
+
+* `VOICE_AGENT_HUB_CMD` – command that starts the messaging hub.
+* `VOICE_AGENT_HUB_CWD` – working directory for the hub command (defaults
+  to the repository root).
+* `VOICE_AGENT_VOICE_CMD` – command for the Python voice service (defaults
+  to `uvicorn main:app --host 0.0.0.0 --port 8000`).
+* `VOICE_AGENT_VOICE_CWD` – working directory for the voice service
+  command (defaults to `python_voice_service/`).
+* `VOICE_AGENT_ORCH_CMD` – command for the orchestrator that launches
+  Mosquitto (optional).
+* `VOICE_AGENT_ORCH_CWD` – working directory for the orchestrator
+  command (defaults to the current directory).
+
+Pass `--env-file path/to/.env` if you want to preload environment
+variables (such as model locations) before the services start.
+
 ## Hello World Example
 
 The following example shows how to detect the word `"hello"` and print `"hello world"` to the console.
