@@ -1,147 +1,125 @@
-# Vosk Unity Package
+# Voice Agent for Robot OPR
 
-Offline speech recognition using the [Vosk](https://github.com/alphacep/vosk-api) library.
+This repository contains the Unity client that powers the spoken interface
+for the [Robot_opr](https://github.com/AmamiyaRenO/Robot_opr) rehabilitation
+robot. It wraps the [Vosk](https://alphacephei.com/vosk/) offline speech
+recogniser, forwards recognised intents to the robot control stack over MQTT
+and can optionally delegate transcription to a Python service that runs the
+[Faster-Whisper](https://github.com/guillaumekln/faster-whisper) model. The
+Unity scenes included here were used to drive the coach-style voice assistant
+seen in the project demos.
+
+## Features
+
+* **Unity-first voice experience** – Prefab components (`VoskSpeechToText`,
+  `VoiceGameLauncher`, `VoiceGameWiring`) take care of microphone capture,
+  wake-word detection and intent routing.
+* **Built-in MQTT publisher** – When the `ROBOTVOICE_USE_MQTT` scripting
+  define is enabled, the agent publishes launch/exit messages to the
+  `robot/intent` topic using a lightweight client that ships with the project,
+  so no external DLLs are required.
+* **Python transcription fallback** – Stream microphone audio to the
+  `python_voice_service` FastAPI application if you prefer Faster-Whisper over
+  the bundled Vosk models.
+* **One-command local tooling** – `scripts/start_local_services.py` can boot
+  the MQTT hub, Python voice service and an optional orchestrator together.
+* **Robot_opr ready** – Intent payloads mirror the schema expected by the
+  Robot_opr orchestration layer, enabling voice controlled exercise launch and
+  shutdown without additional glue code.
+
+## Repository layout
+
+```
+Assets/                # Unity scenes, prefabs and C# scripts for the voice agent
+python_voice_service/  # FastAPI wrapper around Faster-Whisper
+scripts/               # Local development helpers (MQTT/voice orchestrator launcher)
+ProjectSettings/       # Unity project configuration
+```
 
 ## Requirements
 
-- **Unity** `2020.3.48f1` or newer
-- Microphone access on the target platform
+* **Unity** 2020.3.48f1 or newer.
+* Microphone access on the target platform.
+* (Optional) Python 3.10+ if you want to use the Faster-Whisper service.
+* A running MQTT broker (Robot_opr ships a message hub suitable for local
+  testing).
 
-The project contains third‑party libraries inside the `Assets/ThirdParty` folder:
+## Getting started
 
-- **Ionic.Zip** – used to decompress model archives
-- **SimpleJSON** for JSON parsing
-- **Vosk** native libraries for Windows, macOS and Android
+1. **Clone the projects**
+   ```bash
+   git clone https://github.com/AmamiyaRenO/Robot_opr.git
+   git clone https://github.com/AmamiyaRenO/Voice_Agent.git
+   ```
+   Start the Robot_opr messaging hub according to its documentation – the
+   Unity agent will connect to the same broker.
 
-MQTT intent publishing (`ROBOTVOICE_USE_MQTT`) now ships with a first‑party client implementation, so
-no external DLLs are required for connecting to a broker, publishing intents with QoS 0/1, keeping
-the session alive or performing simple TLS handshakes. Simply enable the scripting define and
-configure the broker/TLS fields in `MqttIntentPublisher` to start sending intents.
+2. **Open the Unity project**
+   * Launch Unity Hub and add the `Voice_Agent` folder as a project.
+   * Load the provided scene and locate the `VoskSpeechToText` component.
+   * Place a zipped Vosk model inside `Assets/StreamingAssets/` and set the
+     `ModelPath` field to its filename (the archive will be extracted on first
+     run).
+   * If you plan to publish intents, enable the `ROBOTVOICE_USE_MQTT` scripting
+     define (Project Settings → Player → Scripting Define Symbols).
 
-If your project requires more advanced MQTT features (subscriptions, managed clients, WebSockets,
-etc.) you can still drop the official [MQTTnet](https://github.com/dotnet/MQTTnet) assemblies into
-`Assets/ThirdParty/Plugins/MQTTnet/` and update the publisher to use them instead of the built‑in
-client.
+3. **Configure the MQTT publisher**
+   * Add the `MqttIntentPublisher` component to the same GameObject as the
+     `VoiceGameLauncher` or assign it through the inspector.
+   * Point the `Host`, `Port` and credentials fields at the Robot_opr message
+     hub. The default topic (`robot/intent`) and payload schema matches the
+     Robot_opr subscriber expectations.
 
-No additional packages are required beyond the dependencies included in this repository unless you
-choose to replace the bundled MQTT client with an alternative implementation.
+4. **(Optional) Run the Python voice service**
+   ```bash
+   cd Voice_Agent/python_voice_service
+   python -m venv .venv
+   source .venv/bin/activate  # On Windows use .venv\Scripts\activate
+   pip install -r requirements.txt
+   export WHISPER_MODEL_PATH="/path/to/faster-whisper-large-v3"
+   uvicorn main:app --host 0.0.0.0 --port 8000
+   ```
+   Toggle **Use Python Service** on the `VoskSpeechToText` component and point
+   `PythonServiceUrl` to `http://127.0.0.1:8000/transcribe`.
 
-## Importing
+5. **Launch the full local stack (optional)**
+   Use the helper script if you frequently start the hub and voice model
+   together:
+   ```bash
+   python scripts/start_local_services.py \
+       --hub-cmd "<command to start Robot_opr hub>" \
+       --orchestrator-cmd "<command to start Robot_opr orchestrator>"
+   ```
+   The script watches the processes, forwards Ctrl+C and stops the remaining
+   services if one exits. You can also supply `--env-file` to preload
+   environment variables.
 
-Clone this repository or download it as a ZIP and open it with Unity. You can also copy the `Assets` folder into an existing project if you wish to integrate the scripts and plugins manually.
+## Working with Robot_opr
 
-After opening the project Unity will import the native plugins for your platform automatically.
+When the Unity client detects a wake word ("hey robot" by default) followed by
+an exercise command, `VoiceGameLauncher` publishes a JSON payload describing the
+request. The Robot_opr hub consumes the `LAUNCH_GAME` and `BACK_HOME` intent
+messages to start or exit the corresponding rehabilitation experience. You can
+customise wake words, synonyms and keyword lists through the inspector or by
+editing the JSON configuration asset assigned to the launcher component.
 
-## ModelPath
+For richer interactions (e.g. free-form questions for the virtual coach) enable
+responses via the `/respond` endpoint exposed by the Python voice service. The
+Robot_opr text-to-speech or speaker pipeline can read the generated replies
+back to the patient, keeping the voice-first flow inside a single MQTT/
+HTTP-based loop.
 
-`VoskSpeechToText` expects a model archive inside the **StreamingAssets** folder. The `ModelPath` field contains the relative path (e.g. `vosk-model-small-en-us-0.15.zip`). On the first run the archive is extracted to `Application.persistentDataPath`.
+## Troubleshooting
 
-You can assign a different model by changing `ModelPath` in the inspector or through script before calling `StartVoskStt`.
-
-## Usage
-
-1. Add the **VoskSpeechToText** component to a GameObject in your scene.
-2. Place a Vosk model archive into `Assets/StreamingAssets/` and assign its filename to `ModelPath`.
-3. A `VoiceProcessor` component is required for microphone input. If one isn't present on the same GameObject, `VoskSpeechToText` adds it automatically.
-4. Call `StartVoskStt` (optionally with `startMicrophone: true`) to initialise the recogniser.
-5. Subscribe to `OnTranscriptionResult` to receive the recognised text.
-
-```csharp
-using UnityEngine;
-
-public class VoskExample : MonoBehaviour
-{
-    public VoskSpeechToText speech;
-
-    void Start()
-    {
-        speech.ModelPath = "vosk-model-small-en-us-0.15.zip"; // relative to StreamingAssets
-        speech.OnTranscriptionResult += result => Debug.Log(result);
-        speech.StartVoskStt(startMicrophone: true);
-    }
-}
-```
-
-## Python Voice Service
-
-The project now supports streaming microphone audio to an external Python
-service that runs [Faster-Whisper](https://github.com/guillaumekln/faster-whisper).
-Enable **Use Python Service** on the `VoskSpeechToText` component and set
-`PythonServiceUrl` to the `transcribe` endpoint exposed by the service
-(defaults to `http://127.0.0.1:8000/transcribe`). See
-[`python_voice_service/README.md`](python_voice_service/README.md) for
-setup instructions, including pointing the service at the downloaded
-model directory shown in the screenshots.
-
-### One-command local stack
-
-If you frequently start the messaging hub, the orchestrator that
-bootstraps Mosquitto, and the Python voice service, run them together
-with:
-
-```bash
-python scripts/start_local_services.py --hub-cmd "<command to start your hub>"
-```
-
-Pass `--orchestrator-cmd "<command to start your orchestrator>"` (or set
-`VOICE_AGENT_ORCH_CMD`) to include the orchestrator alongside the hub
-and voice service. The helper keeps the processes alive, forwards
-`Ctrl+C` to them and automatically stops the remaining services if one
-of them exits. You can
-customise the launch behaviour with environment variables instead of
-command-line flags:
-
-* `VOICE_AGENT_HUB_CMD` – command that starts the messaging hub.
-* `VOICE_AGENT_HUB_CWD` – working directory for the hub command (defaults
-  to the repository root).
-* `VOICE_AGENT_VOICE_CMD` – command for the Python voice service (defaults
-  to `uvicorn main:app --host 0.0.0.0 --port 8000`).
-* `VOICE_AGENT_VOICE_CWD` – working directory for the voice service
-  command (defaults to `python_voice_service/`).
-* `VOICE_AGENT_ORCH_CMD` – command for the orchestrator that launches
-  Mosquitto (optional).
-* `VOICE_AGENT_ORCH_CWD` – working directory for the orchestrator
-  command (defaults to the current directory).
-
-Pass `--env-file path/to/.env` if you want to preload environment
-variables (such as model locations) before the services start.
-
-## Hello World Example
-
-The following example shows how to detect the word `"hello"` and print `"hello world"` to the console.
-
-```csharp
-using UnityEngine;
-
-public class HelloWorldExample : MonoBehaviour
-{
-    public VoskSpeechToText speech;
-
-    void Start()
-    {
-        speech.OnTranscriptionResult += OnResult;
-        speech.StartVoskStt(startMicrophone: true);
-    }
-
-    void OnResult(string json)
-    {
-        var result = new RecognitionResult(json);
-        foreach (var phrase in result.Phrases)
-        {
-            if (phrase.Text.ToLower().Contains("hello"))
-            {
-                Debug.Log("hello world");
-                break;
-            }
-        }
-    }
-}
-```
-
-Attach this component alongside `VoskSpeechToText`. When you say `"hello"` the console will output `"hello world"`.
-
-For more information on models and Vosk itself see the [Vosk documentation](https://github.com/alphacep/vosk-api).
+* **No speech detected** – Confirm the microphone permissions are granted and
+  that `VoiceGameWiring` is attached so transcription results reach the
+  launcher.
+* **MQTT not connecting** – Ensure the broker address matches the Robot_opr hub
+  and that any TLS or credential settings line up with your deployment.
+* **Python service 404** – Verify the FastAPI app is running and the
+  `PythonServiceUrl` includes `/transcribe`.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+This project is released under the MIT License. See [LICENSE](LICENSE) for
+full terms.
