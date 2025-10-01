@@ -411,10 +411,46 @@ namespace RobotVoice
                 return;
             }
 
+            var originalCulture = CultureInfo.CurrentCulture;
+            var originalUiCulture = CultureInfo.CurrentUICulture;
+            var originalDefaultCulture = CultureInfo.DefaultThreadCurrentCulture;
+            var originalDefaultUiCulture = CultureInfo.DefaultThreadCurrentUICulture;
+
             try
             {
-                speechSynthesizer = new SpeechSynthesizer();
-                speechSynthesizer.SetOutputToDefaultAudioDevice();
+                try
+                {
+                    CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+                    CultureInfo.CurrentUICulture = CultureInfo.InvariantCulture;
+                    CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
+                    CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.InvariantCulture;
+
+                    speechSynthesizer = new SpeechSynthesizer();
+                    speechSynthesizer.SetOutputToDefaultAudioDevice();
+                }
+                finally
+                {
+                    if (originalDefaultCulture != null)
+                    {
+                        CultureInfo.DefaultThreadCurrentCulture = originalDefaultCulture;
+                    }
+                    else
+                    {
+                        CultureInfo.DefaultThreadCurrentCulture = null;
+                    }
+
+                    if (originalDefaultUiCulture != null)
+                    {
+                        CultureInfo.DefaultThreadCurrentUICulture = originalDefaultUiCulture;
+                    }
+                    else
+                    {
+                        CultureInfo.DefaultThreadCurrentUICulture = null;
+                    }
+
+                    CultureInfo.CurrentCulture = originalCulture;
+                    CultureInfo.CurrentUICulture = originalUiCulture;
+                }
             }
             catch (Exception ex)
             {
