@@ -76,4 +76,7 @@ curl -X POST "http://127.0.0.1:8000/respond" \
 ```
 
 The response contains the generated `text`, ready to be spoken by the
-Unity client.
+Unity client. The `VoiceGameLauncher` script forwards both launch/exit
+intents and general wake-word commands to `/respond`, so the coach can
+answer free-form questions alongside the existing keyword workflows.
+

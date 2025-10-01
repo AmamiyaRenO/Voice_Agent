@@ -1,11 +1,12 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Text;
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
 using System.Speech.Synthesis;
 #endif
 using UnityEngine;
+using UnityEngine.Networking;
 
 namespace RobotVoice
 {
@@ -24,20 +25,23 @@ namespace RobotVoice
         [SerializeField] private SynonymOverride[] synonymOverrides = Array.Empty<SynonymOverride>();
         [SerializeField] private float intentCooldownSeconds = 1.5f;
         [SerializeField] private bool logDebugMessages = true;
-        [Header("Speech")]
-        [SerializeField] private string[] launchResponseTemplates =
-        {
-            "I'm opening {0}.",
-            "Launching {0} now.",
-            "Starting {0}."
-        };
+        [Header("Coach Agent")]
+        [SerializeField] private string coachRespondUrl = "http://127.0.0.1:8000/respond";
+        [SerializeField] private float coachResponseTimeoutSeconds = 10f;
 
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
         private readonly List<KeywordPhrase> keywordPhrases = new List<KeywordPhrase>();
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
         private SpeechSynthesizer speechSynthesizer;
+        private Coroutine coachSpeechCoroutine;
 #endif
+
+        [Serializable]
+        private struct CoachRespondPayload
+        {
+            public string text;
+        }
 
         private sealed class KeywordPhrase
         {
@@ -59,6 +63,13 @@ namespace RobotVoice
 
         private void OnDestroy()
         {
+#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+            if (coachSpeechCoroutine != null)
+            {
+                StopCoroutine(coachSpeechCoroutine);
+                coachSpeechCoroutine = null;
+            }
+#endif
             DisposeSpeechSynthesizer();
         }
 
@@ -202,32 +213,34 @@ namespace RobotVoice
             }
 
             var masked = FilterTranscript(message, out var rawRecognisedText);
-            if (string.IsNullOrWhiteSpace(masked))
+            var hasKeywordMatch = !string.IsNullOrWhiteSpace(masked) && masked != "*";
+
+            if (string.IsNullOrWhiteSpace(masked) && string.IsNullOrWhiteSpace(rawRecognisedText))
             {
                 return;
             }
 
             if (logDebugMessages)
             {
-                Debug.Log($"[RobotVoice] Recognised: {masked}");
+                var debugText = hasKeywordMatch ? masked : rawRecognisedText;
+                if (!string.IsNullOrWhiteSpace(debugText))
+                {
+                    Debug.Log($"[RobotVoice] Recognised: {debugText.Trim()}");
+                }
             }
 
-            if (masked == "*")
-            {
-                return;
-            }
-
-            var recognised = RemoveMaskPlaceholders(masked);
-            if (string.IsNullOrWhiteSpace(recognised))
-            {
-                return;
-            }
+            var recognised = hasKeywordMatch ? RemoveMaskPlaceholders(masked) : string.Empty;
 
             var rawRecognised = string.IsNullOrWhiteSpace(rawRecognisedText)
-                ? recognised
+                ? string.Empty
                 : rawRecognisedText.Trim();
 
             recognised = recognised.Trim();
+
+            if (string.IsNullOrWhiteSpace(rawRecognised) && !string.IsNullOrWhiteSpace(recognised))
+            {
+                rawRecognised = recognised;
+            }
             if (IsOnCooldown())
             {
                 if (logDebugMessages)
@@ -237,25 +250,43 @@ namespace RobotVoice
                 return;
             }
 
-            var processed = ApplyWakeWord(recognised);
+            var wakeWordSource = hasKeywordMatch ? recognised : rawRecognised;
+            if (string.IsNullOrWhiteSpace(wakeWordSource))
+            {
+                wakeWordSource = recognised;
+            }
+
+            var processed = ApplyWakeWord(wakeWordSource);
             if (processed == null)
             {
                 return;
             }
 
-            if (IsExitIntent(processed))
+            if (hasKeywordMatch)
             {
-                PublishExit(rawRecognised);
-                return;
+                if (IsExitIntent(processed))
+                {
+                    PublishExit(rawRecognised);
+                    return;
+                }
+
+                if (TryExtractGameName(processed, out var gameName))
+                {
+                    PublishLaunch(gameName, rawRecognised);
+                    return;
+                }
+
+                if (!requireLaunchKeyword && !string.IsNullOrWhiteSpace(processed))
+                {
+                    PublishLaunch(runtimeConfig.ResolveGameName(processed), rawRecognised);
+                    return;
+                }
             }
 
-            if (TryExtractGameName(processed, out var gameName))
+            var textForCoach = string.IsNullOrWhiteSpace(processed) ? rawRecognised : processed;
+            if (!string.IsNullOrWhiteSpace(textForCoach))
             {
-                PublishLaunch(gameName, rawRecognised);
-            }
-            else if (!requireLaunchKeyword && !string.IsNullOrWhiteSpace(processed))
-            {
-                PublishLaunch(runtimeConfig.ResolveGameName(processed), rawRecognised);
+                RequestCoachSpeech(textForCoach, string.Empty);
             }
         }
 
@@ -355,13 +386,14 @@ namespace RobotVoice
 
             lastIntentTime = Time.realtimeSinceStartup;
             _ = publisher.PublishLaunchIntentAsync(gameName, rawText);
-            SpeakLaunchResponse(gameName);
+            RequestCoachSpeech(rawText, gameName);
         }
 
         private void PublishExit(string rawText)
         {
             lastIntentTime = Time.realtimeSinceStartup;
             _ = publisher.PublishExitIntentAsync(rawText);
+            RequestCoachSpeech(rawText, string.Empty);
         }
 
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
@@ -412,14 +444,13 @@ namespace RobotVoice
             }
         }
 
-        private void SpeakLaunchResponse(string gameName)
+        private void SpeakCoachResponse(string message)
         {
             if (speechSynthesizer == null)
             {
                 return;
             }
 
-            var message = BuildLaunchResponse(gameName);
             if (string.IsNullOrWhiteSpace(message))
             {
                 return;
@@ -435,6 +466,118 @@ namespace RobotVoice
                 Debug.LogWarning($"[RobotVoice] Failed to speak launch response: {ex.Message}");
             }
         }
+
+        private void RequestCoachSpeech(string recognisedText, string fallbackGameName)
+        {
+            if (speechSynthesizer == null)
+            {
+                return;
+            }
+
+            var trimmedRecognised = string.IsNullOrWhiteSpace(recognisedText)
+                ? string.Empty
+                : recognisedText.Trim();
+
+            if (string.IsNullOrWhiteSpace(trimmedRecognised))
+            {
+                trimmedRecognised = string.IsNullOrWhiteSpace(fallbackGameName)
+                    ? string.Empty
+                    : fallbackGameName.Trim();
+            }
+
+            if (string.IsNullOrWhiteSpace(trimmedRecognised))
+            {
+                return;
+            }
+
+            if (coachSpeechCoroutine != null)
+            {
+                StopCoroutine(coachSpeechCoroutine);
+                coachSpeechCoroutine = null;
+            }
+
+            coachSpeechCoroutine = StartCoroutine(GenerateAndSpeakCoachReply(trimmedRecognised));
+        }
+
+        private IEnumerator GenerateAndSpeakCoachReply(string recognisedText)
+        {
+            try
+            {
+                var targetUrl = string.IsNullOrWhiteSpace(coachRespondUrl)
+                    ? string.Empty
+                    : coachRespondUrl.Trim();
+
+                if (string.IsNullOrWhiteSpace(targetUrl))
+                {
+                    yield break;
+                }
+
+                var payload = new CoachRespondPayload
+                {
+                    text = recognisedText
+                };
+
+                var json = JsonUtility.ToJson(payload);
+
+                using (var request = new UnityWebRequest(targetUrl, UnityWebRequest.kHttpVerbPOST))
+                {
+                    var bodyRaw = Encoding.UTF8.GetBytes(json);
+                    request.uploadHandler = new UploadHandlerRaw(bodyRaw);
+                    request.downloadHandler = new DownloadHandlerBuffer();
+                    request.SetRequestHeader("Content-Type", "application/json");
+                    request.timeout = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(1f, coachResponseTimeoutSeconds)), 1, 600);
+
+                    yield return request.SendWebRequest();
+
+                    if (request.result == UnityWebRequest.Result.Success)
+                    {
+                        var reply = ExtractCoachReply(request.downloadHandler?.text);
+                        if (!string.IsNullOrWhiteSpace(reply))
+                        {
+                            SpeakCoachResponse(reply.Trim());
+                        }
+                        else if (logDebugMessages)
+                        {
+                            Debug.LogWarning("[RobotVoice] Coach reply was empty");
+                        }
+                    }
+                    else if (logDebugMessages)
+                    {
+                        var error = string.IsNullOrWhiteSpace(request.error)
+                            ? $"HTTP {(int)request.responseCode}"
+                            : request.error;
+                        Debug.LogWarning($"[RobotVoice] Failed to fetch coach reply: {error}");
+                    }
+                }
+            }
+            finally
+            {
+                coachSpeechCoroutine = null;
+            }
+        }
+
+        private string ExtractCoachReply(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                var node = JSONNode.Parse(json);
+                return node?["text"]?.Value ?? string.Empty;
+            }
+            catch (Exception ex)
+            {
+                if (logDebugMessages)
+                {
+                    Debug.LogWarning($"[RobotVoice] Failed to parse coach reply: {ex.Message}");
+                }
+            }
+
+            return string.Empty;
+        }
 #else
         private void InitializeSpeechSynthesizer()
         {
@@ -444,71 +587,13 @@ namespace RobotVoice
         {
         }
 
-        private void SpeakLaunchResponse(string gameName)
+#endif
+
+#if !UNITY_STANDALONE_WIN && !UNITY_EDITOR_WIN
+        private void RequestCoachSpeech(string recognisedText, string fallbackGameName)
         {
         }
 #endif
-
-        private string BuildLaunchResponse(string gameName)
-        {
-            if (string.IsNullOrWhiteSpace(gameName))
-            {
-                return string.Empty;
-            }
-
-            var trimmedName = gameName.Trim();
-            if (trimmedName.Length == 0)
-            {
-                return string.Empty;
-            }
-
-            string selectedTemplate = null;
-            if (launchResponseTemplates != null && launchResponseTemplates.Length > 0)
-            {
-                var candidates = new List<string>();
-                for (int i = 0; i < launchResponseTemplates.Length; i++)
-                {
-                    var template = launchResponseTemplates[i];
-                    if (string.IsNullOrWhiteSpace(template))
-                    {
-                        continue;
-                    }
-
-                    var trimmedTemplate = template.Trim();
-                    if (trimmedTemplate.Length == 0)
-                    {
-                        continue;
-                    }
-
-                    candidates.Add(trimmedTemplate);
-                }
-
-                if (candidates.Count > 0)
-                {
-                    var index = UnityEngine.Random.Range(0, candidates.Count);
-                    selectedTemplate = candidates[index];
-                }
-            }
-
-            if (string.IsNullOrWhiteSpace(selectedTemplate))
-            {
-                return $"I'm opening {trimmedName}.";
-            }
-
-            try
-            {
-                return string.Format(CultureInfo.InvariantCulture, selectedTemplate, trimmedName);
-            }
-            catch (FormatException ex)
-            {
-                if (logDebugMessages)
-                {
-                    Debug.LogWarning($"[RobotVoice] Launch response template '{selectedTemplate}' is invalid: {ex.Message}");
-                }
-
-                return $"I'm opening {trimmedName}.";
-            }
-        }
 
         private void RebuildKeywordPhrases(List<string> phrases)
         {
