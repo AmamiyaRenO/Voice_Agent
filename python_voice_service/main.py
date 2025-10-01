@@ -67,7 +67,7 @@ def _environment_int(key: str, default: int) -> int:
 
 @lru_cache(maxsize=1)
 def _load_model() -> WhisperModel:
-    model_path = _environment("WHISPER_MODEL_PATH", "small.en")
+    model_path = _environment("WHISPER_MODEL_PATH", "medium.en")
     device = _environment("WHISPER_DEVICE", "cpu").lower()
 
     if device == "cuda":
