@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 APP_TITLE = "Coach Voice Agent - Python Voice Service"
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-DEFAULT_OLLAMA_MODEL = "llama3.1:8b-instruct"
+DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
 DEFAULT_SYSTEM_PROMPT = (
     "You are the Coach Voice Agent inside a rehabilitation and exercise game system.\n"
     "Your role is to:\n"

@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Text;
+using System.Globalization;
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
 using System.Speech.Synthesis;
 #endif
@@ -469,11 +470,6 @@ namespace RobotVoice
 
         private void RequestCoachSpeech(string recognisedText, string fallbackGameName)
         {
-            if (speechSynthesizer == null)
-            {
-                return;
-            }
-
             var trimmedRecognised = string.IsNullOrWhiteSpace(recognisedText)
                 ? string.Empty
                 : recognisedText.Trim();
@@ -534,7 +530,15 @@ namespace RobotVoice
                         var reply = ExtractCoachReply(request.downloadHandler?.text);
                         if (!string.IsNullOrWhiteSpace(reply))
                         {
-                            SpeakCoachResponse(reply.Trim());
+                            var finalReply = reply.Trim();
+                            if (speechSynthesizer != null)
+                            {
+                                SpeakCoachResponse(finalReply);
+                            }
+                            else
+                            {
+                                Debug.Log($"[RobotVoice] Coach: {finalReply}");
+                            }
                         }
                         else if (logDebugMessages)
                         {
