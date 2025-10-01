@@ -14,12 +14,28 @@ from functools import lru_cache
 from typing import Iterable, List, Optional
 
 import numpy as np
+import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
+from pydantic import BaseModel, Field
 
 APP_TITLE = "Coach Voice Agent - Python Voice Service"
 DEFAULT_SAMPLE_RATE = 16000
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_MODEL = "llama3.1:8b-instruct"
+DEFAULT_SYSTEM_PROMPT = (
+    "You are the Coach Voice Agent inside a rehabilitation and exercise game system.\n"
+    "Your role is to:\n"
+    "- Greet the user politely when they start interacting.\n"
+    "- Provide short, clear spoken feedback after the user finishes an exercise or command.\n"
+    "- Encourage the user with motivational phrases (\"Great job!\", \"Keep going!\", \"You are improving!\").\n"
+    "- Confirm user intents from speech recognition (e.g., start game, stop game, switch activity).\n"
+    "- Answer simple questions from the user about the game or their progress.\n"
+    "- Keep responses short (1–2 sentences) so they sound natural when spoken.\n"
+    "- Use a friendly, supportive tone, like a personal trainer or companion.\n"
+    "- If the user asks something outside your knowledge, politely say you don’t know and redirect them back to the exercise context."
+)
 
 app = FastAPI(title=APP_TITLE)
 
@@ -27,6 +43,26 @@ app = FastAPI(title=APP_TITLE)
 def _environment(key: str, default: str) -> str:
     value = os.getenv(key)
     return value.strip() if value is not None else default
+
+
+def _environment_float(key: str, default: float) -> float:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _environment_int(key: str, default: int) -> int:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 @lru_cache(maxsize=1)
@@ -50,6 +86,67 @@ def _load_model() -> WhisperModel:
         compute_type=compute_type,
         cpu_threads=cpu_threads,
     )
+
+
+class RespondRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="User transcript to send to the coach agent")
+
+
+class RespondResponse(BaseModel):
+    text: str
+
+
+class OllamaError(RuntimeError):
+    pass
+
+
+def _ollama_base_url() -> str:
+    return _environment("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL).rstrip("/")
+
+
+def _ollama_model() -> str:
+    return _environment("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+
+
+def _ollama_system_prompt() -> str:
+    return _environment("OLLAMA_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
+
+
+async def _generate_coach_reply(user_text: str) -> str:
+    payload = {
+        "model": _ollama_model(),
+        "system": _ollama_system_prompt(),
+        "prompt": f"User: {user_text}\nCoach:",
+        "stream": False,
+        "options": {
+            "temperature": _environment_float("OLLAMA_TEMPERATURE", 0.6),
+            "top_p": _environment_float("OLLAMA_TOP_P", 0.9),
+            "top_k": _environment_int("OLLAMA_TOP_K", 40),
+            "num_predict": _environment_int("OLLAMA_MAX_TOKENS", 128),
+            "repeat_penalty": _environment_float("OLLAMA_REPEAT_PENALTY", 1.1),
+        },
+    }
+
+    url = f"{_ollama_base_url()}/api/generate"
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            response = await client.post(url, json=payload)
+    except httpx.HTTPError as exc:
+        raise OllamaError(f"Failed to contact Ollama at {url}: {exc}") from exc
+
+    if response.status_code != 200:
+        raise OllamaError(
+            f"Ollama returned status {response.status_code}: {response.text.strip()}"
+        )
+
+    data = response.json()
+    reply_text = (data.get("response") or "").strip()
+
+    if not reply_text:
+        raise OllamaError("Ollama response was empty")
+
+    return reply_text
 
 
 @app.on_event("startup")
@@ -148,6 +245,20 @@ async def transcribe(
     }
 
     return JSONResponse(response)
+
+
+@app.post("/respond", response_model=RespondResponse)
+async def respond(payload: RespondRequest) -> RespondResponse:
+    user_text = payload.text.strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="Empty text payload")
+
+    try:
+        reply = await _generate_coach_reply(user_text)
+    except OllamaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return RespondResponse(text=reply)
 
 
 if __name__ == "__main__":
