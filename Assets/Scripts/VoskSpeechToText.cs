@@ -98,6 +98,10 @@ public class VoskSpeechToText : MonoBehaviour
         private float _pythonSegmentStartTime;
         private bool _pythonForceFlushRequested;
         private bool _pythonRequestInFlight;
+        private float _defaultMaxRecordLength;
+        private bool _defaultMaxRecordLengthCaptured;
+        private bool _wakeWordOverrideActive;
+        private bool _wakeWordPrimingStopPending;
         void Awake()
         {
                 if (VoiceProcessor == null)
@@ -107,6 +111,12 @@ public class VoskSpeechToText : MonoBehaviour
                         {
                                 VoiceProcessor = gameObject.AddComponent<VoiceProcessor>();
                         }
+                }
+
+                if (!_defaultMaxRecordLengthCaptured)
+                {
+                        _defaultMaxRecordLength = MaxRecordLength;
+                        _defaultMaxRecordLengthCaptured = true;
                 }
         }
 
@@ -420,6 +430,68 @@ public class VoskSpeechToText : MonoBehaviour
                 Debug.Log("Stopped");
         }
 
+        public void StartWakeWordWindow(float durationSeconds)
+        {
+                if (durationSeconds <= 0f)
+                {
+                        return;
+                }
+
+                if (!_defaultMaxRecordLengthCaptured)
+                {
+                        _defaultMaxRecordLength = MaxRecordLength;
+                        _defaultMaxRecordLengthCaptured = true;
+                }
+
+                var clamped = Mathf.Max(0.1f, durationSeconds);
+                MaxRecordLength = clamped;
+
+                if (_usePythonService)
+                {
+                        _running = true;
+                        _wakeWordOverrideActive = true;
+                        _wakeWordPrimingStopPending = VoiceProcessor != null && VoiceProcessor.IsRecording;
+
+                        if (VoiceProcessor == null)
+                        {
+                                return;
+                        }
+
+                        if (!VoiceProcessor.IsRecording)
+                        {
+                                ClearPythonBuffer();
+                                var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
+                                var frameLength = VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512;
+                                VoiceProcessor.StartRecording(sampleRate, frameLength, true);
+                        }
+                        else
+                        {
+                                _pythonForceFlushRequested = true;
+                        }
+
+                        return;
+                }
+
+                if (VoiceProcessor == null)
+                {
+                        return;
+                }
+
+                if (!_running)
+                {
+                        _running = true;
+                        VoiceProcessor.StartRecording();
+                        Task.Run(ThreadedWork).ConfigureAwait(false);
+                }
+                else if (!VoiceProcessor.IsRecording)
+                {
+                        VoiceProcessor.StartRecording();
+                }
+
+                _wakeWordOverrideActive = false;
+                _wakeWordPrimingStopPending = false;
+        }
+
         private void ClearPythonBuffer()
         {
                 lock (_pythonBufferLock)
@@ -450,6 +522,23 @@ public class VoskSpeechToText : MonoBehaviour
                 if (samples != null && samples.Length > 0)
                 {
                         yield return SendAudioToPython(samples);
+                }
+
+                if (_wakeWordOverrideActive)
+                {
+                        if (_wakeWordPrimingStopPending)
+                        {
+                                _wakeWordPrimingStopPending = false;
+                        }
+                        else
+                        {
+                                if (_defaultMaxRecordLengthCaptured)
+                                {
+                                        MaxRecordLength = _defaultMaxRecordLength;
+                                }
+
+                                _wakeWordOverrideActive = false;
+                        }
                 }
 
                 if (restartRecording && _running)

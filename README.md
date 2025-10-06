@@ -62,6 +62,10 @@ ProjectSettings/       # Unity project configuration
      run).
    * If you plan to publish intents, enable the `ROBOTVOICE_USE_MQTT` scripting
      define (Project Settings → Player → Scripting Define Symbols).
+   * Assign the `wakeWordPromptClip` on `VoiceGameLauncher` to `Assets/Voice/help.mp3`
+     (optionally routing it through a dedicated `AudioSource`) and hook up the
+     wake listening indicator UI (root GameObject, progress `Image`, countdown
+     `Text`) so patients can see the five-second capture window.
 
 3. **Configure the MQTT publisher**
    * Add the `MqttIntentPublisher` component to the same GameObject as the
@@ -96,12 +100,15 @@ ProjectSettings/       # Unity project configuration
 
 ## Working with Robot_opr
 
-When the Unity client detects a wake word ("hey robot" by default) followed by
-an exercise command, `VoiceGameLauncher` publishes a JSON payload describing the
-request. The Robot_opr hub consumes the `LAUNCH_GAME` and `BACK_HOME` intent
-messages to start or exit the corresponding rehabilitation experience. You can
-customise wake words, synonyms and keyword lists through the inspector or by
-editing the JSON configuration asset assigned to the launcher component.
+When the Unity client detects the wake phrase ("hi rachel" by default) it plays
+the `help.mp3` prompt from `Assets/Voice` and highlights a short five-second
+capture window using the configured UI indicator. If that follow-up instruction
+contains an exercise command, `VoiceGameLauncher` publishes a JSON payload
+describing the request.
+The Robot_opr hub consumes the `LAUNCH_GAME` and `BACK_HOME` intent messages to
+start or exit the corresponding rehabilitation experience. You can customise
+wake words, synonyms and keyword lists through the inspector or by editing the
+JSON configuration asset assigned to the launcher component.
 
 For richer interactions (e.g. free-form questions for the virtual coach) enable
 responses via the `/respond` endpoint exposed by the Python voice service. The
