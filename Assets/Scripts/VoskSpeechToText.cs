@@ -106,6 +106,8 @@ public class VoskSpeechToText : MonoBehaviour
         private bool _defaultMaxRecordLengthCaptured;
         private bool _wakeWordOverrideActive;
         private bool _wakeWordPrimingStopPending;
+        private float _pythonLastSegmentMaxAmplitude;
+        private float _pythonLastSegmentRms;
         void Awake()
         {
                 if (VoiceProcessor == null)
@@ -567,12 +569,19 @@ public class VoskSpeechToText : MonoBehaviour
 
                 _pythonRequestInFlight = true;
 
-                if (IsPythonAudioSegmentSilent(samples))
+                float maxAmplitude;
+                float rms;
+                if (IsPythonAudioSegmentSilent(samples, out maxAmplitude, out rms))
                 {
                         _pythonRequestInFlight = false;
                         OnStatusUpdated?.Invoke("Python speech service skipped silent audio");
+                        _pythonLastSegmentMaxAmplitude = 0f;
+                        _pythonLastSegmentRms = 0f;
                         yield break;
                 }
+
+                _pythonLastSegmentMaxAmplitude = maxAmplitude;
+                _pythonLastSegmentRms = rms;
 
                 var payload = new byte[samples.Length * sizeof(short)];
                 Buffer.BlockCopy(samples, 0, payload, 0, payload.Length);
@@ -610,7 +619,8 @@ public class VoskSpeechToText : MonoBehaviour
                                 if (!string.IsNullOrEmpty(response))
                                 {
                                         OnStatusUpdated?.Invoke("Python speech service transcription ready");
-                                        _threadedResultQueue.Enqueue(response);
+                                        var enriched = InjectPythonSegmentMetrics(response, _pythonLastSegmentMaxAmplitude, _pythonLastSegmentRms);
+                                        _threadedResultQueue.Enqueue(enriched);
                                 }
                                 else
                                 {
@@ -620,6 +630,65 @@ public class VoskSpeechToText : MonoBehaviour
                 }
 
                 _pythonRequestInFlight = false;
+                _pythonLastSegmentMaxAmplitude = 0f;
+                _pythonLastSegmentRms = 0f;
+        }
+
+        private bool IsPythonAudioSegmentSilent(short[] samples, out float maxAmplitude, out float rms)
+        {
+                maxAmplitude = 0f;
+                rms = 0f;
+
+                if (samples == null || samples.Length == 0)
+                {
+                        return true;
+                }
+
+                double sumSquares = 0.0;
+
+                for (int i = 0; i < samples.Length; i++)
+                {
+                        float amplitude = Mathf.Abs(samples[i]) / 32768f;
+                        sumSquares += amplitude * amplitude;
+                        if (amplitude > maxAmplitude)
+                        {
+                                maxAmplitude = amplitude;
+                        }
+                }
+
+                if (samples.Length > 0)
+                {
+                        rms = Mathf.Sqrt((float)(sumSquares / samples.Length));
+                }
+
+                return maxAmplitude < PythonServiceSilenceThreshold;
+        }
+
+        private string InjectPythonSegmentMetrics(string json, float maxAmplitude, float rms)
+        {
+                if (string.IsNullOrEmpty(json) || !json.TrimStart().StartsWith("{"))
+                {
+                        return json;
+                }
+
+                try
+                {
+                        var node = JSONNode.Parse(json);
+                        var obj = node?.AsObject;
+                        if (obj == null)
+                        {
+                                return json;
+                        }
+
+                        obj["max_amplitude"] = Mathf.Clamp01(maxAmplitude);
+                        obj["rms"] = Mathf.Clamp01(rms);
+
+                        return obj.ToString();
+                }
+                catch
+                {
+                        return json;
+                }
         }
 
         private bool IsPythonAudioSegmentSilent(short[] samples)

@@ -94,19 +94,36 @@ public class VoiceProcessor : MonoBehaviour
     }
 
     [Header("Voice Detection Settings")]
-    [SerializeField, Tooltip("The minimum volume to detect voice input for"), Range(0.0f, 1.0f)]
+    [SerializeField, Tooltip("The minimum peak amplitude required before voice activity can start"), Range(0.0f, 1.0f)]
     private float _minimumSpeakingSampleValue = 0.05f;
 
-    [SerializeField, Tooltip("Time in seconds of detected silence before voice request is sent")]
-    private float _silenceTimer = 1.0f;
+    [SerializeField, Tooltip("Seconds spent sampling ambient noise to determine an adaptive threshold"), Range(0.1f, 5.0f)]
+    private float _noiseCalibrationDuration = 1.5f;
 
-    [SerializeField, Tooltip("Auto detect speech using the volume threshold.")]
+    [SerializeField, Tooltip("Multiplier applied to the ambient-noise standard deviation when computing the speech threshold"), Range(0.0f, 10.0f)]
+    private float _noiseStdDevMultiplier = 2.5f;
+
+    [SerializeField, Tooltip("Seconds of sustained speech energy required before voice is considered active"), Range(0.0f, 2.0f)]
+    private float _speechActivationHoldDuration = 0.25f;
+
+    [SerializeField, Tooltip("Seconds of sustained silence required before voice is considered inactive"), Range(0.0f, 2.0f)]
+    private float _speechDeactivationHoldDuration = 0.45f;
+
+    [SerializeField, Tooltip("Auto detect speech using the adaptive voice activity detector.")]
     private bool _autoDetect;
 
-    private float _timeAtSilenceBegan;
     private bool _audioDetected;
     private bool _didDetect;
     private bool _transmit;
+
+    private bool _noiseCalibrationCompleted;
+    private float _noiseCalibrationStartTime;
+    private int _noiseSampleCount;
+    private double _noiseMeanRms;
+    private double _noiseM2;
+    private float _currentVoiceThreshold;
+    private float _vadAttackTimer;
+    private float _vadReleaseTimer;
 
 
     AudioClip _audioClip;
@@ -209,6 +226,18 @@ public class VoiceProcessor : MonoBehaviour
 
         _audioClip = Microphone.Start(CurrentDeviceName, true, 1, sampleRate);
 
+        _noiseCalibrationCompleted = false;
+        _noiseCalibrationStartTime = Time.time;
+        _noiseSampleCount = 0;
+        _noiseMeanRms = 0.0;
+        _noiseM2 = 0.0;
+        _currentVoiceThreshold = Mathf.Max(0.0001f, _minimumSpeakingSampleValue);
+        _vadAttackTimer = 0f;
+        _vadReleaseTimer = 0f;
+        _audioDetected = false;
+        _didDetect = false;
+        _transmit = false;
+
         StartCoroutine(RecordData());
     }
 
@@ -224,8 +253,77 @@ public class VoiceProcessor : MonoBehaviour
         Destroy(_audioClip);
         _audioClip = null;
         _didDetect = false;
+        _audioDetected = false;
 
         StopCoroutine(RecordData());
+    }
+
+    private void UpdateAdaptiveVoiceThreshold(float rms)
+    {
+        if (!_autoDetect)
+        {
+            return;
+        }
+
+        if (!_noiseCalibrationCompleted)
+        {
+            UpdateNoiseStatistics(rms);
+            if (Time.time - _noiseCalibrationStartTime >= _noiseCalibrationDuration)
+            {
+                _noiseCalibrationCompleted = true;
+            }
+        }
+        else if (rms < _currentVoiceThreshold)
+        {
+            UpdateNoiseStatistics(rms);
+        }
+
+        _currentVoiceThreshold = Mathf.Clamp(CalculateAdaptiveThreshold(), _minimumSpeakingSampleValue, 1f);
+    }
+
+    private void UpdateNoiseStatistics(float rms)
+    {
+        rms = Mathf.Clamp01(rms);
+        _noiseSampleCount++;
+        double delta = rms - _noiseMeanRms;
+        _noiseMeanRms += delta / _noiseSampleCount;
+        double delta2 = rms - _noiseMeanRms;
+        _noiseM2 += delta * delta2;
+    }
+
+    private float CalculateAdaptiveThreshold()
+    {
+        if (_noiseSampleCount <= 0)
+        {
+            return Mathf.Max(_minimumSpeakingSampleValue, _currentVoiceThreshold);
+        }
+
+        float mean = Mathf.Clamp01((float)_noiseMeanRms);
+        if (_noiseSampleCount == 1)
+        {
+            float provisional = mean + mean * _noiseStdDevMultiplier;
+            return Mathf.Max(_minimumSpeakingSampleValue, provisional);
+        }
+
+        float variance = (float)(_noiseM2 / (_noiseSampleCount - 1));
+        float stdDev = Mathf.Sqrt(Mathf.Max(0f, variance));
+        float threshold = mean + stdDev * _noiseStdDevMultiplier;
+        if (!float.IsFinite(threshold))
+        {
+            threshold = _minimumSpeakingSampleValue;
+        }
+
+        return Mathf.Max(_minimumSpeakingSampleValue, threshold);
+    }
+
+    private float FrameDurationSeconds()
+    {
+        if (SampleRate <= 0)
+        {
+            return 0f;
+        }
+
+        return FrameLength / (float)SampleRate;
     }
 
     /// <summary>
@@ -278,33 +376,69 @@ public class VoiceProcessor : MonoBehaviour
             startReadPos = endReadPos % _audioClip.samples;
             if (_autoDetect == false)
             {
-                _transmit =_audioDetected = true;
+                _transmit = _audioDetected = true;
             }
             else
             {
-                float maxVolume = 0.0f;
+                double sumSquares = 0.0;
+                float peakAmplitude = 0.0f;
 
                 for (int i = 0; i < sampleBuffer.Length; i++)
                 {
                     float amplitude = Mathf.Abs(sampleBuffer[i]);
-                    if (amplitude > maxVolume)
+                    sumSquares += amplitude * amplitude;
+                    if (amplitude > peakAmplitude)
                     {
-                        maxVolume = amplitude;
+                        peakAmplitude = amplitude;
                     }
                 }
 
-                if (maxVolume >= _minimumSpeakingSampleValue)
+                float rms = sampleBuffer.Length > 0 ? Mathf.Sqrt((float)(sumSquares / sampleBuffer.Length)) : 0f;
+
+                UpdateAdaptiveVoiceThreshold(rms);
+
+                float frameDuration = FrameDurationSeconds();
+                float effectiveThreshold = Mathf.Max(_currentVoiceThreshold, _minimumSpeakingSampleValue);
+                if (rms >= effectiveThreshold || peakAmplitude >= _minimumSpeakingSampleValue)
                 {
-                    _transmit= _audioDetected = true;
-                    _timeAtSilenceBegan = Time.time;
+                    _vadAttackTimer += frameDuration;
+                    _vadReleaseTimer = 0f;
                 }
                 else
                 {
-                    _transmit = false;
+                    _vadReleaseTimer += frameDuration;
+                    _vadAttackTimer = 0f;
+                }
 
-                    if (_audioDetected && Time.time - _timeAtSilenceBegan > _silenceTimer)
+                if (_audioDetected)
+                {
+                    if (_vadReleaseTimer >= _speechDeactivationHoldDuration)
                     {
                         _audioDetected = false;
+                        _transmit = false;
+                    }
+                    else
+                    {
+                        _transmit = true;
+                    }
+                }
+                else
+                {
+                    bool calibrationComplete = _noiseCalibrationCompleted || Time.time - _noiseCalibrationStartTime >= _noiseCalibrationDuration;
+                    if (calibrationComplete)
+                    {
+                        _noiseCalibrationCompleted = true;
+                    }
+
+                    if (calibrationComplete && _vadAttackTimer >= _speechActivationHoldDuration)
+                    {
+                        _audioDetected = true;
+                        _transmit = true;
+                        _vadAttackTimer = 0f;
+                    }
+                    else
+                    {
+                        _transmit = false;
                     }
                 }
             }
