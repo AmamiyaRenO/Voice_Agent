@@ -215,7 +215,6 @@ async def transcribe(
         condition_on_previous_text=False,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500},
-        temperature_increment_on_fallback=0.0,
     )
 
     segments = list(segments_generator)

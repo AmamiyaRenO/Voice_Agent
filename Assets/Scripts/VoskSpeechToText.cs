@@ -691,32 +691,6 @@ public class VoskSpeechToText : MonoBehaviour
                 }
         }
 
-        private bool IsPythonAudioSegmentSilent(short[] samples)
-        {
-                if (samples == null || samples.Length == 0)
-                {
-                        return true;
-                }
-
-                float maxAmplitude = 0f;
-
-                for (int i = 0; i < samples.Length; i++)
-                {
-                        float amplitude = Mathf.Abs(samples[i]) / 32768f;
-                        if (amplitude > maxAmplitude)
-                        {
-                                maxAmplitude = amplitude;
-
-                                if (maxAmplitude >= PythonServiceSilenceThreshold)
-                                {
-                                        return false;
-                                }
-                        }
-                }
-
-                return maxAmplitude < PythonServiceSilenceThreshold;
-        }
-
         private string BuildPythonServiceUrl(int sampleRate)
         {
                 if (string.IsNullOrWhiteSpace(PythonServiceUrl))
