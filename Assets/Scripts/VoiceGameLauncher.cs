@@ -1487,11 +1487,6 @@ namespace RobotVoice
             var normalized = trimmed.ToLowerInvariant();
             var effectiveRms = metadata.Rms > 0f ? metadata.Rms : metadata.MaxAmplitude;
 
-            if (TranscriptContainsWakeWord(trimmed))
-            {
-                return false;
-            }
-
             if (NoiseSingles.Contains(normalized) && effectiveRms < speechEnergyNoiseGate)
             {
                 return true;
@@ -1499,61 +1494,10 @@ namespace RobotVoice
 
             if (!float.IsNaN(metadata.AvgLogProb) && metadata.AvgLogProb < noiseAverageLogProbThreshold)
             {
-                var hasStrongEnergy = effectiveRms >= Mathf.Max(0.01f, speechEnergyNoiseGate * 0.75f);
-                if (tokens.Length <= 1 && !hasStrongEnergy)
-                {
-                    return true;
-                }
+                return true;
             }
 
             return false;
-        }
-
-        private bool TranscriptContainsWakeWord(string text)
-        {
-            if (runtimeConfig == null || string.IsNullOrWhiteSpace(text))
-            {
-                return false;
-            }
-
-            var configuredWakeWord = runtimeConfig.WakeWord;
-            if (string.IsNullOrWhiteSpace(configuredWakeWord))
-            {
-                return false;
-            }
-
-            var normalizedWakeWord = NormalizeForWakeWordComparison(configuredWakeWord);
-            if (string.IsNullOrEmpty(normalizedWakeWord))
-            {
-                return false;
-            }
-
-            var normalizedText = NormalizeForWakeWordComparison(text);
-            if (string.IsNullOrEmpty(normalizedText))
-            {
-                return false;
-            }
-
-            return normalizedText.Contains(normalizedWakeWord);
-        }
-
-        private static string NormalizeForWakeWordComparison(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                return string.Empty;
-            }
-
-            var builder = new StringBuilder(text.Length);
-            foreach (var character in text)
-            {
-                if (char.IsLetterOrDigit(character) || char.IsWhiteSpace(character))
-                {
-                    builder.Append(char.ToLowerInvariant(character));
-                }
-            }
-
-            return builder.ToString().Trim();
         }
 
         private bool MatchesCommand(string text)
