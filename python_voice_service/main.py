@@ -1,27 +1,46 @@
-"""Python voice service using Faster-Whisper for speech recognition.
+"""Python voice service with wake word gating.
 
-This module exposes a FastAPI application that accepts raw PCM audio
-from the Unity client, performs transcription with Faster-Whisper and
-returns a Vosk-compatible JSON payload so the rest of the Unity project
-can reuse the existing message hub pipeline.
+This module exposes a FastAPI application with two main endpoints:
+
+* ``POST /wake`` accepts raw PCM audio and runs a Vosk recogniser that
+  is limited to the wake-word pronunciation variants ("richel", "richelle",
+  etc.). Only when Vosk confirms a match does the service emit a short-lived
+  wake token.
+* ``POST /transcribe`` accepts follow-up audio together with a valid wake
+  token and performs full transcription with Faster-Whisper. The JSON
+  response stays compatible with the Vosk payload Unity already expects so
+  downstream processing keeps working.
+
+This keeps the heavy Whisper model idle most of the time, dramatically
+reducing GPU usage because it only runs when the wake word has been spoken.
 """
 
 from __future__ import annotations
 
 import math
 import os
+import difflib
+import json
+import logging
+import threading
+import time
+import uuid
 from functools import lru_cache
-from typing import Iterable, List, Optional
+from pathlib import Path
+from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
+from vosk import KaldiRecognizer, Model, SetLogLevel
 from pydantic import BaseModel, Field
 
 APP_TITLE = "Coach Voice Agent - Python Voice Service"
 DEFAULT_SAMPLE_RATE = 16000
+DEFAULT_WAKE_TOKEN_TTL = 30.0
+DEFAULT_WAKE_RECORD_SECONDS = 5.0
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
 DEFAULT_SYSTEM_PROMPT = (
@@ -37,7 +56,15 @@ DEFAULT_SYSTEM_PROMPT = (
     "- If the user asks something outside your knowledge, politely say you don’t know and redirect them back to the exercise context."
 )
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title=APP_TITLE)
+
+SetLogLevel(-1)
+
+
+def _service_root() -> Path:
+    return Path(__file__).resolve().parent
 
 
 def _environment(key: str, default: str) -> str:
@@ -63,6 +90,143 @@ def _environment_int(key: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def _wake_keywords() -> Tuple[str, ...]:
+    custom = _environment("VOICE_AGENT_WAKE_KEYWORDS", "")
+    if custom:
+        keywords = [part.strip().lower() for part in custom.split(",") if part.strip()]
+        if keywords:
+            return tuple(dict.fromkeys(keywords))
+    # Default pronunciation variants of "Richel".
+    return tuple(
+        dict.fromkeys(
+            [
+                "richel",
+                "richelle",
+                "rachelle",
+                "rachel",
+                "richell",
+            ]
+        )
+    )
+
+
+@lru_cache(maxsize=1)
+def _wake_keyword_set() -> set[str]:
+    return set(_wake_keywords())
+
+
+@lru_cache(maxsize=1)
+def _wake_grammar() -> str:
+    keywords = [f'"{keyword}"' for keyword in _wake_keywords()]
+    keywords.append('"[unk]"')
+    return "[" + ", ".join(keywords) + "]"
+
+
+def _match_wake_word(text: str) -> Optional[str]:
+    text = text.strip().lower()
+    if not text:
+        return None
+    if text in _wake_keyword_set():
+        return text
+    matches = difflib.get_close_matches(text, _wake_keywords(), n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
+
+def _helper_audio_path() -> Path:
+    value = _environment("VOICE_AGENT_HELPER_AUDIO", "helper.mp3")
+    helper_path = Path(value)
+    if not helper_path.is_absolute():
+        helper_path = _service_root() / helper_path
+    return helper_path
+
+
+def _wake_record_seconds() -> float:
+    return max(0.0, _environment_float("VOICE_AGENT_RECORD_SECONDS", DEFAULT_WAKE_RECORD_SECONDS))
+
+
+def _prepare_vosk_payload(payload: bytes, sample_rate: int) -> Tuple[bytes, int]:
+    if sample_rate == DEFAULT_SAMPLE_RATE:
+        return payload, sample_rate
+    audio = np.frombuffer(payload, dtype=np.int16).astype(np.float32) / 32768.0
+    resampled = _resample_audio(audio, sample_rate, DEFAULT_SAMPLE_RATE)
+    resampled = np.clip(resampled * 32768.0, -32768.0, 32767.0)
+    return resampled.astype(np.int16).tobytes(), DEFAULT_SAMPLE_RATE
+
+
+@lru_cache(maxsize=1)
+def _load_vosk_model() -> Model:
+    model_path = _environment("VOSK_MODEL_PATH", "vosk-model-small-en-us-0.15")
+    resolved = Path(model_path).expanduser()
+    if not resolved.is_absolute():
+        resolved = _service_root() / resolved
+    if not resolved.exists():
+        raise RuntimeError(
+            f"Vosk model path not found: {resolved}. Set VOSK_MODEL_PATH to a valid directory."
+        )
+    return Model(str(resolved))
+
+
+def _detect_wake_word(payload: bytes, sample_rate: int) -> tuple[bool, Optional[str], Optional[float], str]:
+    model = _load_vosk_model()
+    audio_bytes, effective_rate = _prepare_vosk_payload(payload, sample_rate)
+    recognizer = KaldiRecognizer(model, effective_rate, _wake_grammar())
+    recognizer.SetWords(True)
+
+    if not recognizer.AcceptWaveform(audio_bytes):
+        result_json = recognizer.FinalResult()
+    else:
+        result_json = recognizer.Result()
+
+    if not result_json:
+        return False, None, None, ""
+
+    try:
+        result = json.loads(result_json)
+    except json.JSONDecodeError:
+        logger.exception("Failed to decode Vosk result: %s", result_json)
+        return False, None, None, ""
+
+    text = (result.get("text") or "").strip().lower()
+    matched = _match_wake_word(text)
+
+    confidence: Optional[float] = None
+    words = result.get("result")
+    if isinstance(words, list) and words:
+        confidences = [float(entry.get("conf", 0.0)) for entry in words if isinstance(entry, dict)]
+        if confidences:
+            confidence = max(confidences)
+
+    return matched is not None, matched, confidence, text
+
+
+class WakeSessionManager:
+    def __init__(self, ttl_seconds: float) -> None:
+        self._ttl = max(1.0, ttl_seconds)
+        self._lock = threading.Lock()
+        self._tokens: dict[str, float] = {}
+
+    def issue(self) -> str:
+        token = uuid.uuid4().hex
+        with self._lock:
+            self._cleanup_locked()
+            self._tokens[token] = time.monotonic()
+        return token
+
+    def consume(self, token: str) -> bool:
+        with self._lock:
+            self._cleanup_locked()
+            return self._tokens.pop(token, None) is not None
+
+    def _cleanup_locked(self) -> None:
+        now = time.monotonic()
+        expired = [tok for tok, created in self._tokens.items() if now - created > self._ttl]
+        for token in expired:
+            self._tokens.pop(token, None)
+
+
+_wake_sessions = WakeSessionManager(_environment_float("VOICE_AGENT_WAKE_TOKEN_TTL", DEFAULT_WAKE_TOKEN_TTL))
 
 
 @lru_cache(maxsize=1)
@@ -152,6 +316,10 @@ async def _generate_coach_reply(user_text: str) -> str:
 @app.on_event("startup")
 async def _startup_event() -> None:
     # Trigger model loading during startup so the first request does not pay the cost.
+    try:
+        _load_vosk_model()
+    except Exception as exc:  # pragma: no cover - best effort logging
+        logger.warning("Vosk model could not be preloaded: %s", exc)
     _load_model()
 
 
@@ -179,12 +347,58 @@ def _build_vosk_result(words: Iterable[dict]) -> List[dict]:
     return list(words)
 
 
+@app.post("/wake")
+async def wake(
+    request: Request,
+    sample_rate: int = Query(DEFAULT_SAMPLE_RATE, ge=8000, le=48000),
+) -> JSONResponse:
+    payload = await request.body()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Empty audio payload")
+
+    detected, keyword, confidence, raw_text = _detect_wake_word(payload, sample_rate)
+
+    response: dict[str, object | None] = {
+        "wake_word_detected": detected,
+        "wake_word": keyword,
+        "confidence": confidence,
+        "raw_text": raw_text,
+    }
+
+    if detected:
+        helper_path = _helper_audio_path()
+        helper_audio: str | None
+        if helper_path.exists():
+            helper_audio = str(helper_path)
+        else:
+            helper_audio = None
+            logger.warning("Helper audio file not found: %s", helper_path)
+        response.update(
+            {
+                "wake_token": _wake_sessions.issue(),
+                "helper_audio": helper_audio,
+                "record_seconds": _wake_record_seconds(),
+            }
+        )
+
+    return JSONResponse(response)
+
+
 @app.post("/transcribe")
 async def transcribe(
     request: Request,
     sample_rate: int = Query(DEFAULT_SAMPLE_RATE, ge=8000, le=48000),
     language: Optional[str] = Query("en", min_length=1, max_length=8),
+    wake_token: Optional[str] = Query(
+        None,
+        description="Wake token issued by /wake. Required so Whisper only runs when the wake word was detected.",
+    ),
 ) -> JSONResponse:
+    if not wake_token:
+        raise HTTPException(status_code=400, detail="Missing wake_token. Call /wake first.")
+    if not _wake_sessions.consume(wake_token):
+        raise HTTPException(status_code=403, detail="Wake token is invalid or expired.")
+
     payload = await request.body()
     if not payload:
         raise HTTPException(status_code=400, detail="Empty audio payload")
