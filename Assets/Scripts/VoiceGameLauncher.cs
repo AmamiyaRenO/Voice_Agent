@@ -8,6 +8,7 @@ using System.Speech.Synthesis;
 #endif
 using UnityEngine;
 using UnityEngine.Networking;
+using UnityEngine.UI;
 
 namespace RobotVoice
 {
@@ -29,6 +30,9 @@ namespace RobotVoice
         [Header("Coach Agent")]
         [SerializeField] private string coachRespondUrl = "http://127.0.0.1:8000/respond";
         [SerializeField] private float coachResponseTimeoutSeconds = 10f;
+        [SerializeField] private GameObject coachResponsePanel;
+        [SerializeField] private Text coachResponseText;
+        [SerializeField] [Min(0f)] private float coachResponseDisplaySeconds = 6f;
 
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
@@ -37,6 +41,7 @@ namespace RobotVoice
         private SpeechSynthesizer speechSynthesizer;
         private Coroutine coachSpeechCoroutine;
 #endif
+        private Coroutine coachResponseVisibilityCoroutine;
 
         [Serializable]
         private struct CoachRespondPayload
@@ -55,6 +60,8 @@ namespace RobotVoice
             ApplyFullscreenMode();
             runtimeConfig = BuildRuntimeConfig();
             ApplySpeechKeyPhrases();
+            EnsureCoachResponseUi();
+            ResetCoachResponseDisplay();
         }
 
         private void Start()
@@ -71,6 +78,12 @@ namespace RobotVoice
                 coachSpeechCoroutine = null;
             }
 #endif
+            if (coachResponseVisibilityCoroutine != null)
+            {
+                StopCoroutine(coachResponseVisibilityCoroutine);
+                coachResponseVisibilityCoroutine = null;
+            }
+            ResetCoachResponseDisplay();
             DisposeSpeechSynthesizer();
         }
 
@@ -531,6 +544,7 @@ namespace RobotVoice
                         if (!string.IsNullOrWhiteSpace(reply))
                         {
                             var finalReply = reply.Trim();
+                            ShowCoachResponseOnScreen(finalReply);
                             if (speechSynthesizer != null)
                             {
                                 SpeakCoachResponse(finalReply);
@@ -540,17 +554,25 @@ namespace RobotVoice
                                 Debug.Log($"[RobotVoice] Coach: {finalReply}");
                             }
                         }
-                        else if (logDebugMessages)
+                        else
                         {
-                            Debug.LogWarning("[RobotVoice] Coach reply was empty");
+                            ResetCoachResponseDisplay();
+                            if (logDebugMessages)
+                            {
+                                Debug.LogWarning("[RobotVoice] Coach reply was empty");
+                            }
                         }
                     }
-                    else if (logDebugMessages)
+                    else
                     {
-                        var error = string.IsNullOrWhiteSpace(request.error)
-                            ? $"HTTP {(int)request.responseCode}"
-                            : request.error;
-                        Debug.LogWarning($"[RobotVoice] Failed to fetch coach reply: {error}");
+                        ResetCoachResponseDisplay();
+                        if (logDebugMessages)
+                        {
+                            var error = string.IsNullOrWhiteSpace(request.error)
+                                ? $"HTTP {(int)request.responseCode}"
+                                : request.error;
+                            Debug.LogWarning($"[RobotVoice] Failed to fetch coach reply: {error}");
+                        }
                     }
                 }
             }
@@ -581,6 +603,181 @@ namespace RobotVoice
             }
 
             return string.Empty;
+        }
+
+        private void ShowCoachResponseOnScreen(string message)
+        {
+            if (coachResponseText == null && coachResponsePanel == null)
+            {
+                return;
+            }
+
+            if (coachResponseVisibilityCoroutine != null)
+            {
+                StopCoroutine(coachResponseVisibilityCoroutine);
+                coachResponseVisibilityCoroutine = null;
+            }
+
+            var trimmedMessage = string.IsNullOrWhiteSpace(message) ? string.Empty : message.Trim();
+
+            if (coachResponseText != null)
+            {
+                coachResponseText.text = trimmedMessage;
+            }
+
+            var root = coachResponsePanel != null
+                ? coachResponsePanel
+                : coachResponseText != null
+                    ? coachResponseText.gameObject
+                    : null;
+
+            if (root != null)
+            {
+                root.SetActive(!string.IsNullOrEmpty(trimmedMessage));
+            }
+
+            if (!string.IsNullOrEmpty(trimmedMessage) && coachResponseDisplaySeconds > 0f)
+            {
+                coachResponseVisibilityCoroutine = StartCoroutine(HideCoachResponseAfterDelay(coachResponseDisplaySeconds));
+            }
+        }
+
+        private void EnsureCoachResponseUi()
+        {
+            if (coachResponsePanel == null && coachResponseText != null)
+            {
+                coachResponsePanel = coachResponseText.transform.parent != null
+                    ? coachResponseText.transform.parent.gameObject
+                    : null;
+            }
+
+            if (coachResponseText == null && coachResponsePanel != null)
+            {
+                coachResponseText = coachResponsePanel.GetComponentInChildren<Text>(true);
+            }
+
+            if (coachResponsePanel != null && coachResponseText != null)
+            {
+                return;
+            }
+
+            var canvas = coachResponsePanel != null
+                ? coachResponsePanel.GetComponentInParent<Canvas>()
+                : null;
+
+            if (canvas == null)
+            {
+                canvas = FindObjectOfType<Canvas>();
+            }
+
+            if (canvas == null)
+            {
+                var canvasGo = new GameObject("CoachResponseCanvas", typeof(RectTransform));
+                canvas = canvasGo.AddComponent<Canvas>();
+                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+
+                var scaler = canvasGo.AddComponent<CanvasScaler>();
+                scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+                scaler.referenceResolution = new Vector2(1920f, 1080f);
+
+                canvasGo.AddComponent<GraphicRaycaster>();
+
+                var canvasRect = canvasGo.GetComponent<RectTransform>();
+                canvasRect.anchorMin = Vector2.zero;
+                canvasRect.anchorMax = Vector2.one;
+                canvasRect.sizeDelta = Vector2.zero;
+            }
+
+            if (coachResponsePanel == null)
+            {
+                var panelGo = new GameObject("CoachResponsePanel", typeof(RectTransform));
+                panelGo.transform.SetParent(canvas.transform, false);
+                var panelRect = panelGo.GetComponent<RectTransform>();
+                panelRect.anchorMin = new Vector2(0.5f, 0f);
+                panelRect.anchorMax = new Vector2(0.5f, 0f);
+                panelRect.pivot = new Vector2(0.5f, 0f);
+                panelRect.anchoredPosition = new Vector2(0f, 100f);
+                panelRect.sizeDelta = new Vector2(700f, 160f);
+
+                var background = panelGo.AddComponent<Image>();
+                background.color = new Color(0f, 0f, 0f, 0.65f);
+
+                coachResponsePanel = panelGo;
+            }
+
+            if (coachResponseText == null)
+            {
+                var textGo = new GameObject("CoachResponseText", typeof(RectTransform));
+                textGo.transform.SetParent(coachResponsePanel.transform, false);
+
+                var textRect = textGo.GetComponent<RectTransform>();
+                textRect.anchorMin = new Vector2(0f, 0f);
+                textRect.anchorMax = new Vector2(1f, 1f);
+                textRect.offsetMin = new Vector2(24f, 24f);
+                textRect.offsetMax = new Vector2(-24f, -24f);
+
+                var text = textGo.AddComponent<Text>();
+                text.alignment = TextAnchor.MiddleCenter;
+                text.color = Color.white;
+                text.fontSize = 28;
+                text.horizontalOverflow = HorizontalWrapMode.Wrap;
+                text.verticalOverflow = VerticalWrapMode.Overflow;
+                text.text = string.Empty;
+                text.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+
+                coachResponseText = text;
+            }
+        }
+
+        private IEnumerator HideCoachResponseAfterDelay(float delaySeconds)
+        {
+            if (delaySeconds > 0f)
+            {
+                yield return new WaitForSeconds(delaySeconds);
+            }
+
+            if (coachResponseText != null)
+            {
+                coachResponseText.text = string.Empty;
+            }
+
+            var root = coachResponsePanel != null
+                ? coachResponsePanel
+                : coachResponseText != null
+                    ? coachResponseText.gameObject
+                    : null;
+
+            if (root != null)
+            {
+                root.SetActive(false);
+            }
+
+            coachResponseVisibilityCoroutine = null;
+        }
+
+        private void ResetCoachResponseDisplay()
+        {
+            if (coachResponseVisibilityCoroutine != null)
+            {
+                StopCoroutine(coachResponseVisibilityCoroutine);
+                coachResponseVisibilityCoroutine = null;
+            }
+
+            if (coachResponseText != null)
+            {
+                coachResponseText.text = string.Empty;
+            }
+
+            var root = coachResponsePanel != null
+                ? coachResponsePanel
+                : coachResponseText != null
+                    ? coachResponseText.gameObject
+                    : null;
+
+            if (root != null)
+            {
+                root.SetActive(false);
+            }
         }
 #else
         private void InitializeSpeechSynthesizer()
