@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Globalization;
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
 using System.Speech.Synthesis;
@@ -28,6 +29,13 @@ namespace RobotVoice
         [SerializeField] private SynonymOverride[] synonymOverrides = Array.Empty<SynonymOverride>();
         [SerializeField] private float intentCooldownSeconds = 1.5f;
         [SerializeField] private bool logDebugMessages = true;
+        [Header("Transcript Filtering")]
+        [SerializeField, Tooltip("Normalized RMS level required to accept single-word transcripts"), Range(0f, 1f)]
+        private float speechEnergyNoiseGate = 0.05f;
+        [SerializeField, Tooltip("Drop transcripts whose average log probability is lower than this value")]
+        private float noiseAverageLogProbThreshold = -0.6f;
+        [SerializeField, Tooltip("Seconds to suppress repeated transcripts"), Min(0f)]
+        private float duplicateSuppressionSeconds = 2f;
         [Header("Wake Word Interaction")]
         [SerializeField] private string wakeWordPrompt = "Listening";
         [SerializeField] [Min(0f)] private float wakeWordListeningWindowSeconds = 5f;
@@ -53,11 +61,34 @@ namespace RobotVoice
         private Coroutine coachResponseVisibilityCoroutine;
         private float wakeWordWindowExpiry = -999f;
         private Coroutine wakeListeningIndicatorCoroutine;
+        private string lastDeliveredTranscript = string.Empty;
+        private float lastDeliveredTranscriptTime = -999f;
+
+        private static readonly HashSet<string> NoiseSingles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "you",
+            "uh",
+            "um",
+            "yeah",
+            "hmm",
+        };
+
+        private static readonly Regex CommandKeywordRegex = new Regex(
+            @"\b(open|launch|start|stop|robot)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         [Serializable]
         private struct CoachRespondPayload
         {
             public string text;
+        }
+
+        private struct RecognitionMetadata
+        {
+            public float AvgLogProb;
+            public float MaxAmplitude;
+            public float Rms;
+            public string Text;
         }
 
         private sealed class KeywordPhrase
@@ -241,6 +272,7 @@ namespace RobotVoice
                 return;
             }
 
+            var metadata = ExtractRecognitionMetadata(message);
             var masked = FilterTranscript(message, out var rawRecognisedText);
             var hasKeywordMatch = !string.IsNullOrWhiteSpace(masked) && masked != "*";
 
@@ -269,6 +301,34 @@ namespace RobotVoice
             if (string.IsNullOrWhiteSpace(rawRecognised) && !string.IsNullOrWhiteSpace(recognised))
             {
                 rawRecognised = recognised;
+            }
+
+            var candidateText = SelectCandidateText(rawRecognised, recognised, masked, metadata.Text);
+            var normalizedCandidate = NormalizeTranscript(candidateText);
+
+            if (!hasKeywordMatch && ShouldIgnoreTranscriptAsNoise(candidateText, metadata))
+            {
+                if (logDebugMessages && !string.IsNullOrWhiteSpace(candidateText))
+                {
+                    Debug.Log($"[RobotVoice] Ignored low-confidence speech \"{candidateText.Trim()}\"");
+                }
+
+                return;
+            }
+
+            if (IsDuplicateTranscript(normalizedCandidate))
+            {
+                if (logDebugMessages && !string.IsNullOrWhiteSpace(candidateText))
+                {
+                    Debug.Log($"[RobotVoice] Ignored duplicate speech \"{candidateText.Trim()}\"");
+                }
+
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(normalizedCandidate))
+            {
+                RegisterTranscriptUsage(normalizedCandidate);
             }
             var wakeWordSource = hasKeywordMatch ? recognised : rawRecognised;
             if (string.IsNullOrWhiteSpace(wakeWordSource))
@@ -996,6 +1056,78 @@ namespace RobotVoice
             }
         }
 
+        private RecognitionMetadata ExtractRecognitionMetadata(string message)
+        {
+            var metadata = new RecognitionMetadata
+            {
+                AvgLogProb = float.NaN,
+                MaxAmplitude = 0f,
+                Rms = 0f,
+                Text = string.Empty,
+            };
+
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return metadata;
+            }
+
+            var trimmed = message.Trim();
+            if (!trimmed.StartsWith("{", StringComparison.Ordinal))
+            {
+                metadata.Text = trimmed;
+                return metadata;
+            }
+
+            try
+            {
+                var node = JSONNode.Parse(message);
+                var obj = node?.AsObject;
+                if (obj == null)
+                {
+                    return metadata;
+                }
+
+                if (obj.HasKey("text"))
+                {
+                    var value = obj["text"].Value;
+                    metadata.Text = string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();
+                }
+
+                if (obj.HasKey("avg_logprob"))
+                {
+                    var avgNode = obj["avg_logprob"];
+                    if (avgNode != null && avgNode.IsNumber)
+                    {
+                        metadata.AvgLogProb = avgNode.AsFloat;
+                    }
+                }
+
+                if (obj.HasKey("rms"))
+                {
+                    var rmsNode = obj["rms"];
+                    if (rmsNode != null && rmsNode.IsNumber)
+                    {
+                        metadata.Rms = Mathf.Clamp01(rmsNode.AsFloat);
+                    }
+                }
+
+                if (obj.HasKey("max_amplitude"))
+                {
+                    var amplitudeNode = obj["max_amplitude"];
+                    if (amplitudeNode != null && amplitudeNode.IsNumber)
+                    {
+                        metadata.MaxAmplitude = Mathf.Clamp01(amplitudeNode.AsFloat);
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore malformed metadata and fall back to defaults.
+            }
+
+            return metadata;
+        }
+
         private string FilterTranscript(string message, out string rawRecognised)
         {
             rawRecognised = ExtractRecognisedText(message);
@@ -1301,6 +1433,212 @@ namespace RobotVoice
             }
 
             return sb.ToString();
+        }
+
+        private string SelectCandidateText(string rawRecognised, string recognised, string masked, string metadataText)
+        {
+            if (!string.IsNullOrWhiteSpace(rawRecognised))
+            {
+                return rawRecognised.Trim();
+            }
+
+            if (!string.IsNullOrWhiteSpace(recognised))
+            {
+                return recognised.Trim();
+            }
+
+            if (!string.IsNullOrWhiteSpace(metadataText))
+            {
+                return metadataText.Trim();
+            }
+
+            if (!string.IsNullOrWhiteSpace(masked) && masked != "*")
+            {
+                return masked.Trim();
+            }
+
+            return string.Empty;
+        }
+
+        private static string NormalizeTranscript(string text)
+        {
+            return string.IsNullOrWhiteSpace(text) ? string.Empty : text.Trim().ToLowerInvariant();
+        }
+
+        private bool ShouldIgnoreTranscriptAsNoise(string text, RecognitionMetadata metadata)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return true;
+            }
+
+            var trimmed = text.Trim();
+            if (MatchesCommand(trimmed))
+            {
+                return false;
+            }
+
+            var tokens = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length <= 1 && trimmed.Length < 3)
+            {
+                return true;
+            }
+
+            var normalized = trimmed.ToLowerInvariant();
+            var effectiveRms = metadata.Rms > 0f ? metadata.Rms : metadata.MaxAmplitude;
+
+            if (TranscriptContainsWakeWord(trimmed))
+            {
+                return false;
+            }
+
+            if (NoiseSingles.Contains(normalized) && effectiveRms < speechEnergyNoiseGate)
+            {
+                return true;
+            }
+
+            if (!float.IsNaN(metadata.AvgLogProb) && metadata.AvgLogProb < noiseAverageLogProbThreshold)
+            {
+                var hasStrongEnergy = effectiveRms >= Mathf.Max(0.01f, speechEnergyNoiseGate * 0.75f);
+                if (tokens.Length <= 1 && !hasStrongEnergy)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool TranscriptContainsWakeWord(string text)
+        {
+            if (runtimeConfig == null || string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            var configuredWakeWord = runtimeConfig.WakeWord;
+            if (string.IsNullOrWhiteSpace(configuredWakeWord))
+            {
+                return false;
+            }
+
+            var normalizedWakeWord = NormalizeForWakeWordComparison(configuredWakeWord);
+            if (string.IsNullOrEmpty(normalizedWakeWord))
+            {
+                return false;
+            }
+
+            var normalizedText = NormalizeForWakeWordComparison(text);
+            if (string.IsNullOrEmpty(normalizedText))
+            {
+                return false;
+            }
+
+            return normalizedText.Contains(normalizedWakeWord);
+        }
+
+        private static string NormalizeForWakeWordComparison(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            var builder = new StringBuilder(text.Length);
+            foreach (var character in text)
+            {
+                if (char.IsLetterOrDigit(character) || char.IsWhiteSpace(character))
+                {
+                    builder.Append(char.ToLowerInvariant(character));
+                }
+            }
+
+            return builder.ToString().Trim();
+        }
+
+        private bool MatchesCommand(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            if (CommandKeywordRegex.IsMatch(text))
+            {
+                return true;
+            }
+
+            if (runtimeConfig != null)
+            {
+                if (ContainsKeyword(runtimeConfig.LaunchKeywords, text))
+                {
+                    return true;
+                }
+
+                if (ContainsKeyword(runtimeConfig.ExitKeywords, text))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool ContainsKeyword(IEnumerable<string> keywords, string text)
+        {
+            if (keywords == null)
+            {
+                return false;
+            }
+
+            foreach (var keyword in keywords)
+            {
+                if (string.IsNullOrWhiteSpace(keyword))
+                {
+                    continue;
+                }
+
+                var trimmed = keyword.Trim();
+                if (trimmed.Length == 0)
+                {
+                    continue;
+                }
+
+                if (text.IndexOf(trimmed, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool IsDuplicateTranscript(string normalizedText)
+        {
+            if (string.IsNullOrEmpty(normalizedText))
+            {
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(lastDeliveredTranscript))
+            {
+                return false;
+            }
+
+            var window = Mathf.Max(0.1f, duplicateSuppressionSeconds);
+            var elapsed = Time.realtimeSinceStartup - lastDeliveredTranscriptTime;
+            return normalizedText == lastDeliveredTranscript && elapsed <= window;
+        }
+
+        private void RegisterTranscriptUsage(string normalizedText)
+        {
+            if (string.IsNullOrEmpty(normalizedText))
+            {
+                return;
+            }
+
+            lastDeliveredTranscript = normalizedText;
+            lastDeliveredTranscriptTime = Time.realtimeSinceStartup;
         }
     }
 }

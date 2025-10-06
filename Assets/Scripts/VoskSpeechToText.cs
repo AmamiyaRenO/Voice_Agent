@@ -31,6 +31,10 @@ public class VoskSpeechToText : MonoBehaviour
         [Tooltip("Beam size used by the Python speech service.")]
         public int PythonServiceBeamSize = 5;
 
+        [Tooltip("Minimum normalized amplitude required before audio is sent to the Python speech service (0-1).")]
+        [Range(0f, 1f)]
+        public float PythonServiceSilenceThreshold = 0.02f;
+
         [Tooltip("The source of the microphone input.")]
         public VoiceProcessor VoiceProcessor;
 	[Tooltip("The Max number of alternatives that will be processed.")]
@@ -102,6 +106,8 @@ public class VoskSpeechToText : MonoBehaviour
         private bool _defaultMaxRecordLengthCaptured;
         private bool _wakeWordOverrideActive;
         private bool _wakeWordPrimingStopPending;
+        private float _pythonLastSegmentMaxAmplitude;
+        private float _pythonLastSegmentRms;
         void Awake()
         {
                 if (VoiceProcessor == null)
@@ -563,6 +569,20 @@ public class VoskSpeechToText : MonoBehaviour
 
                 _pythonRequestInFlight = true;
 
+                float maxAmplitude;
+                float rms;
+                if (IsPythonAudioSegmentSilent(samples, out maxAmplitude, out rms))
+                {
+                        _pythonRequestInFlight = false;
+                        OnStatusUpdated?.Invoke("Python speech service skipped silent audio");
+                        _pythonLastSegmentMaxAmplitude = 0f;
+                        _pythonLastSegmentRms = 0f;
+                        yield break;
+                }
+
+                _pythonLastSegmentMaxAmplitude = maxAmplitude;
+                _pythonLastSegmentRms = rms;
+
                 var payload = new byte[samples.Length * sizeof(short)];
                 Buffer.BlockCopy(samples, 0, payload, 0, payload.Length);
 
@@ -599,7 +619,8 @@ public class VoskSpeechToText : MonoBehaviour
                                 if (!string.IsNullOrEmpty(response))
                                 {
                                         OnStatusUpdated?.Invoke("Python speech service transcription ready");
-                                        _threadedResultQueue.Enqueue(response);
+                                        var enriched = InjectPythonSegmentMetrics(response, _pythonLastSegmentMaxAmplitude, _pythonLastSegmentRms);
+                                        _threadedResultQueue.Enqueue(enriched);
                                 }
                                 else
                                 {
@@ -609,6 +630,65 @@ public class VoskSpeechToText : MonoBehaviour
                 }
 
                 _pythonRequestInFlight = false;
+                _pythonLastSegmentMaxAmplitude = 0f;
+                _pythonLastSegmentRms = 0f;
+        }
+
+        private bool IsPythonAudioSegmentSilent(short[] samples, out float maxAmplitude, out float rms)
+        {
+                maxAmplitude = 0f;
+                rms = 0f;
+
+                if (samples == null || samples.Length == 0)
+                {
+                        return true;
+                }
+
+                double sumSquares = 0.0;
+
+                for (int i = 0; i < samples.Length; i++)
+                {
+                        float amplitude = Mathf.Abs(samples[i]) / 32768f;
+                        sumSquares += amplitude * amplitude;
+                        if (amplitude > maxAmplitude)
+                        {
+                                maxAmplitude = amplitude;
+                        }
+                }
+
+                if (samples.Length > 0)
+                {
+                        rms = Mathf.Sqrt((float)(sumSquares / samples.Length));
+                }
+
+                return maxAmplitude < PythonServiceSilenceThreshold;
+        }
+
+        private string InjectPythonSegmentMetrics(string json, float maxAmplitude, float rms)
+        {
+                if (string.IsNullOrEmpty(json) || !json.TrimStart().StartsWith("{"))
+                {
+                        return json;
+                }
+
+                try
+                {
+                        var node = JSONNode.Parse(json);
+                        var obj = node?.AsObject;
+                        if (obj == null)
+                        {
+                                return json;
+                        }
+
+                        obj["max_amplitude"] = Mathf.Clamp01(maxAmplitude);
+                        obj["rms"] = Mathf.Clamp01(rms);
+
+                        return obj.ToString();
+                }
+                catch
+                {
+                        return json;
+                }
         }
 
         private string BuildPythonServiceUrl(int sampleRate)

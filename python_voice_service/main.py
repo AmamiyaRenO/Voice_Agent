@@ -184,6 +184,7 @@ async def transcribe(
     request: Request,
     sample_rate: int = Query(DEFAULT_SAMPLE_RATE, ge=8000, le=48000),
     language: Optional[str] = Query("en", min_length=1, max_length=8),
+    beam_size: int = Query(5, ge=1, le=10),
 ) -> JSONResponse:
     payload = await request.body()
     if not payload:
@@ -199,12 +200,21 @@ async def transcribe(
 
     model = _load_model()
 
+    effective_beam_size = max(1, min(beam_size, 10))
+
     segments_generator, info = model.transcribe(
         audio,
-        beam_size=1,
+        beam_size=effective_beam_size,
         language=language or "en",
         task="transcribe",
-        word_timestamps=False,
+        word_timestamps=True,
+        temperature=0.0,
+        compression_ratio_threshold=1.2,
+        log_prob_threshold=-0.45,
+        no_speech_threshold=0.75,
+        condition_on_previous_text=False,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 500},
     )
 
     segments = list(segments_generator)
@@ -212,10 +222,18 @@ async def transcribe(
     words: List[dict] = []
     combined_text_parts: List[str] = []
 
+    avg_logprob_values: List[float] = []
+
     for segment in segments:
         text = segment.text.strip()
         if text:
             combined_text_parts.append(text)
+
+        if segment.avg_logprob is not None:
+            try:
+                avg_logprob_values.append(float(segment.avg_logprob))
+            except (TypeError, ValueError):
+                pass
 
         for word in segment.words or []:
             word_text = word.word.strip()
@@ -243,6 +261,9 @@ async def transcribe(
         "language_probability": info.language_probability,
         "translation": False,
     }
+
+    if avg_logprob_values:
+        response["avg_logprob"] = float(round(sum(avg_logprob_values) / len(avg_logprob_values), 4))
 
     return JSONResponse(response)
 
