@@ -96,12 +96,14 @@ ProjectSettings/       # Unity project configuration
 
 ## Working with Robot_opr
 
-When the Unity client detects a wake word ("hey robot" by default) followed by
-an exercise command, `VoiceGameLauncher` publishes a JSON payload describing the
-request. The Robot_opr hub consumes the `LAUNCH_GAME` and `BACK_HOME` intent
-messages to start or exit the corresponding rehabilitation experience. You can
-customise wake words, synonyms and keyword lists through the inspector or by
-editing the JSON configuration asset assigned to the launcher component.
+When the Unity client detects the wake phrase ("hi rachel" by default) it
+responds with "What can I help you?" and opens a short five-second capture
+window for the follow-up instruction. If that instruction contains an exercise
+command, `VoiceGameLauncher` publishes a JSON payload describing the request.
+The Robot_opr hub consumes the `LAUNCH_GAME` and `BACK_HOME` intent messages to
+start or exit the corresponding rehabilitation experience. You can customise
+wake words, synonyms and keyword lists through the inspector or by editing the
+JSON configuration asset assigned to the launcher component.
 
 For richer interactions (e.g. free-form questions for the virtual coach) enable
 responses via the `/respond` endpoint exposed by the Python voice service. The

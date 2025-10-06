@@ -16,10 +16,11 @@ namespace RobotVoice
     {
         [Header("Dependencies")]
         [SerializeField] private MqttIntentPublisher publisher;
+        [SerializeField] private VoskSpeechToText speechToText;
 
         [Header("Configuration")]
         [SerializeField] private TextAsset intentConfigJson;
-        [SerializeField] private string wakeWord = "hey robot";
+        [SerializeField] private string wakeWord = "hi rachel";
         [SerializeField] private bool requireWakeWord = true;
         [SerializeField] private bool requireLaunchKeyword = false;
         [SerializeField] private string[] launchKeywords = { "open", "play" };
@@ -27,6 +28,9 @@ namespace RobotVoice
         [SerializeField] private SynonymOverride[] synonymOverrides = Array.Empty<SynonymOverride>();
         [SerializeField] private float intentCooldownSeconds = 1.5f;
         [SerializeField] private bool logDebugMessages = true;
+        [Header("Wake Word Interaction")]
+        [SerializeField] private string wakeWordPrompt = "What can I help you?";
+        [SerializeField] [Min(0f)] private float wakeWordListeningWindowSeconds = 5f;
         [Header("Coach Agent")]
         [SerializeField] private string coachRespondUrl = "http://127.0.0.1:8000/respond";
         [SerializeField] private float coachResponseTimeoutSeconds = 10f;
@@ -42,6 +46,7 @@ namespace RobotVoice
         private Coroutine coachSpeechCoroutine;
 #endif
         private Coroutine coachResponseVisibilityCoroutine;
+        private float wakeWordWindowExpiry = -999f;
 
         [Serializable]
         private struct CoachRespondPayload
@@ -57,6 +62,10 @@ namespace RobotVoice
 
         private void Awake()
         {
+            if (speechToText == null)
+            {
+                speechToText = GetComponent<VoskSpeechToText>();
+            }
             ApplyFullscreenMode();
             runtimeConfig = BuildRuntimeConfig();
             ApplySpeechKeyPhrases();
@@ -254,6 +263,27 @@ namespace RobotVoice
             {
                 rawRecognised = recognised;
             }
+            var wakeWordSource = hasKeywordMatch ? recognised : rawRecognised;
+            if (string.IsNullOrWhiteSpace(wakeWordSource))
+            {
+                wakeWordSource = recognised;
+            }
+
+            var configuredWakeWord = runtimeConfig?.WakeWord?.Trim();
+            var hasWakeWordPrefix = !string.IsNullOrEmpty(configuredWakeWord) &&
+                !string.IsNullOrWhiteSpace(wakeWordSource) &&
+                wakeWordSource.StartsWith(configuredWakeWord, StringComparison.OrdinalIgnoreCase);
+
+            var textAfterWakeWord = hasWakeWordPrefix
+                ? wakeWordSource.Substring(configuredWakeWord.Length).TrimStart()
+                : wakeWordSource;
+
+            if (hasWakeWordPrefix && string.IsNullOrWhiteSpace(textAfterWakeWord))
+            {
+                HandleWakeWordOnlyDetected();
+                return;
+            }
+
             if (IsOnCooldown())
             {
                 if (logDebugMessages)
@@ -263,13 +293,7 @@ namespace RobotVoice
                 return;
             }
 
-            var wakeWordSource = hasKeywordMatch ? recognised : rawRecognised;
-            if (string.IsNullOrWhiteSpace(wakeWordSource))
-            {
-                wakeWordSource = recognised;
-            }
-
-            var processed = ApplyWakeWord(wakeWordSource);
+            var processed = ApplyWakeWord(wakeWordSource, hasWakeWordPrefix, textAfterWakeWord);
             if (processed == null)
             {
                 return;
@@ -299,6 +323,7 @@ namespace RobotVoice
             var textForCoach = string.IsNullOrWhiteSpace(processed) ? rawRecognised : processed;
             if (!string.IsNullOrWhiteSpace(textForCoach))
             {
+                ClearWakeWordWindow();
                 RequestCoachSpeech(textForCoach, string.Empty);
             }
         }
@@ -308,7 +333,50 @@ namespace RobotVoice
             return Time.realtimeSinceStartup - lastIntentTime < Mathf.Max(0.1f, intentCooldownSeconds);
         }
 
-        private string ApplyWakeWord(string recognised)
+        private void HandleWakeWordOnlyDetected()
+        {
+            ActivateWakeWordWindow();
+            PresentWakeWordPrompt();
+            TriggerWakeWordRecordingWindow();
+        }
+
+        private void TriggerWakeWordRecordingWindow()
+        {
+            if (speechToText == null)
+            {
+                return;
+            }
+
+            if (wakeWordListeningWindowSeconds <= 0f)
+            {
+                return;
+            }
+
+            speechToText.StartWakeWordWindow(wakeWordListeningWindowSeconds);
+        }
+
+        private bool IsWakeWordWindowActive()
+        {
+            return Time.realtimeSinceStartup <= wakeWordWindowExpiry;
+        }
+
+        private void ActivateWakeWordWindow()
+        {
+            if (wakeWordListeningWindowSeconds <= 0f)
+            {
+                wakeWordWindowExpiry = -999f;
+                return;
+            }
+
+            wakeWordWindowExpiry = Time.realtimeSinceStartup + wakeWordListeningWindowSeconds;
+        }
+
+        private void ClearWakeWordWindow()
+        {
+            wakeWordWindowExpiry = -999f;
+        }
+
+        private string ApplyWakeWord(string recognised, bool hasWakeWordPrefix, string textAfterWakeWord)
         {
             var configuredWakeWord = runtimeConfig.WakeWord?.Trim();
             if (string.IsNullOrEmpty(configuredWakeWord))
@@ -316,9 +384,14 @@ namespace RobotVoice
                 return recognised;
             }
 
-            if (recognised.StartsWith(configuredWakeWord, StringComparison.OrdinalIgnoreCase))
+            if (hasWakeWordPrefix)
             {
-                return recognised.Substring(configuredWakeWord.Length).TrimStart();
+                return textAfterWakeWord;
+            }
+
+            if (IsWakeWordWindowActive())
+            {
+                return recognised;
             }
 
             if (requireWakeWord)
@@ -397,6 +470,7 @@ namespace RobotVoice
                 return;
             }
 
+            ClearWakeWordWindow();
             lastIntentTime = Time.realtimeSinceStartup;
             _ = publisher.PublishLaunchIntentAsync(gameName, rawText);
             RequestCoachSpeech(rawText, gameName);
@@ -404,6 +478,7 @@ namespace RobotVoice
 
         private void PublishExit(string rawText)
         {
+            ClearWakeWordWindow();
             lastIntentTime = Time.realtimeSinceStartup;
             _ = publisher.PublishExitIntentAsync(rawText);
             RequestCoachSpeech(rawText, string.Empty);
@@ -477,6 +552,26 @@ namespace RobotVoice
             catch (Exception ex)
             {
                 Debug.LogWarning($"[RobotVoice] Failed to speak launch response: {ex.Message}");
+            }
+        }
+
+        private void PresentWakeWordPrompt()
+        {
+            if (string.IsNullOrWhiteSpace(wakeWordPrompt))
+            {
+                return;
+            }
+
+            var trimmedPrompt = wakeWordPrompt.Trim();
+            ShowCoachResponseOnScreen(trimmedPrompt);
+
+            if (speechSynthesizer != null)
+            {
+                SpeakCoachResponse(trimmedPrompt);
+            }
+            else if (logDebugMessages)
+            {
+                Debug.Log($"[RobotVoice] Coach: {trimmedPrompt}");
             }
         }
 
@@ -698,6 +793,22 @@ namespace RobotVoice
 
         private void DisposeSpeechSynthesizer()
         {
+        }
+
+        private void PresentWakeWordPrompt()
+        {
+            if (string.IsNullOrWhiteSpace(wakeWordPrompt))
+            {
+                return;
+            }
+
+            var trimmedPrompt = wakeWordPrompt.Trim();
+            ShowCoachResponseOnScreen(trimmedPrompt);
+
+            if (logDebugMessages)
+            {
+                Debug.Log($"[RobotVoice] Coach: {trimmedPrompt}");
+            }
         }
 
 #endif
