@@ -31,6 +31,10 @@ public class VoskSpeechToText : MonoBehaviour
         [Tooltip("Beam size used by the Python speech service.")]
         public int PythonServiceBeamSize = 5;
 
+        [Tooltip("Minimum normalized amplitude required before audio is sent to the Python speech service (0-1).")]
+        [Range(0f, 1f)]
+        public float PythonServiceSilenceThreshold = 0.02f;
+
         [Tooltip("The source of the microphone input.")]
         public VoiceProcessor VoiceProcessor;
 	[Tooltip("The Max number of alternatives that will be processed.")]
@@ -563,6 +567,13 @@ public class VoskSpeechToText : MonoBehaviour
 
                 _pythonRequestInFlight = true;
 
+                if (IsPythonAudioSegmentSilent(samples))
+                {
+                        _pythonRequestInFlight = false;
+                        OnStatusUpdated?.Invoke("Python speech service skipped silent audio");
+                        yield break;
+                }
+
                 var payload = new byte[samples.Length * sizeof(short)];
                 Buffer.BlockCopy(samples, 0, payload, 0, payload.Length);
 
@@ -609,6 +620,32 @@ public class VoskSpeechToText : MonoBehaviour
                 }
 
                 _pythonRequestInFlight = false;
+        }
+
+        private bool IsPythonAudioSegmentSilent(short[] samples)
+        {
+                if (samples == null || samples.Length == 0)
+                {
+                        return true;
+                }
+
+                float maxAmplitude = 0f;
+
+                for (int i = 0; i < samples.Length; i++)
+                {
+                        float amplitude = Mathf.Abs(samples[i]) / 32768f;
+                        if (amplitude > maxAmplitude)
+                        {
+                                maxAmplitude = amplitude;
+
+                                if (maxAmplitude >= PythonServiceSilenceThreshold)
+                                {
+                                        return false;
+                                }
+                        }
+                }
+
+                return maxAmplitude < PythonServiceSilenceThreshold;
         }
 
         private string BuildPythonServiceUrl(int sampleRate)

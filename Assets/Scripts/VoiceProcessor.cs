@@ -286,9 +286,10 @@ public class VoiceProcessor : MonoBehaviour
 
                 for (int i = 0; i < sampleBuffer.Length; i++)
                 {
-                    if (sampleBuffer[i] > maxVolume)
+                    float amplitude = Mathf.Abs(sampleBuffer[i]);
+                    if (amplitude > maxVolume)
                     {
-                        maxVolume = sampleBuffer[i];
+                        maxVolume = amplitude;
                     }
                 }
 
