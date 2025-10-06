@@ -95,18 +95,28 @@ public class VoiceProcessor : MonoBehaviour
 
     [Header("Voice Detection Settings")]
     [SerializeField, Tooltip("The minimum volume to detect voice input for"), Range(0.0f, 1.0f)]
-    private float _minimumSpeakingSampleValue = 0.05f;
+    private float _minimumSpeakingSampleValue = 0.02f;
 
     [SerializeField, Tooltip("Time in seconds of detected silence before voice request is sent")]
-    private float _silenceTimer = 1.0f;
+    private float _silenceTimer = 0.5f;
 
     [SerializeField, Tooltip("Auto detect speech using the volume threshold.")]
     private bool _autoDetect;
+
+    [SerializeField, Tooltip("Automatically adapt the detection threshold to the current noise floor.")]
+    private bool _useAdaptiveNoiseGate = true;
+
+    [SerializeField, Tooltip("Smoothing applied when tracking the background noise level"), Range(0.0f, 1.0f)]
+    private float _noiseFloorSmoothing = 0.05f;
+
+    [SerializeField, Tooltip("Additional margin added on top of the estimated noise floor before triggering speech detection.")]
+    private float _noiseFloorMargin = 0.02f;
 
     private float _timeAtSilenceBegan;
     private bool _audioDetected;
     private bool _didDetect;
     private bool _transmit;
+    private float _estimatedNoiseFloor = 0.01f;
 
 
     AudioClip _audioClip;
@@ -206,6 +216,7 @@ public class VoiceProcessor : MonoBehaviour
 
         SampleRate = sampleRate;
         FrameLength = frameSize;
+        _estimatedNoiseFloor = Mathf.Max(_minimumSpeakingSampleValue, 0.001f);
 
         _audioClip = Microphone.Start(CurrentDeviceName, true, 1, sampleRate);
 
@@ -283,27 +294,54 @@ public class VoiceProcessor : MonoBehaviour
             else
             {
                 float maxVolume = 0.0f;
-
                 for (int i = 0; i < sampleBuffer.Length; i++)
                 {
-                    if (sampleBuffer[i] > maxVolume)
+                    float absSample = Mathf.Abs(sampleBuffer[i]);
+                    if (absSample > maxVolume)
                     {
-                        maxVolume = sampleBuffer[i];
+                        maxVolume = absSample;
                     }
                 }
 
-                if (maxVolume >= _minimumSpeakingSampleValue)
+                if (_useAdaptiveNoiseGate)
                 {
-                    _transmit= _audioDetected = true;
-                    _timeAtSilenceBegan = Time.time;
+                    if (!_audioDetected || !_transmit)
+                    {
+                        _estimatedNoiseFloor = Mathf.Lerp(_estimatedNoiseFloor, maxVolume, _noiseFloorSmoothing);
+                    }
+
+                    float dynamicThreshold = Mathf.Max(_minimumSpeakingSampleValue, _estimatedNoiseFloor + _noiseFloorMargin);
+
+                    if (maxVolume >= dynamicThreshold)
+                    {
+                        _transmit = _audioDetected = true;
+                        _timeAtSilenceBegan = Time.time;
+                    }
+                    else
+                    {
+                        _transmit = false;
+
+                        if (_audioDetected && Time.time - _timeAtSilenceBegan > _silenceTimer)
+                        {
+                            _audioDetected = false;
+                        }
+                    }
                 }
                 else
                 {
-                    _transmit = false;
-
-                    if (_audioDetected && Time.time - _timeAtSilenceBegan > _silenceTimer)
+                    if (maxVolume >= _minimumSpeakingSampleValue)
                     {
-                        _audioDetected = false;
+                        _transmit = _audioDetected = true;
+                        _timeAtSilenceBegan = Time.time;
+                    }
+                    else
+                    {
+                        _transmit = false;
+
+                        if (_audioDetected && Time.time - _timeAtSilenceBegan > _silenceTimer)
+                        {
+                            _audioDetected = false;
+                        }
                     }
                 }
             }
@@ -315,7 +353,8 @@ public class VoiceProcessor : MonoBehaviour
                 short[] pcmBuffer = new short[sampleBuffer.Length];
                 for (int i = 0; i < FrameLength; i++)
                 {
-                    pcmBuffer[i] = (short) Math.Floor(sampleBuffer[i] * short.MaxValue);
+                    float clampedSample = Mathf.Clamp(sampleBuffer[i], -1.0f, 1.0f);
+                    pcmBuffer[i] = (short)Mathf.RoundToInt(clampedSample * short.MaxValue);
                 }
 
                 // raise buffer event
