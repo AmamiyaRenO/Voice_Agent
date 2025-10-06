@@ -29,8 +29,13 @@ namespace RobotVoice
         [SerializeField] private float intentCooldownSeconds = 1.5f;
         [SerializeField] private bool logDebugMessages = true;
         [Header("Wake Word Interaction")]
-        [SerializeField] private string wakeWordPrompt = "What can I help you?";
+        [SerializeField] private string wakeWordPrompt = "Listening";
         [SerializeField] [Min(0f)] private float wakeWordListeningWindowSeconds = 5f;
+        [SerializeField] private AudioSource wakeWordPromptSource;
+        [SerializeField] private AudioClip wakeWordPromptClip;
+        [SerializeField] private GameObject wakeListeningIndicatorRoot;
+        [SerializeField] private Image wakeListeningProgressImage;
+        [SerializeField] private Text wakeListeningCountdownText;
         [Header("Coach Agent")]
         [SerializeField] private string coachRespondUrl = "http://127.0.0.1:8000/respond";
         [SerializeField] private float coachResponseTimeoutSeconds = 10f;
@@ -47,6 +52,7 @@ namespace RobotVoice
 #endif
         private Coroutine coachResponseVisibilityCoroutine;
         private float wakeWordWindowExpiry = -999f;
+        private Coroutine wakeListeningIndicatorCoroutine;
 
         [Serializable]
         private struct CoachRespondPayload
@@ -92,6 +98,7 @@ namespace RobotVoice
                 coachResponseVisibilityCoroutine = null;
             }
             ResetCoachResponseDisplay();
+            StopWakeWordListeningIndicator();
             DisposeSpeechSynthesizer();
         }
 
@@ -374,6 +381,7 @@ namespace RobotVoice
         private void ClearWakeWordWindow()
         {
             wakeWordWindowExpiry = -999f;
+            StopWakeWordListeningIndicator();
         }
 
         private string ApplyWakeWord(string recognised, bool hasWakeWordPrefix, string textAfterWakeWord)
@@ -557,21 +565,60 @@ namespace RobotVoice
 
         private void PresentWakeWordPrompt()
         {
-            if (string.IsNullOrWhiteSpace(wakeWordPrompt))
+            PlayWakeWordPromptClip();
+            StartWakeWordListeningIndicator();
+        }
+
+        private void PlayWakeWordPromptClip()
+        {
+            var hasSource = wakeWordPromptSource != null;
+            var hasClip = wakeWordPromptClip != null;
+
+            if (!hasSource && !hasClip)
             {
+                if (logDebugMessages)
+                {
+                    Debug.LogWarning("[RobotVoice] Wake prompt audio is not configured.");
+                }
+
                 return;
             }
 
-            var trimmedPrompt = wakeWordPrompt.Trim();
-            ShowCoachResponseOnScreen(trimmedPrompt);
+            if (hasSource)
+            {
+                try
+                {
+                    wakeWordPromptSource.Stop();
+                    if (hasClip)
+                    {
+                        wakeWordPromptSource.PlayOneShot(wakeWordPromptClip);
+                    }
+                    else
+                    {
+                        wakeWordPromptSource.Play();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (logDebugMessages)
+                    {
+                        Debug.LogWarning($"[RobotVoice] Failed to play wake prompt clip: {ex.Message}");
+                    }
+                }
 
-            if (speechSynthesizer != null)
-            {
-                SpeakCoachResponse(trimmedPrompt);
+                return;
             }
-            else if (logDebugMessages)
+
+            try
             {
-                Debug.Log($"[RobotVoice] Coach: {trimmedPrompt}");
+                AudioSource.PlayClipAtPoint(wakeWordPromptClip, transform.position);
+            }
+            catch (Exception ex)
+            {
+                if (logDebugMessages)
+                {
+                    Debug.LogWarning($"[RobotVoice] Failed to play wake prompt clip at point: {ex.Message}");
+                }
             }
         }
 
@@ -797,21 +844,122 @@ namespace RobotVoice
 
         private void PresentWakeWordPrompt()
         {
-            if (string.IsNullOrWhiteSpace(wakeWordPrompt))
+            PlayWakeWordPromptClip();
+            StartWakeWordListeningIndicator();
+        }
+
+#endif
+
+        private void StartWakeWordListeningIndicator()
+        {
+            if (wakeWordListeningWindowSeconds <= 0f)
+            {
+                StopWakeWordListeningIndicator();
+                return;
+            }
+
+            if (wakeListeningIndicatorRoot == null && wakeListeningProgressImage == null && wakeListeningCountdownText == null)
             {
                 return;
             }
 
-            var trimmedPrompt = wakeWordPrompt.Trim();
-            ShowCoachResponseOnScreen(trimmedPrompt);
-
-            if (logDebugMessages)
+            if (wakeListeningIndicatorCoroutine != null)
             {
-                Debug.Log($"[RobotVoice] Coach: {trimmedPrompt}");
+                StopCoroutine(wakeListeningIndicatorCoroutine);
+                wakeListeningIndicatorCoroutine = null;
+            }
+
+            if (wakeListeningIndicatorRoot != null)
+            {
+                wakeListeningIndicatorRoot.SetActive(true);
+            }
+
+            UpdateWakeWordIndicatorVisuals(wakeWordListeningWindowSeconds, wakeWordListeningWindowSeconds);
+            wakeListeningIndicatorCoroutine = StartCoroutine(UpdateWakeWordListeningIndicator(wakeWordListeningWindowSeconds));
+        }
+
+        private void StopWakeWordListeningIndicator()
+        {
+            if (wakeListeningIndicatorCoroutine != null)
+            {
+                StopCoroutine(wakeListeningIndicatorCoroutine);
+                wakeListeningIndicatorCoroutine = null;
+            }
+
+            if (wakeListeningProgressImage != null)
+            {
+                wakeListeningProgressImage.fillAmount = 0f;
+            }
+
+            if (wakeListeningCountdownText != null)
+            {
+                wakeListeningCountdownText.text = string.Empty;
+            }
+
+            if (wakeListeningIndicatorRoot != null)
+            {
+                wakeListeningIndicatorRoot.SetActive(false);
             }
         }
 
-#endif
+        private IEnumerator UpdateWakeWordListeningIndicator(float durationSeconds)
+        {
+            var clampedDuration = Mathf.Max(0.01f, durationSeconds);
+            var endTime = Time.realtimeSinceStartup + clampedDuration;
+
+            while (Time.realtimeSinceStartup < endTime)
+            {
+                var remaining = Mathf.Max(0f, endTime - Time.realtimeSinceStartup);
+                UpdateWakeWordIndicatorVisuals(clampedDuration, remaining);
+                yield return null;
+            }
+
+            UpdateWakeWordIndicatorVisuals(clampedDuration, 0f);
+
+            if (wakeListeningIndicatorRoot != null)
+            {
+                wakeListeningIndicatorRoot.SetActive(false);
+            }
+
+            if (wakeListeningProgressImage != null)
+            {
+                wakeListeningProgressImage.fillAmount = 0f;
+            }
+
+            if (wakeListeningCountdownText != null)
+            {
+                wakeListeningCountdownText.text = string.Empty;
+            }
+
+            wakeListeningIndicatorCoroutine = null;
+        }
+
+        private void UpdateWakeWordIndicatorVisuals(float durationSeconds, float remainingSeconds)
+        {
+            if (wakeListeningProgressImage != null)
+            {
+                var progress = Mathf.Clamp01(1f - (remainingSeconds / durationSeconds));
+                wakeListeningProgressImage.fillAmount = progress;
+            }
+
+            if (wakeListeningCountdownText != null)
+            {
+                var rounded = Mathf.CeilToInt(remainingSeconds);
+                if (rounded < 0)
+                {
+                    rounded = 0;
+                }
+
+                var prefix = string.IsNullOrWhiteSpace(wakeWordPrompt)
+                    ? string.Empty
+                    : wakeWordPrompt.Trim();
+
+                var countdown = rounded.ToString(CultureInfo.InvariantCulture);
+                wakeListeningCountdownText.text = string.IsNullOrEmpty(prefix)
+                    ? countdown
+                    : $"{prefix} {countdown}";
+            }
+        }
 
 #if !UNITY_STANDALONE_WIN && !UNITY_EDITOR_WIN
         private void RequestCoachSpeech(string recognisedText, string fallbackGameName)
