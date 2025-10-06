@@ -8,6 +8,7 @@ using System.Speech.Synthesis;
 #endif
 using UnityEngine;
 using UnityEngine.Networking;
+using UnityEngine.UI;
 
 namespace RobotVoice
 {
@@ -29,6 +30,9 @@ namespace RobotVoice
         [Header("Coach Agent")]
         [SerializeField] private string coachRespondUrl = "http://127.0.0.1:8000/respond";
         [SerializeField] private float coachResponseTimeoutSeconds = 10f;
+        [SerializeField] private GameObject coachResponsePanel;
+        [SerializeField] private Text coachResponseText;
+        [SerializeField] [Min(0f)] private float coachResponseDisplaySeconds = 6f;
 
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
@@ -37,6 +41,7 @@ namespace RobotVoice
         private SpeechSynthesizer speechSynthesizer;
         private Coroutine coachSpeechCoroutine;
 #endif
+        private Coroutine coachResponseVisibilityCoroutine;
 
         [Serializable]
         private struct CoachRespondPayload
@@ -55,6 +60,7 @@ namespace RobotVoice
             ApplyFullscreenMode();
             runtimeConfig = BuildRuntimeConfig();
             ApplySpeechKeyPhrases();
+            ResetCoachResponseDisplay();
         }
 
         private void Start()
@@ -71,6 +77,12 @@ namespace RobotVoice
                 coachSpeechCoroutine = null;
             }
 #endif
+            if (coachResponseVisibilityCoroutine != null)
+            {
+                StopCoroutine(coachResponseVisibilityCoroutine);
+                coachResponseVisibilityCoroutine = null;
+            }
+            ResetCoachResponseDisplay();
             DisposeSpeechSynthesizer();
         }
 
@@ -531,6 +543,7 @@ namespace RobotVoice
                         if (!string.IsNullOrWhiteSpace(reply))
                         {
                             var finalReply = reply.Trim();
+                            ShowCoachResponseOnScreen(finalReply);
                             if (speechSynthesizer != null)
                             {
                                 SpeakCoachResponse(finalReply);
@@ -540,17 +553,25 @@ namespace RobotVoice
                                 Debug.Log($"[RobotVoice] Coach: {finalReply}");
                             }
                         }
-                        else if (logDebugMessages)
+                        else
                         {
-                            Debug.LogWarning("[RobotVoice] Coach reply was empty");
+                            ResetCoachResponseDisplay();
+                            if (logDebugMessages)
+                            {
+                                Debug.LogWarning("[RobotVoice] Coach reply was empty");
+                            }
                         }
                     }
-                    else if (logDebugMessages)
+                    else
                     {
-                        var error = string.IsNullOrWhiteSpace(request.error)
-                            ? $"HTTP {(int)request.responseCode}"
-                            : request.error;
-                        Debug.LogWarning($"[RobotVoice] Failed to fetch coach reply: {error}");
+                        ResetCoachResponseDisplay();
+                        if (logDebugMessages)
+                        {
+                            var error = string.IsNullOrWhiteSpace(request.error)
+                                ? $"HTTP {(int)request.responseCode}"
+                                : request.error;
+                            Debug.LogWarning($"[RobotVoice] Failed to fetch coach reply: {error}");
+                        }
                     }
                 }
             }
@@ -581,6 +602,94 @@ namespace RobotVoice
             }
 
             return string.Empty;
+        }
+
+        private void ShowCoachResponseOnScreen(string message)
+        {
+            if (coachResponseText == null && coachResponsePanel == null)
+            {
+                return;
+            }
+
+            if (coachResponseVisibilityCoroutine != null)
+            {
+                StopCoroutine(coachResponseVisibilityCoroutine);
+                coachResponseVisibilityCoroutine = null;
+            }
+
+            var trimmedMessage = string.IsNullOrWhiteSpace(message) ? string.Empty : message.Trim();
+
+            if (coachResponseText != null)
+            {
+                coachResponseText.text = trimmedMessage;
+            }
+
+            var root = coachResponsePanel != null
+                ? coachResponsePanel
+                : coachResponseText != null
+                    ? coachResponseText.gameObject
+                    : null;
+
+            if (root != null)
+            {
+                root.SetActive(!string.IsNullOrEmpty(trimmedMessage));
+            }
+
+            if (!string.IsNullOrEmpty(trimmedMessage) && coachResponseDisplaySeconds > 0f)
+            {
+                coachResponseVisibilityCoroutine = StartCoroutine(HideCoachResponseAfterDelay(coachResponseDisplaySeconds));
+            }
+        }
+
+        private IEnumerator HideCoachResponseAfterDelay(float delaySeconds)
+        {
+            if (delaySeconds > 0f)
+            {
+                yield return new WaitForSeconds(delaySeconds);
+            }
+
+            if (coachResponseText != null)
+            {
+                coachResponseText.text = string.Empty;
+            }
+
+            var root = coachResponsePanel != null
+                ? coachResponsePanel
+                : coachResponseText != null
+                    ? coachResponseText.gameObject
+                    : null;
+
+            if (root != null)
+            {
+                root.SetActive(false);
+            }
+
+            coachResponseVisibilityCoroutine = null;
+        }
+
+        private void ResetCoachResponseDisplay()
+        {
+            if (coachResponseVisibilityCoroutine != null)
+            {
+                StopCoroutine(coachResponseVisibilityCoroutine);
+                coachResponseVisibilityCoroutine = null;
+            }
+
+            if (coachResponseText != null)
+            {
+                coachResponseText.text = string.Empty;
+            }
+
+            var root = coachResponsePanel != null
+                ? coachResponsePanel
+                : coachResponseText != null
+                    ? coachResponseText.gameObject
+                    : null;
+
+            if (root != null)
+            {
+                root.SetActive(false);
+            }
         }
 #else
         private void InitializeSpeechSynthesizer()
