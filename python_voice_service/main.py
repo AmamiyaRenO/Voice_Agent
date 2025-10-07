@@ -67,25 +67,15 @@ def _environment_int(key: str, default: int) -> int:
 
 @lru_cache(maxsize=1)
 def _load_model() -> WhisperModel:
-    model_path = _environment("WHISPER_MODEL_PATH", "medium.en")
-    device = _environment("WHISPER_DEVICE", "cpu").lower()
+    model_path = _environment("WHISPER_MODEL_PATH", "large-v3")
+    compute_type = _environment("WHISPER_COMPUTE_TYPE", "int8_float16")
 
-    if device == "cuda":
-        compute_type = _environment("WHISPER_COMPUTE_TYPE", "float16")
-        return WhisperModel(model_path, device=device, compute_type=compute_type)
-
-    compute_type = _environment("WHISPER_COMPUTE_TYPE", "int8")
+    model = WhisperModel(model_path, device="cuda", compute_type=compute_type)
     try:
-        cpu_threads = int(_environment("WHISPER_CPU_THREADS", "8"))
-    except ValueError:
-        cpu_threads = 8
-
-    return WhisperModel(
-        model_path,
-        device=device,
-        compute_type=compute_type,
-        cpu_threads=cpu_threads,
-    )
+        print(f"[VoiceService] Loaded Faster-Whisper model={model_path} device=cuda compute_type={compute_type}")
+    except Exception:
+        pass
+    return model
 
 
 class RespondRequest(BaseModel):
@@ -205,15 +195,21 @@ async def transcribe(
     segments_generator, info = model.transcribe(
         audio,
         beam_size=effective_beam_size,
-        language=language or "en",
+        language="en",
         task="transcribe",
         word_timestamps=True,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 300},
+        initial_prompt="rachel",
+        temperature=(0.0, 0.2),
+        best_of=5,
     )
 
     segments = list(segments_generator)
 
     words: List[dict] = []
     combined_text_parts: List[str] = []
+    raw_text_parts: List[str] = []
 
     avg_logprob_values: List[float] = []
 
@@ -221,6 +217,7 @@ async def transcribe(
         text = segment.text.strip()
         if text:
             combined_text_parts.append(text)
+            raw_text_parts.append(text)
 
         if segment.avg_logprob is not None:
             try:
@@ -242,7 +239,12 @@ async def transcribe(
                 }
             )
 
+    # Wake word biasing: if the entire utterance is a short single token close to "rachel",
+    # normalize it to the exact form to stabilize wake-word detection on Whisper side.
     full_text = " ".join(part for part in combined_text_parts if part).strip()
+    normalized = full_text.lower()
+    if normalized in ("rachel", "ra chel", "rachal", "richel", "richelle", "rach el"):
+        full_text = "rachel"
     if not full_text and words:
         full_text = " ".join(word["word"] for word in words).strip()
 
