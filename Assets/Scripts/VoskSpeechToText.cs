@@ -35,6 +35,13 @@ public class VoskSpeechToText : MonoBehaviour
         [Range(0f, 1f)]
         public float PythonServiceSilenceThreshold = 0.02f;
 
+        [Tooltip("Max record length per segment when using the Python speech service (seconds).")]
+        [Range(0.1f, 10f)]
+        public float PythonMaxRecordLength = 1.5f;
+
+        [Tooltip("Frame length for VoiceProcessor when using the Python speech service.")]
+        public int PythonFrameLength = 256;
+
         [Tooltip("The source of the microphone input.")]
         public VoiceProcessor VoiceProcessor;
 	[Tooltip("The Max number of alternatives that will be processed.")]
@@ -203,6 +210,11 @@ public class VoskSpeechToText : MonoBehaviour
 
                 OnStatusUpdated?.Invoke("Python speech service ready");
 
+                if (PythonMaxRecordLength > 0f)
+                {
+                        MaxRecordLength = PythonMaxRecordLength;
+                }
+
                 ToggleRecording();
         }
 
@@ -225,8 +237,8 @@ public class VoskSpeechToText : MonoBehaviour
                 VoiceProcessor.OnRecordingStop += VoiceProcessorOnOnRecordingStop;
                 VoiceProcessor.OnRecordingStart += VoiceProcessorOnRecordingStart;
 
-		if (startMicrophone)
-			VoiceProcessor.StartRecording();
+        if (startMicrophone)
+            VoiceProcessor.StartRecording(16000, 512, false);
 
 		_isInitializing = false;
 		_didInit = true;
@@ -348,12 +360,12 @@ public class VoskSpeechToText : MonoBehaviour
                         {
                                 ClearPythonBuffer();
                                 var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
-                                var frameLength = VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512;
+                                var frameLength = PythonFrameLength > 0 ? PythonFrameLength : (VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512);
                                 VoiceProcessor.StartRecording(sampleRate, frameLength, true);
                         }
                         else
                         {
-                                VoiceProcessor.StartRecording();
+                                VoiceProcessor.StartRecording(16000, 512, false);
                                 Task.Run(ThreadedWork).ConfigureAwait(false);
                         }
                 }
@@ -467,7 +479,7 @@ public class VoskSpeechToText : MonoBehaviour
                         {
                                 ClearPythonBuffer();
                                 var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
-                                var frameLength = VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512;
+                                var frameLength = PythonFrameLength > 0 ? PythonFrameLength : (VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512);
                                 VoiceProcessor.StartRecording(sampleRate, frameLength, true);
                         }
                         else
@@ -486,12 +498,12 @@ public class VoskSpeechToText : MonoBehaviour
                 if (!_running)
                 {
                         _running = true;
-                        VoiceProcessor.StartRecording();
+                        VoiceProcessor.StartRecording(16000, 512, false);
                         Task.Run(ThreadedWork).ConfigureAwait(false);
                 }
                 else if (!VoiceProcessor.IsRecording)
                 {
-                        VoiceProcessor.StartRecording();
+                        VoiceProcessor.StartRecording(16000, 512, false);
                 }
 
                 _wakeWordOverrideActive = false;
@@ -550,7 +562,7 @@ public class VoskSpeechToText : MonoBehaviour
                 if (restartRecording && _running)
                 {
                         var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
-                        var frameLength = VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512;
+                        var frameLength = PythonFrameLength > 0 ? PythonFrameLength : (VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512);
                         VoiceProcessor.StartRecording(sampleRate, frameLength, true);
                 }
         }

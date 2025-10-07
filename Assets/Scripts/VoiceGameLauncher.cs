@@ -21,7 +21,9 @@ namespace RobotVoice
 
         [Header("Configuration")]
         [SerializeField] private TextAsset intentConfigJson;
-        [SerializeField] private string wakeWord = "hi rachel";
+        [SerializeField] private string wakeWord = "richel";
+        [SerializeField, Tooltip("Additional variants accepted as wake word prefixes (case-insensitive)")]
+        private string[] wakeWordVariants = new[] { "rachel", "richelle", "richel", "rachal" };
         [SerializeField] private bool requireWakeWord = true;
         [SerializeField] private bool requireLaunchKeyword = false;
         [SerializeField] private string[] launchKeywords = { "open", "play" };
@@ -38,7 +40,7 @@ namespace RobotVoice
         private float duplicateSuppressionSeconds = 2f;
         [Header("Wake Word Interaction")]
         [SerializeField] private string wakeWordPrompt = "Listening";
-        [SerializeField] [Min(0f)] private float wakeWordListeningWindowSeconds = 5f;
+        // removed fixed listening window: we act on first command after wake word
         [SerializeField] private AudioSource wakeWordPromptSource;
         [SerializeField] private AudioClip wakeWordPromptClip;
         [SerializeField] private GameObject wakeListeningIndicatorRoot;
@@ -54,12 +56,13 @@ namespace RobotVoice
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
         private readonly List<KeywordPhrase> keywordPhrases = new List<KeywordPhrase>();
+        private bool awaitingFirstCommand;
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
         private SpeechSynthesizer speechSynthesizer;
         private Coroutine coachSpeechCoroutine;
 #endif
         private Coroutine coachResponseVisibilityCoroutine;
-        private float wakeWordWindowExpiry = -999f;
+        // removed expiry timestamp: awaitingFirstCommand controls lifecycle
         private Coroutine wakeListeningIndicatorCoroutine;
         private string lastDeliveredTranscript = string.Empty;
         private float lastDeliveredTranscriptTime = -999f;
@@ -177,7 +180,7 @@ namespace RobotVoice
             {
                 config.ExitKeywords = exitKeywords != null && exitKeywords.Length > 0
                     ? exitKeywords
-                    : new[] { "quit", "stop" };
+                    : new[] { "back", "quit", "close", "shut down" };
             }
 
             if (config.SynonymOverrides == null || config.SynonymOverrides.Length == 0)
@@ -337,16 +340,19 @@ namespace RobotVoice
             }
 
             var configuredWakeWord = runtimeConfig?.WakeWord?.Trim();
-            var hasWakeWordPrefix = !string.IsNullOrEmpty(configuredWakeWord) &&
-                !string.IsNullOrWhiteSpace(wakeWordSource) &&
-                wakeWordSource.StartsWith(configuredWakeWord, StringComparison.OrdinalIgnoreCase);
+            var hasWakeWordPrefix = !string.IsNullOrWhiteSpace(wakeWordSource) && MatchesWakeWordPrefix(wakeWordSource, configuredWakeWord);
+            var containsWakeWord = !string.IsNullOrWhiteSpace(wakeWordSource) && ContainsWakeWord(wakeWordSource, configuredWakeWord);
+            // 仅用于日志观察，不再使用时间窗口
 
             var textAfterWakeWord = hasWakeWordPrefix
                 ? wakeWordSource.Substring(configuredWakeWord.Length).TrimStart()
                 : wakeWordSource;
 
-            if (hasWakeWordPrefix && string.IsNullOrWhiteSpace(textAfterWakeWord))
+            if ((hasWakeWordPrefix && string.IsNullOrWhiteSpace(textAfterWakeWord)) ||
+                (containsWakeWord && string.Equals(wakeWordSource.Trim(), configuredWakeWord, StringComparison.OrdinalIgnoreCase)))
             {
+                // 立即进入首命令等待，避免协程调度带来的竞态
+                awaitingFirstCommand = true;
                 HandleWakeWordOnlyDetected();
                 return;
             }
@@ -361,9 +367,20 @@ namespace RobotVoice
             }
 
             var processed = ApplyWakeWord(wakeWordSource, hasWakeWordPrefix, textAfterWakeWord);
+            if (processed == null && awaitingFirstCommand)
+            {
+                // 唤醒后无条件放行下一句
+                processed = wakeWordSource;
+            }
             if (processed == null)
             {
                 return;
+            }
+
+            // 一旦放行命令，结束首命令等待状态，避免后续语句继续误判
+            if (awaitingFirstCommand)
+            {
+                awaitingFirstCommand = false;
             }
 
             if (hasKeywordMatch)
@@ -397,14 +414,18 @@ namespace RobotVoice
 
         private bool IsOnCooldown()
         {
+            // 唤醒后的第一条命令不受冷却限制
+            if (awaitingFirstCommand && IsWakeWordWindowActive())
+            {
+                return false;
+            }
+
             return Time.realtimeSinceStartup - lastIntentTime < Mathf.Max(0.1f, intentCooldownSeconds);
         }
 
         private void HandleWakeWordOnlyDetected()
         {
-            ActivateWakeWordWindow();
-            PresentWakeWordPrompt();
-            TriggerWakeWordRecordingWindow();
+            StartCoroutine(PlayPromptThenOpenWakeWindow());
         }
 
         private void TriggerWakeWordRecordingWindow()
@@ -414,34 +435,37 @@ namespace RobotVoice
                 return;
             }
 
-            if (wakeWordListeningWindowSeconds <= 0f)
-            {
-                return;
-            }
+            // 不再使用固定时长窗口，由 awaitingFirstCommand 控制生命周期
+            speechToText.StartWakeWordWindow(Mathf.Max(0.1f, 0.5f)); // 仍需触发录音启动，给一个很短的窗口
+        }
 
-            speechToText.StartWakeWordWindow(wakeWordListeningWindowSeconds);
+        private IEnumerator PlayPromptThenOpenWakeWindow()
+        {
+            // 立即开启录音窗口，不等待提示音播放完成
+            ActivateWakeWordWindow();
+            awaitingFirstCommand = true;
+            TriggerWakeWordRecordingWindow();
+
+            // 并行播放提示音（不阻塞语音监听）
+            PresentWakeWordPrompt();
+            yield break;
         }
 
         private bool IsWakeWordWindowActive()
         {
-            return Time.realtimeSinceStartup <= wakeWordWindowExpiry;
+            // 改为“只等待第一条命令”，不再依赖倒计时窗口
+            return awaitingFirstCommand;
         }
 
         private void ActivateWakeWordWindow()
         {
-            if (wakeWordListeningWindowSeconds <= 0f)
-            {
-                wakeWordWindowExpiry = -999f;
-                return;
-            }
-
-            wakeWordWindowExpiry = Time.realtimeSinceStartup + wakeWordListeningWindowSeconds;
+            awaitingFirstCommand = true;
         }
 
         private void ClearWakeWordWindow()
         {
-            wakeWordWindowExpiry = -999f;
             StopWakeWordListeningIndicator();
+            awaitingFirstCommand = false;
         }
 
         private string ApplyWakeWord(string recognised, bool hasWakeWordPrefix, string textAfterWakeWord)
@@ -462,7 +486,7 @@ namespace RobotVoice
                 return recognised;
             }
 
-            if (requireWakeWord)
+            if (requireWakeWord && !awaitingFirstCommand)
             {
                 if (logDebugMessages)
                 {
@@ -472,6 +496,60 @@ namespace RobotVoice
             }
 
             return recognised;
+        }
+
+        private bool MatchesWakeWordPrefix(string recognised, string configured)
+        {
+            if (string.IsNullOrWhiteSpace(recognised))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(configured) && recognised.StartsWith(configured, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (wakeWordVariants != null)
+            {
+                for (int i = 0; i < wakeWordVariants.Length; i++)
+                {
+                    var v = wakeWordVariants[i];
+                    if (!string.IsNullOrWhiteSpace(v) && recognised.StartsWith(v.Trim(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private bool ContainsWakeWord(string recognised, string configured)
+        {
+            if (string.IsNullOrWhiteSpace(recognised))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(configured) && recognised.IndexOf(configured, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+
+            if (wakeWordVariants != null)
+            {
+                for (int i = 0; i < wakeWordVariants.Length; i++)
+                {
+                    var v = wakeWordVariants[i];
+                    if (!string.IsNullOrWhiteSpace(v) && recognised.IndexOf(v.Trim(), StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         private bool IsExitIntent(string recognised)
@@ -538,6 +616,7 @@ namespace RobotVoice
                 return;
             }
 
+            awaitingFirstCommand = false;
             ClearWakeWordWindow();
             lastIntentTime = Time.realtimeSinceStartup;
             _ = publisher.PublishLaunchIntentAsync(gameName, rawText);
@@ -546,6 +625,7 @@ namespace RobotVoice
 
         private void PublishExit(string rawText)
         {
+            awaitingFirstCommand = false;
             ClearWakeWordWindow();
             lastIntentTime = Time.realtimeSinceStartup;
             _ = publisher.PublishExitIntentAsync(rawText);
@@ -625,8 +705,8 @@ namespace RobotVoice
 
         private void PresentWakeWordPrompt()
         {
+            // 播放提示音，不显示倒计时
             PlayWakeWordPromptClip();
-            StartWakeWordListeningIndicator();
         }
 
         private void PlayWakeWordPromptClip()
@@ -671,7 +751,23 @@ namespace RobotVoice
 
             try
             {
-                AudioSource.PlayClipAtPoint(wakeWordPromptClip, transform.position);
+                var listener = FindObjectOfType<AudioListener>();
+                if (listener != null)
+                {
+                    AudioSource.PlayClipAtPoint(wakeWordPromptClip, listener.transform.position);
+                }
+                else
+                {
+                    var temp = new GameObject("WakePromptAudio");
+                    var src = temp.AddComponent<AudioSource>();
+                    src.playOnAwake = false;
+                    src.spatialBlend = 0f;
+                    src.clip = wakeWordPromptClip;
+                    src.loop = false;
+                    src.volume = 1f;
+                    src.Play();
+                    Destroy(temp, Mathf.Max(0.1f, wakeWordPromptClip.length + 0.1f));
+                }
             }
             catch (Exception ex)
             {
@@ -912,30 +1008,7 @@ namespace RobotVoice
 
         private void StartWakeWordListeningIndicator()
         {
-            if (wakeWordListeningWindowSeconds <= 0f)
-            {
-                StopWakeWordListeningIndicator();
-                return;
-            }
-
-            if (wakeListeningIndicatorRoot == null && wakeListeningProgressImage == null && wakeListeningCountdownText == null)
-            {
-                return;
-            }
-
-            if (wakeListeningIndicatorCoroutine != null)
-            {
-                StopCoroutine(wakeListeningIndicatorCoroutine);
-                wakeListeningIndicatorCoroutine = null;
-            }
-
-            if (wakeListeningIndicatorRoot != null)
-            {
-                wakeListeningIndicatorRoot.SetActive(true);
-            }
-
-            UpdateWakeWordIndicatorVisuals(wakeWordListeningWindowSeconds, wakeWordListeningWindowSeconds);
-            wakeListeningIndicatorCoroutine = StartCoroutine(UpdateWakeWordListeningIndicator(wakeWordListeningWindowSeconds));
+            // 不再显示倒计时指示
         }
 
         private void StopWakeWordListeningIndicator()
@@ -962,37 +1035,7 @@ namespace RobotVoice
             }
         }
 
-        private IEnumerator UpdateWakeWordListeningIndicator(float durationSeconds)
-        {
-            var clampedDuration = Mathf.Max(0.01f, durationSeconds);
-            var endTime = Time.realtimeSinceStartup + clampedDuration;
-
-            while (Time.realtimeSinceStartup < endTime)
-            {
-                var remaining = Mathf.Max(0f, endTime - Time.realtimeSinceStartup);
-                UpdateWakeWordIndicatorVisuals(clampedDuration, remaining);
-                yield return null;
-            }
-
-            UpdateWakeWordIndicatorVisuals(clampedDuration, 0f);
-
-            if (wakeListeningIndicatorRoot != null)
-            {
-                wakeListeningIndicatorRoot.SetActive(false);
-            }
-
-            if (wakeListeningProgressImage != null)
-            {
-                wakeListeningProgressImage.fillAmount = 0f;
-            }
-
-            if (wakeListeningCountdownText != null)
-            {
-                wakeListeningCountdownText.text = string.Empty;
-            }
-
-            wakeListeningIndicatorCoroutine = null;
-        }
+        private IEnumerator UpdateWakeWordListeningIndicator(float durationSeconds) { yield break; }
 
         private void UpdateWakeWordIndicatorVisuals(float durationSeconds, float remainingSeconds)
         {

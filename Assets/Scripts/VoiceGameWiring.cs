@@ -6,6 +6,7 @@ namespace RobotVoice
     {
         [Header("References")]
         [SerializeField] private VoskSpeechToText speech;
+        [SerializeField] private WhisperSpeechToText whisper;
         [SerializeField] private VoiceGameLauncher launcher;
 
         private void Awake()
@@ -13,6 +14,10 @@ namespace RobotVoice
             if (speech == null)
             {
                 speech = GetComponent<VoskSpeechToText>();
+            }
+            if (whisper == null)
+            {
+                whisper = GetComponent<WhisperSpeechToText>();
             }
             if (launcher == null)
             {
@@ -26,6 +31,10 @@ namespace RobotVoice
             {
                 speech.OnTranscriptionResult += OnResult;
             }
+            if (whisper != null)
+            {
+                whisper.OnTranscriptionResult += OnResult;
+            }
         }
 
         private void OnDisable()
@@ -33,6 +42,10 @@ namespace RobotVoice
             if (speech != null)
             {
                 speech.OnTranscriptionResult -= OnResult;
+            }
+            if (whisper != null)
+            {
+                whisper.OnTranscriptionResult -= OnResult;
             }
         }
 

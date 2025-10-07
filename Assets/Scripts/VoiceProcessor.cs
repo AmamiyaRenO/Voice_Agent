@@ -308,7 +308,7 @@ public class VoiceProcessor : MonoBehaviour
         float variance = (float)(_noiseM2 / (_noiseSampleCount - 1));
         float stdDev = Mathf.Sqrt(Mathf.Max(0f, variance));
         float threshold = mean + stdDev * _noiseStdDevMultiplier;
-        if (!float.IsFinite(threshold))
+        if (float.IsNaN(threshold) || float.IsInfinity(threshold))
         {
             threshold = _minimumSpeakingSampleValue;
         }

@@ -1,7 +1,7 @@
 {
-  "WakeWord": "robot",
+  "WakeWord": "rachel",
   "LaunchKeywords": ["open", "play"],
-  "ExitKeywords": ["quit", "close"],
+  "ExitKeywords": ["back", "quit", "close", "cloth", "shut down"],
   "SynonymOverrides": [
     {
       "Canonical": "Notebook",
@@ -13,7 +13,7 @@
     },
     {
       "Canonical": "Slow Boat",
-      "Variants": ["slow boat", "slowboat"]
+      "Variants": ["boat", "slowboat"]
     }
   ]
 }
