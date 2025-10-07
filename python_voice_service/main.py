@@ -208,13 +208,6 @@ async def transcribe(
         language=language or "en",
         task="transcribe",
         word_timestamps=True,
-        temperature=0.0,
-        compression_ratio_threshold=1.2,
-        log_prob_threshold=-0.45,
-        no_speech_threshold=0.75,
-        condition_on_previous_text=False,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
     )
 
     segments = list(segments_generator)
