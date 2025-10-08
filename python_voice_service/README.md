@@ -80,3 +80,33 @@ Unity client. The `VoiceGameLauncher` script forwards both launch/exit
 intents and general wake-word commands to `/respond`, so the coach can
 answer free-form questions alongside the existing keyword workflows.
 
+When [Piper](https://github.com/rhasspy/piper) is configured, `/respond`
+also returns the coach reply as a base64-encoded WAV file (`audio_wav_base64`)
+together with the WAV sample rate. This lets Unity or any other client play
+the generated speech without calling another endpoint.
+
+### Enabling Piper text-to-speech
+
+1. Install Piper locally. On Windows the recommended approach is to use
+   the pre-built binaries provided by the Piper project. Ensure the
+   executable is available on your `PATH` or note the full path.
+
+2. Download a voice model (e.g. `en_US-amy-medium.onnx`) together with its
+   `.onnx.json` metadata file.
+
+3. Export the environment variables before launching the service:
+
+   ```bash
+   export PIPER_MODEL_PATH="/path/to/en_US-amy-medium.onnx"
+   export PIPER_EXECUTABLE="/path/to/piper"   # optional, defaults to "piper"
+   export PIPER_SPEAKER="0"                   # optional, required for multi-speaker voices
+   ```
+
+   Set `PIPER_CONFIG_PATH` if the `.onnx.json` file lives in a different
+   location. Otherwise the service automatically picks up the
+   `<model>.onnx.json` file next to the model weights.
+
+With these variables set, the `start_local_services.py` helper launches the
+Python voice service and every `/respond` request includes both the text and
+the synthesised audio.
+
