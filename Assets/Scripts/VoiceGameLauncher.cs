@@ -4,9 +4,6 @@ using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Globalization;
-#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
-using System.Speech.Synthesis;
-#endif
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.UI;
@@ -52,15 +49,14 @@ namespace RobotVoice
         [SerializeField] private GameObject coachResponsePanel;
         [SerializeField] private Text coachResponseText;
         [SerializeField] [Min(0f)] private float coachResponseDisplaySeconds = 6f;
+        [Header("TTS (Piper)")]
+        [SerializeField] private string piperSpeakUrl = "http://127.0.0.1:5005/speak";
 
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
         private readonly List<KeywordPhrase> keywordPhrases = new List<KeywordPhrase>();
         private bool awaitingFirstCommand;
-#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
-        private SpeechSynthesizer speechSynthesizer;
         private Coroutine coachSpeechCoroutine;
-#endif
         private Coroutine coachResponseVisibilityCoroutine;
         // removed expiry timestamp: awaitingFirstCommand controls lifecycle
         private Coroutine wakeListeningIndicatorCoroutine;
@@ -114,18 +110,16 @@ namespace RobotVoice
 
         private void Start()
         {
-            InitializeSpeechSynthesizer();
+            // Piper 统一出声，无需 Windows TTS 初始化
         }
 
         private void OnDestroy()
         {
-#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
             if (coachSpeechCoroutine != null)
             {
                 StopCoroutine(coachSpeechCoroutine);
                 coachSpeechCoroutine = null;
             }
-#endif
             if (coachResponseVisibilityCoroutine != null)
             {
                 StopCoroutine(coachResponseVisibilityCoroutine);
@@ -133,7 +127,7 @@ namespace RobotVoice
             }
             ResetCoachResponseDisplay();
             StopWakeWordListeningIndicator();
-            DisposeSpeechSynthesizer();
+            // Piper 统一出声，无需 Windows TTS 释放
         }
 
 #if UNITY_EDITOR
@@ -632,77 +626,6 @@ namespace RobotVoice
             RequestCoachSpeech(rawText, string.Empty);
         }
 
-#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
-        private void InitializeSpeechSynthesizer()
-        {
-            if (speechSynthesizer != null)
-            {
-                return;
-            }
-
-            if (Application.platform != RuntimePlatform.WindowsPlayer &&
-                Application.platform != RuntimePlatform.WindowsEditor)
-            {
-                return;
-            }
-
-            try
-            {
-                speechSynthesizer = new SpeechSynthesizer();
-                speechSynthesizer.SetOutputToDefaultAudioDevice();
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[RobotVoice] Failed to initialise Windows speech synthesizer: {ex.Message}");
-                speechSynthesizer = null;
-            }
-        }
-
-        private void DisposeSpeechSynthesizer()
-        {
-            if (speechSynthesizer == null)
-            {
-                return;
-            }
-
-            try
-            {
-                speechSynthesizer.SpeakAsyncCancelAll();
-                speechSynthesizer.Dispose();
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[RobotVoice] Failed to dispose Windows speech synthesizer: {ex.Message}");
-            }
-            finally
-            {
-                speechSynthesizer = null;
-            }
-        }
-
-        private void SpeakCoachResponse(string message)
-        {
-            if (speechSynthesizer == null)
-            {
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(message))
-            {
-                return;
-            }
-
-            try
-            {
-                speechSynthesizer.SpeakAsyncCancelAll();
-                speechSynthesizer.SpeakAsync(message);
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[RobotVoice] Failed to speak launch response: {ex.Message}");
-            }
-        }
-
         private void PresentWakeWordPrompt()
         {
             // 播放提示音，不显示倒计时
@@ -842,13 +765,10 @@ namespace RobotVoice
                         {
                             var finalReply = reply.Trim();
                             ShowCoachResponseOnScreen(finalReply);
-                            if (speechSynthesizer != null)
+                            Debug.Log($"[RobotVoice] Coach: {finalReply}");
+                            if (!string.IsNullOrWhiteSpace(piperSpeakUrl))
                             {
-                                SpeakCoachResponse(finalReply);
-                            }
-                            else
-                            {
-                                Debug.Log($"[RobotVoice] Coach: {finalReply}");
+                                StartCoroutine(PlayTtsFromPiper(finalReply));
                             }
                         }
                         else
@@ -989,22 +909,7 @@ namespace RobotVoice
                 root.SetActive(false);
             }
         }
-#else
-        private void InitializeSpeechSynthesizer()
-        {
-        }
 
-        private void DisposeSpeechSynthesizer()
-        {
-        }
-
-        private void PresentWakeWordPrompt()
-        {
-            PlayWakeWordPromptClip();
-            StartWakeWordListeningIndicator();
-        }
-
-#endif
 
         private void StartWakeWordListeningIndicator()
         {
@@ -1069,6 +974,130 @@ namespace RobotVoice
         {
         }
 #endif
+
+        private IEnumerator PlayTtsFromPiper(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                yield break;
+            }
+
+            var url = string.IsNullOrWhiteSpace(piperSpeakUrl) ? string.Empty : piperSpeakUrl.Trim();
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                yield break;
+            }
+
+            // 改用 GET 直取 WAV，避免 POST 卡住
+            var fullUrl = url + (url.Contains("?") ? "&" : "?") + "text=" + UnityWebRequest.EscapeURL(text);
+            using (var request = UnityWebRequestMultimedia.GetAudioClip(fullUrl, AudioType.WAV))
+            {
+                request.timeout = 60;
+                yield return request.SendWebRequest();
+
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    if (logDebugMessages)
+                    {
+                        Debug.LogWarning($"[RobotVoice] Piper TTS GET failed: {request.error}");
+                    }
+                    yield break;
+                }
+
+                var clip = DownloadHandlerAudioClip.GetContent(request);
+                PlayClipOnSource(clip);
+            }
+        }
+
+        private AudioClip ParsePiperBase64ToClip(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return null;
+            }
+
+            try
+            {
+                var node = JSONNode.Parse(json);
+                var b64 = node?["audio_wav_base64"]?.Value;
+                var sr = node?["sample_rate"]?.AsInt ?? 22050;
+                if (string.IsNullOrWhiteSpace(b64))
+                {
+                    return null;
+                }
+
+                var bytes = Convert.FromBase64String(b64);
+                return WavToAudioClip(bytes, sr);
+            }
+            catch (Exception ex)
+            {
+                if (logDebugMessages)
+                {
+                    Debug.LogWarning($"[RobotVoice] Failed to parse Piper TTS JSON: {ex.Message}");
+                }
+                return null;
+            }
+        }
+
+        private void PlayClipOnSource(AudioClip clip)
+        {
+            if (clip == null)
+            {
+                return;
+            }
+
+            if (wakeWordPromptSource != null)
+            {
+                wakeWordPromptSource.Stop();
+                wakeWordPromptSource.clip = clip;
+                wakeWordPromptSource.loop = false;
+                wakeWordPromptSource.Play();
+                return;
+            }
+
+            var listener = FindObjectOfType<AudioListener>();
+            if (listener != null)
+            {
+                AudioSource.PlayClipAtPoint(clip, listener.transform.position);
+            }
+        }
+
+        // Minimal WAV decoder (PCM16 mono) -> AudioClip
+        private AudioClip WavToAudioClip(byte[] wavData, int sampleRate)
+        {
+            if (wavData == null || wavData.Length < 44)
+            {
+                return null;
+            }
+
+            // Parse headers (44-byte PCM WAV header assumption)
+            int channels = BitConverter.ToInt16(wavData, 22);
+            int bitsPerSample = BitConverter.ToInt16(wavData, 34);
+            int dataStart = 44;
+            int bytesPerSample = bitsPerSample / 8;
+            int sampleCount = (wavData.Length - dataStart) / bytesPerSample;
+            int unityChannels = Mathf.Max(1, channels);
+
+            if (bitsPerSample != 16)
+            {
+                if (logDebugMessages)
+                {
+                    Debug.LogWarning($"[RobotVoice] Piper WAV not 16-bit PCM: {bitsPerSample}b");
+                }
+            }
+
+            float[] samples = new float[sampleCount];
+            int offset = dataStart;
+            for (int i = 0; i < sampleCount && offset + 1 < wavData.Length; i++, offset += bytesPerSample)
+            {
+                short s = BitConverter.ToInt16(wavData, offset);
+                samples[i] = s / 32768f;
+            }
+
+            var clip = AudioClip.Create("piper_tts", sampleCount / unityChannels, unityChannels, Mathf.Max(8000, sampleRate), false);
+            clip.SetData(samples, 0);
+            return clip;
+        }
 
         private void RebuildKeywordPhrases(List<string> phrases)
         {
