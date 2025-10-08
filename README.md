@@ -1,4 +1,21 @@
 # Voice Agent for Robot OPR
+## Python 语音服务（Faster-Whisper）环境变量
+
+- WHISPER_MODEL_PATH（默认 `large-v3`），可选 `medium.en`、`small.en` 等
+- WHISPER_COMPUTE_TYPE（默认 `int8_float16`，显存足够可用 `float16`）
+- WAKE_WORD（默认 `rachel`）
+- WAKE_WORD_ALIASES（默认 `rachel, richel, richelle, rachal, raychel, ra chel, rach el`）
+
+示例（Windows PowerShell）：
+
+```powershell
+pip install -r python_voice_service/requirements.txt
+$env:WHISPER_MODEL_PATH="medium.en"
+$env:WHISPER_COMPUTE_TYPE="float16"
+$env:WAKE_WORD="rachel"
+$env:WAKE_WORD_ALIASES="rachel, richel, richelle"
+python python_voice_service/main.py
+```
 
 This repository contains the Unity client that powers the spoken interface
 for the [Robot_opr](https://github.com/AmamiyaRenO/Robot_opr) rehabilitation

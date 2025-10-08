@@ -496,7 +496,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   ModelPath: vosk-model-en-us-0.22.zip
-  UsePythonService: 0
+  UsePythonService: 1
   PythonServiceUrl: http://127.0.0.1:8000/transcribe
   PythonServiceLanguage: 
   PythonServiceBeamSize: 5
@@ -508,16 +508,21 @@ MonoBehaviour:
   MaxRecordLength: 5
   AutoStart: 1
   KeyPhrases:
-  - robot
+  - rachel
   - open
   - play
+  - back
   - quit
   - close
+  - cloth
+  - shut down
   - Notebook
   - Flappy Bird
   - flappybird
   - Slow Boat
+  - boat
   - slowboat
+  - robot
 --- !u!114 &1307454269
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -539,7 +544,7 @@ MonoBehaviour:
   - richelle
   - richel
   - rachal
-  requireWakeWord: 1
+  requireWakeWord: 0
   requireLaunchKeyword: 0
   launchKeywords:
   - open
@@ -554,7 +559,6 @@ MonoBehaviour:
   noiseAverageLogProbThreshold: -0.6
   duplicateSuppressionSeconds: 2
   wakeWordPrompt: What can I help you?
-  wakeWordListeningWindowSeconds: 5
   wakeWordPromptSource: {fileID: 0}
   wakeWordPromptClip: {fileID: 8300000, guid: bb93a05486640ed4183b45dc5dd81668, type: 3}
   wakeListeningIndicatorRoot: {fileID: 387120962}

@@ -54,6 +54,17 @@ def _environment_float(key: str, default: float) -> float:
     except ValueError:
         return default
 
+# Wake-word biasing/normalization via environment variables
+WAKE_WORD = os.getenv("WAKE_WORD", "rachel").strip().lower()
+WAKE_WORD_ALIASES = [
+    s.strip().lower()
+    for s in os.getenv(
+        "WAKE_WORD_ALIASES",
+        "rachel, richel, richelle, rachal, raychel, ra chel, rach el",
+    ).split(",")
+    if s.strip()
+]
+
 
 def _environment_int(key: str, default: int) -> int:
     value = os.getenv(key)
@@ -194,15 +205,15 @@ async def transcribe(
 
     segments_generator, info = model.transcribe(
         audio,
-        beam_size=effective_beam_size,
+        beam_size=max(5, min(10, effective_beam_size)),
         language="en",
         task="transcribe",
         word_timestamps=True,
         vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 300},
-        initial_prompt="rachel",
-        temperature=(0.0, 0.2),
-        best_of=5,
+        vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
+        initial_prompt=WAKE_WORD,
+        temperature=(0.0,),
+        best_of=1,
     )
 
     segments = list(segments_generator)

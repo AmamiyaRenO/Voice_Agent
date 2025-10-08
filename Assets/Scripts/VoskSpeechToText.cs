@@ -361,7 +361,7 @@ public class VoskSpeechToText : MonoBehaviour
                                 ClearPythonBuffer();
                                 var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
                                 var frameLength = PythonFrameLength > 0 ? PythonFrameLength : (VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512);
-                                VoiceProcessor.StartRecording(sampleRate, frameLength, true);
+                                VoiceProcessor.StartRecording(sampleRate, frameLength, false);
                         }
                         else
                         {
@@ -480,7 +480,7 @@ public class VoskSpeechToText : MonoBehaviour
                                 ClearPythonBuffer();
                                 var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
                                 var frameLength = PythonFrameLength > 0 ? PythonFrameLength : (VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512);
-                                VoiceProcessor.StartRecording(sampleRate, frameLength, true);
+                                VoiceProcessor.StartRecording(sampleRate, frameLength, false);
                         }
                         else
                         {
@@ -563,7 +563,7 @@ public class VoskSpeechToText : MonoBehaviour
                 {
                         var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
                         var frameLength = PythonFrameLength > 0 ? PythonFrameLength : (VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512);
-                        VoiceProcessor.StartRecording(sampleRate, frameLength, true);
+                        VoiceProcessor.StartRecording(sampleRate, frameLength, false);
                 }
         }
 
