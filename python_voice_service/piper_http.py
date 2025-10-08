@@ -32,7 +32,7 @@ def _build_command(text: str, out_path: Path) -> list[str]:
     model = _env("PIPER_MODEL_PATH")
     if not model:
         raise HTTPException(status_code=500, detail="PIPER_MODEL_PATH is not configured")
-    cmd = [exe, "--model", model, "--output_file", str(out_path), "--text", text]
+    cmd = [exe, "--model", model, "--output_file", str(out_path), "--input_text", text]
     cfg = _env("PIPER_CONFIG_PATH")
     if cfg:
         cmd += ["--config", cfg]
