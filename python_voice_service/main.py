@@ -211,7 +211,7 @@ async def transcribe(
         word_timestamps=True,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
-        initial_prompt=WAKE_WORD,
+        initial_prompt=(WAKE_WORD + " open play back quit close shut down"),
         temperature=(0.0,),
         best_of=1,
     )

@@ -16,7 +16,7 @@ using Vosk;
 public class VoskSpeechToText : MonoBehaviour
 {
         [Tooltip("Location of the model, relative to the Streaming Assets folder.")]
-        public string ModelPath = "vosk-model-small-ru-0.22.zip";
+        public string ModelPath = "vosk-model-en-us-0.22.zip";
 
         [Header("Python Speech Service")]
         [Tooltip("If enabled, audio is sent to an external Python service that performs speech recognition using Faster-Whisper.")]
@@ -37,7 +37,7 @@ public class VoskSpeechToText : MonoBehaviour
 
         [Tooltip("Max record length per segment when using the Python speech service (seconds).")]
         [Range(0.1f, 10f)]
-        public float PythonMaxRecordLength = 1.5f;
+        public float PythonMaxRecordLength = 3.0f;
 
         [Tooltip("Frame length for VoiceProcessor when using the Python speech service.")]
         public int PythonFrameLength = 256;
@@ -103,6 +103,7 @@ public class VoskSpeechToText : MonoBehaviour
 
         // Python speech service state
         private bool _usePythonService;
+        private bool _playbackMute; // when true, drop captured frames to avoid TTS feedback
         private readonly object _pythonBufferLock = new object();
         private readonly List<short> _pythonBuffer = new List<short>();
         private bool _pythonSegmentActive;
@@ -398,6 +399,11 @@ public class VoskSpeechToText : MonoBehaviour
 	//Callback from the voice processor when new audio is detected
         private void VoiceProcessorOnOnFrameCaptured(short[] samples)
         {
+                if (_usePythonService && _playbackMute)
+                {
+                        // Drop frames while TTS is playing to avoid feedback
+                        return;
+                }
                 if (_usePythonService)
                 {
                         lock (_pythonBufferLock)
@@ -674,6 +680,12 @@ public class VoskSpeechToText : MonoBehaviour
                 }
 
                 return maxAmplitude < PythonServiceSilenceThreshold;
+        }
+
+        // Allow external components to temporarily mute microphone capture while local audio is playing
+        private void SetPlaybackMute(bool value)
+        {
+                _playbackMute = value;
         }
 
         private string InjectPythonSegmentMetrics(string json, float maxAmplitude, float rms)

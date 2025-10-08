@@ -18,9 +18,9 @@ namespace RobotVoice
 
         [Header("Configuration")]
         [SerializeField] private TextAsset intentConfigJson;
-        [SerializeField] private string wakeWord = "richel";
+        [SerializeField] private string wakeWord = "hi rachel";
         [SerializeField, Tooltip("Additional variants accepted as wake word prefixes (case-insensitive)")]
-        private string[] wakeWordVariants = new[] { "rachel", "richelle", "richel", "rachal" };
+        private string[] wakeWordVariants = new[] { "hi rachel", "hey rachel", "hi richel", "hey richel" };
         [SerializeField] private bool requireWakeWord = true;
         [SerializeField] private bool requireLaunchKeyword = false;
         [SerializeField] private string[] launchKeywords = { "open", "play" };
@@ -51,7 +51,10 @@ namespace RobotVoice
         [SerializeField] [Min(0f)] private float coachResponseDisplaySeconds = 6f;
         [Header("TTS (Piper)")]
         [SerializeField] private string piperSpeakUrl = "http://127.0.0.1:5005/speak";
-
+        [SerializeField, Tooltip("Prompt text sent to LLM when wake word is detected. Keep it short.")]
+        private string wakeAcknowledgeUserText = "Wake word detected. Reply briefly that you are listening.";
+        [Header("Wake/First Command")]
+        [SerializeField, Min(0.5f)] private float firstCommandListenSeconds = 3f;
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
         private readonly List<KeywordPhrase> keywordPhrases = new List<KeywordPhrase>();
@@ -360,6 +363,12 @@ namespace RobotVoice
                 return;
             }
 
+            // 强制唤醒词门控：未在唤醒窗口且本段不含唤醒前缀，则直接忽略
+            if (requireWakeWord && !awaitingFirstCommand && !hasWakeWordPrefix)
+            {
+                return;
+            }
+
             var processed = ApplyWakeWord(wakeWordSource, hasWakeWordPrefix, textAfterWakeWord);
             if (processed == null && awaitingFirstCommand)
             {
@@ -371,13 +380,7 @@ namespace RobotVoice
                 return;
             }
 
-            // 一旦放行命令，结束首命令等待状态，避免后续语句继续误判
-            if (awaitingFirstCommand)
-            {
-                awaitingFirstCommand = false;
-            }
-
-            if (hasKeywordMatch)
+            if (hasKeywordMatch && (awaitingFirstCommand || hasWakeWordPrefix))
             {
                 if (IsExitIntent(processed))
                 {
@@ -401,6 +404,12 @@ namespace RobotVoice
             var textForCoach = string.IsNullOrWhiteSpace(processed) ? rawRecognised : processed;
             if (!string.IsNullOrWhiteSpace(textForCoach))
             {
+                // 未被唤醒时不允许触发 LLM 回复
+                if (!(awaitingFirstCommand || hasWakeWordPrefix))
+                {
+                    return;
+                }
+
                 ClearWakeWordWindow();
                 RequestCoachSpeech(textForCoach, string.Empty);
             }
@@ -419,7 +428,8 @@ namespace RobotVoice
 
         private void HandleWakeWordOnlyDetected()
         {
-            StartCoroutine(PlayPromptThenOpenWakeWindow());
+            // 先让 LLM 回复一句“我在听”（TTS 播放），再开启首条命令监听
+            StartCoroutine(WakeThenListenFlow());
         }
 
         private void TriggerWakeWordRecordingWindow()
@@ -430,7 +440,7 @@ namespace RobotVoice
             }
 
             // 不再使用固定时长窗口，由 awaitingFirstCommand 控制生命周期
-            speechToText.StartWakeWordWindow(Mathf.Max(0.1f, 0.5f)); // 仍需触发录音启动，给一个很短的窗口
+            speechToText.StartWakeWordWindow(Mathf.Max(0.5f, firstCommandListenSeconds)); // 仍需触发录音启动，给一个很短的窗口
         }
 
         private IEnumerator PlayPromptThenOpenWakeWindow()
@@ -439,10 +449,26 @@ namespace RobotVoice
             ActivateWakeWordWindow();
             awaitingFirstCommand = true;
             TriggerWakeWordRecordingWindow();
-
-            // 并行播放提示音（不阻塞语音监听）
-            PresentWakeWordPrompt();
             yield break;
+        }
+
+        private IEnumerator WakeThenListenFlow()
+        {
+            var ack = string.IsNullOrWhiteSpace(wakeAcknowledgeUserText)
+                ? "I'm listening."
+                : wakeAcknowledgeUserText.Trim();
+
+            // 显示 + 播放 TTS（若可用）
+            ShowCoachResponseOnScreen(ack);
+            if (!string.IsNullOrWhiteSpace(piperSpeakUrl))
+            {
+                yield return PlayTtsFromPiper(ack);
+            }
+
+            // TTS 播放后开始监听第一条命令
+            ActivateWakeWordWindow();
+            awaitingFirstCommand = true;
+            TriggerWakeWordRecordingWindow();
         }
 
         private bool IsWakeWordWindowActive()
@@ -626,80 +652,9 @@ namespace RobotVoice
             RequestCoachSpeech(rawText, string.Empty);
         }
 
-        private void PresentWakeWordPrompt()
-        {
-            // 播放提示音，不显示倒计时
-            PlayWakeWordPromptClip();
-        }
+        private void PresentWakeWordPrompt() { }
 
-        private void PlayWakeWordPromptClip()
-        {
-            var hasSource = wakeWordPromptSource != null;
-            var hasClip = wakeWordPromptClip != null;
-
-            if (!hasSource && !hasClip)
-            {
-                if (logDebugMessages)
-                {
-                    Debug.LogWarning("[RobotVoice] Wake prompt audio is not configured.");
-                }
-
-                return;
-            }
-
-            if (hasSource)
-            {
-                try
-                {
-                    wakeWordPromptSource.Stop();
-                    if (hasClip)
-                    {
-                        wakeWordPromptSource.PlayOneShot(wakeWordPromptClip);
-                    }
-                    else
-                    {
-                        wakeWordPromptSource.Play();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    if (logDebugMessages)
-                    {
-                        Debug.LogWarning($"[RobotVoice] Failed to play wake prompt clip: {ex.Message}");
-                    }
-                }
-
-                return;
-            }
-
-            try
-            {
-                var listener = FindObjectOfType<AudioListener>();
-                if (listener != null)
-                {
-                    AudioSource.PlayClipAtPoint(wakeWordPromptClip, listener.transform.position);
-                }
-                else
-                {
-                    var temp = new GameObject("WakePromptAudio");
-                    var src = temp.AddComponent<AudioSource>();
-                    src.playOnAwake = false;
-                    src.spatialBlend = 0f;
-                    src.clip = wakeWordPromptClip;
-                    src.loop = false;
-                    src.volume = 1f;
-                    src.Play();
-                    Destroy(temp, Mathf.Max(0.1f, wakeWordPromptClip.length + 0.1f));
-                }
-            }
-            catch (Exception ex)
-            {
-                if (logDebugMessages)
-                {
-                    Debug.LogWarning($"[RobotVoice] Failed to play wake prompt clip at point: {ex.Message}");
-                }
-            }
-        }
+        private void PlayWakeWordPromptClip() { }
 
         private void RequestCoachSpeech(string recognisedText, string fallbackGameName)
         {
@@ -990,6 +945,12 @@ namespace RobotVoice
 
             // 改用 GET 直取 WAV，避免 POST 卡住
             var fullUrl = url + (url.Contains("?") ? "&" : "?") + "text=" + UnityWebRequest.EscapeURL(text);
+
+            // 告知采集端静音，避免自我回录
+            if (speechToText != null)
+            {
+                speechToText.SendMessage("SetPlaybackMute", true, SendMessageOptions.DontRequireReceiver);
+            }
             using (var request = UnityWebRequestMultimedia.GetAudioClip(fullUrl, AudioType.WAV))
             {
                 request.timeout = 60;
@@ -1001,11 +962,33 @@ namespace RobotVoice
                     {
                         Debug.LogWarning($"[RobotVoice] Piper TTS GET failed: {request.error}");
                     }
+                    if (speechToText != null)
+                    {
+                        speechToText.SendMessage("SetPlaybackMute", false, SendMessageOptions.DontRequireReceiver);
+                    }
                     yield break;
                 }
 
                 var clip = DownloadHandlerAudioClip.GetContent(request);
                 PlayClipOnSource(clip);
+
+                // 等待播放结束后再解除采集静音，避免自我回录
+                if (clip != null)
+                {
+                    if (wakeWordPromptSource != null)
+                    {
+                        yield return new WaitWhile(() => wakeWordPromptSource.isPlaying);
+                    }
+                    else
+                    {
+                        yield return new WaitForSeconds(Mathf.Max(0.05f, clip.length));
+                    }
+                }
+            }
+            // 播放完毕后解除静音
+            if (speechToText != null)
+            {
+                speechToText.SendMessage("SetPlaybackMute", false, SendMessageOptions.DontRequireReceiver);
             }
         }
 

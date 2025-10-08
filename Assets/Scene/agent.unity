@@ -665,7 +665,7 @@ MonoBehaviour:
   publisher: {fileID: 1307454270}
   speechToText: {fileID: 0}
   intentConfigJson: {fileID: 4900000, guid: f886a37adc9721949b230d5dec74c8fc, type: 3}
-  wakeWord: richel
+  wakeWord: rachel
   wakeWordVariants:
   - rachel
   - richelle
@@ -696,6 +696,8 @@ MonoBehaviour:
   coachResponsePanel: {fileID: 0}
   coachResponseText: {fileID: 0}
   coachResponseDisplaySeconds: 6
+  piperSpeakUrl: http://127.0.0.1:5005/speak
+  wakeAcknowledgeUserText: What can I help you with
 --- !u!114 &1307454270
 MonoBehaviour:
   m_ObjectHideFlags: 0
