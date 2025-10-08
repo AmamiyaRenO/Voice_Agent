@@ -10,8 +10,17 @@ from __future__ import annotations
 
 import math
 import os
+import asyncio
+import base64
+import contextlib
+import io
+import subprocess
+import tempfile
+import wave
+from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable, List, Optional
+from pathlib import Path
+from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 import httpx
@@ -84,10 +93,37 @@ class RespondRequest(BaseModel):
 
 class RespondResponse(BaseModel):
     text: str
+    audio_wav_base64: Optional[str] = Field(
+        None,
+        description=(
+            "Base64-encoded WAV containing the Piper TTS output for the reply. "
+            "Present only when Piper is configured."
+        ),
+    )
+    audio_sample_rate: Optional[int] = Field(
+        None,
+        description="Sample rate of the generated audio in Hz when available.",
+    )
 
 
 class OllamaError(RuntimeError):
     pass
+
+
+class PiperError(RuntimeError):
+    pass
+
+
+class PiperNotConfigured(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class PiperSettings:
+    executable: str
+    model_path: Path
+    config_path: Optional[Path]
+    speaker_id: Optional[str]
 
 
 def _ollama_base_url() -> str:
@@ -137,6 +173,88 @@ async def _generate_coach_reply(user_text: str) -> str:
         raise OllamaError("Ollama response was empty")
 
     return reply_text
+
+
+def _piper_settings() -> Optional[PiperSettings]:
+    model_path_value = os.getenv("PIPER_MODEL_PATH")
+    if not model_path_value:
+        return None
+
+    model_path = Path(model_path_value).expanduser().resolve()
+    config_override = os.getenv("PIPER_CONFIG_PATH")
+    config_path = Path(config_override).expanduser().resolve() if config_override else None
+
+    if config_path is None and model_path.suffix:
+        # Piper models usually ship with a matching .onnx.json metadata file.
+        candidate = Path(str(model_path) + ".json")
+        if candidate.exists():
+            config_path = candidate
+
+    speaker_value = os.getenv("PIPER_SPEAKER", "").strip()
+
+    return PiperSettings(
+        executable=_environment("PIPER_EXECUTABLE", "piper"),
+        model_path=model_path,
+        config_path=config_path,
+        speaker_id=speaker_value or None,
+    )
+
+
+def _run_piper_sync(text: str, settings: PiperSettings) -> Tuple[bytes, int]:
+    if not settings.model_path.exists():
+        raise PiperError(f"Piper model not found at {settings.model_path}")
+    if settings.config_path is not None and not settings.config_path.exists():
+        raise PiperError(f"Piper config not found at {settings.config_path}")
+
+    with tempfile.TemporaryDirectory(prefix="voice-agent-piper-") as tmpdir:
+        output_path = Path(tmpdir) / "response.wav"
+        command = [
+            settings.executable,
+            "--model",
+            str(settings.model_path),
+            "--output_file",
+            str(output_path),
+            "--text",
+            text,
+        ]
+
+        if settings.config_path is not None:
+            command.extend(["--config", str(settings.config_path)])
+        if settings.speaker_id is not None:
+            command.extend(["--speaker", settings.speaker_id])
+
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        if completed.returncode != 0:
+            stderr_text = completed.stderr.decode("utf-8", errors="ignore").strip()
+            raise PiperError(stderr_text or "Piper synthesis failed")
+
+        if not output_path.exists():
+            raise PiperError("Piper did not produce an output file")
+
+        audio_bytes = output_path.read_bytes()
+
+    try:
+        with contextlib.closing(wave.open(io.BytesIO(audio_bytes), "rb")) as wav_file:
+            sample_rate = wav_file.getframerate()
+    except wave.Error as exc:
+        raise PiperError(f"Unable to read Piper WAV output: {exc}") from exc
+
+    return audio_bytes, sample_rate
+
+
+async def _synthesise_reply_audio(reply_text: str) -> Tuple[bytes, int]:
+    settings = _piper_settings()
+    if settings is None:
+        raise PiperNotConfigured("Piper is not configured")
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _run_piper_sync, reply_text, settings)
 
 
 @app.on_event("startup")
@@ -274,7 +392,19 @@ async def respond(payload: RespondRequest) -> RespondResponse:
     except OllamaError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    return RespondResponse(text=reply)
+    audio_b64: Optional[str] = None
+    audio_rate: Optional[int] = None
+
+    try:
+        audio_bytes, audio_rate = await _synthesise_reply_audio(reply)
+        audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+    except PiperNotConfigured:
+        # Piper is optional; if it isn't configured we simply return the text response.
+        pass
+    except PiperError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return RespondResponse(text=reply, audio_wav_base64=audio_b64, audio_sample_rate=audio_rate)
 
 
 if __name__ == "__main__":
