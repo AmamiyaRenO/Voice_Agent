@@ -147,6 +147,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Working directory for the orchestrator command.",
     )
     parser.add_argument(
+        "--piper-http-cmd",
+        default=os.environ.get(
+            "VOICE_AGENT_PIPER_HTTP_CMD",
+            "uvicorn piper_http:app --host 0.0.0.0 --port 5005",
+        ),
+        help=(
+            "Optional command used to start a lightweight Piper HTTP wrapper service. "
+            "Set VOICE_AGENT_PIPER_HTTP_CMD or pass --piper-http-cmd to enable it."
+        ),
+    )
+    parser.add_argument(
+        "--piper-http-dir",
+        default=os.environ.get(
+            "VOICE_AGENT_PIPER_HTTP_CWD", str(Path(__file__).resolve().parents[1] / "python_voice_service")
+        ),
+        help="Working directory for the Piper HTTP wrapper service.",
+    )
+    parser.add_argument(
         "--env-file",
         type=Path,
         help="Optional .env style file whose variables are exported before launching the services.",
@@ -171,12 +189,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.orchestrator_cmd
             else None
         )
+        piper_http_command = (
+            parse_command(args.piper_http_cmd, windows=windows)
+            if args.piper_http_cmd
+            else None
+        )
     except ValueError as exc:
         parser.error(str(exc))
 
     hub_dir = Path(args.hub_dir).resolve()
     voice_dir = Path(args.voice_dir).resolve()
     orchestrator_dir = Path(args.orchestrator_dir).resolve()
+    piper_http_dir = Path(args.piper_http_dir).resolve()
 
     if not hub_dir.exists():
         parser.error(f"Hub directory does not exist: {hub_dir}")
@@ -184,6 +208,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error(f"Voice service directory does not exist: {voice_dir}")
     if orchestrator_command is not None and not orchestrator_dir.exists():
         parser.error(f"Orchestrator directory does not exist: {orchestrator_dir}")
+    if piper_http_command is not None and not piper_http_dir.exists():
+        parser.error(f"Piper HTTP directory does not exist: {piper_http_dir}")
 
     env = os.environ.copy()
     if args.env_file is not None:
@@ -194,6 +220,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     handles = [hub_handle, voice_handle]
     if orchestrator_command is not None:
         handles.append(ProcessHandle("orchestrator", orchestrator_command, orchestrator_dir))
+    if piper_http_command is not None:
+        handles.append(ProcessHandle("piper-http", piper_http_command, piper_http_dir))
 
     terminator = GracefulTerminator(handles)
     signal.signal(signal.SIGINT, terminator)
