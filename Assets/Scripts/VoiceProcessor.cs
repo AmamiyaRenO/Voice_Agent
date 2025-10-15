@@ -365,8 +365,8 @@ public class VoiceProcessor : MonoBehaviour
                 _audioClip.GetData(startClipSamples, 0);
 
                 // combine to form full frame
-                Buffer.BlockCopy(endClipSamples, 0, sampleBuffer, 0, numSamplesClipEnd);
-                Buffer.BlockCopy(startClipSamples, 0, sampleBuffer, numSamplesClipEnd, numSamplesClipStart);
+                Array.Copy(endClipSamples, 0, sampleBuffer, 0, numSamplesClipEnd);
+                Array.Copy(startClipSamples, 0, sampleBuffer, numSamplesClipEnd, numSamplesClipStart);
             }
             else
             {
