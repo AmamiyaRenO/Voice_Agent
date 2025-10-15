@@ -156,28 +156,46 @@ namespace RobotVoice
 
             try
             {
-                await EnsureConnectedAsync();
-                if (client == null || !client.IsConnected)
-                {
-                    Debug.LogWarning("[RobotVoice] MQTT client not connected; intent not sent");
-                    return;
-                }
-
                 var message = new SimpleMqttApplicationMessageBuilder()
                     .WithTopic(intentTopic)
                     .WithPayload(payload)
                     .WithQualityOfServiceLevel(SimpleMqttQualityOfServiceLevel.AtLeastOnce)
                     .Build();
 
-                try
+                var attemptsRemaining = 2;
+                while (attemptsRemaining-- > 0)
                 {
-                    await client.PublishAsync(message, CancellationToken.None);
-                    MarkPayloadAsPublished(payload);
-                    Debug.Log($"[RobotVoice] Intent published: {payload}");
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[RobotVoice] Failed to publish MQTT intent: {ex.Message}");
+                    try
+                    {
+                        await EnsureConnectedAsync();
+                        if (client == null || !client.IsConnected)
+                        {
+                            if (attemptsRemaining > 0)
+                            {
+                                await Task.Delay(TimeSpan.FromSeconds(1));
+                                continue;
+                            }
+
+                            Debug.LogWarning("[RobotVoice] MQTT client not connected; intent not sent");
+                            return;
+                        }
+
+                        await client.PublishAsync(message, CancellationToken.None);
+                        MarkPayloadAsPublished(payload);
+                        Debug.Log($"[RobotVoice] Intent published: {payload}");
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (attemptsRemaining > 0)
+                        {
+                            Debug.LogWarning($"[RobotVoice] MQTT publish failed, retrying: {ex.Message}");
+                            await Task.Delay(TimeSpan.FromSeconds(1));
+                            continue;
+                        }
+
+                        Debug.LogError($"[RobotVoice] Failed to publish MQTT intent: {ex.Message}");
+                    }
                 }
             }
             finally

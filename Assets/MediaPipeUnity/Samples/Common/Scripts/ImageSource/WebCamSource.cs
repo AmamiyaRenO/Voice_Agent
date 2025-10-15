@@ -277,11 +277,11 @@ namespace Mediapipe.Unity
         var height = Mathf.Max(0, resolution.height);
         var frameRate = resolution.frameRate;
 
-        if (_shouldRequestExplicitFrameRate)
+        if (frameRate > 0)
         {
           webCamTexture = new WebCamTexture(valueOfWebCamDevice.name, width, height, Mathf.Max(1, (int)Math.Round(frameRate)));
         }
-        else if (_shouldRequestExplicitWidthHeight)
+        else if (width > 0 && height > 0)
         {
           webCamTexture = new WebCamTexture(valueOfWebCamDevice.name, width, height);
         }

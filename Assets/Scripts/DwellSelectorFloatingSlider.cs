@@ -30,6 +30,7 @@ public class DwellSelectorFloatingSlider : MonoBehaviour
 
     float _timer;
     int _hovered = -1;
+    bool _selectionTriggered;
 
     void Start()
     {
@@ -68,6 +69,7 @@ public class DwellSelectorFloatingSlider : MonoBehaviour
             _hovered = newHover;
             _timer = 0f;
             floatingSlider.value = 0f;
+            _selectionTriggered = false;
         }
 
         if (_hovered >= 0)
@@ -78,7 +80,7 @@ public class DwellSelectorFloatingSlider : MonoBehaviour
             _timer += Time.deltaTime;
             floatingSlider.value = Mathf.Clamp01(_timer / dwellSeconds);
 
-            if (_timer >= dwellSeconds)
+            if (!_selectionTriggered && _timer >= dwellSeconds)
             {
                 string value = cards[_hovered].sceneName;
                 if (openViaMessageHub && mqttPublisher != null && !string.IsNullOrEmpty(value))
@@ -89,6 +91,7 @@ public class DwellSelectorFloatingSlider : MonoBehaviour
                 {
                     SceneManager.LoadScene(value);
                 }
+                _selectionTriggered = true;
             }
         }
         else
