@@ -202,17 +202,40 @@ public class VoiceProcessor : MonoBehaviour
     {
         if (autoDetect != null)
         {
-            _autoDetect = (bool) autoDetect;
+            _autoDetect = (bool)autoDetect;
         }
+
+        if (Devices == null || Devices.Count == 0)
+        {
+            UpdateDevices();
+        }
+
+        if (Devices == null || Devices.Count == 0)
+        {
+            Debug.LogError("There is no valid recording device connected");
+            return;
+        }
+
+        if (CurrentDeviceIndex < 0 || CurrentDeviceIndex >= Devices.Count)
+        {
+            Debug.LogErrorFormat("Selected recording device index {0} is not valid.", CurrentDeviceIndex);
+            return;
+        }
+
+        int sanitizedFrameSize = Mathf.Max(1, frameSize);
+        int sanitizedSampleRate = SanitizeSampleRate(sampleRate);
 
         if (IsRecording)
         {
             // if sample rate or frame size have changed, restart recording
-            if (sampleRate != SampleRate || frameSize != FrameLength)
+            if (sanitizedSampleRate != SampleRate || sanitizedFrameSize != FrameLength)
             {
+                int restartSampleRate = sanitizedSampleRate;
+                int restartFrameSize = sanitizedFrameSize;
+                bool? restartAutoDetect = autoDetect;
                 RestartRecording += () =>
                 {
-                    StartRecording(SampleRate, FrameLength, autoDetect);
+                    StartRecording(restartSampleRate, restartFrameSize, restartAutoDetect ?? _autoDetect);
                     RestartRecording = null;
                 };
                 StopRecording();
@@ -221,10 +244,10 @@ public class VoiceProcessor : MonoBehaviour
             return;
         }
 
-        SampleRate = sampleRate;
-        FrameLength = frameSize;
+        SampleRate = sanitizedSampleRate;
+        FrameLength = sanitizedFrameSize;
 
-        _audioClip = Microphone.Start(CurrentDeviceName, true, 1, sampleRate);
+        _audioClip = Microphone.Start(CurrentDeviceName, true, 1, SampleRate);
 
         _noiseCalibrationCompleted = false;
         _noiseCalibrationStartTime = Time.time;
@@ -324,6 +347,55 @@ public class VoiceProcessor : MonoBehaviour
         }
 
         return FrameLength / (float)SampleRate;
+    }
+
+    private int SanitizeSampleRate(int requestedSampleRate)
+    {
+        string deviceName = CurrentDeviceName;
+
+        Microphone.GetDeviceCaps(deviceName, out int minFreq, out int maxFreq);
+
+        bool deviceHasSpecificRange = minFreq > 0 || maxFreq > 0;
+        int effectiveSampleRate = requestedSampleRate;
+
+        if (!deviceHasSpecificRange)
+        {
+            if (effectiveSampleRate <= 0)
+            {
+                effectiveSampleRate = AudioSettings.outputSampleRate;
+            }
+        }
+        else
+        {
+            if (effectiveSampleRate <= 0)
+            {
+                effectiveSampleRate = maxFreq > 0 ? maxFreq : minFreq;
+            }
+
+            if (minFreq > 0 && effectiveSampleRate < minFreq)
+            {
+                Debug.LogWarningFormat("Requested microphone sample rate {0}Hz is below the supported minimum of {1}Hz. Using {1}Hz instead.", requestedSampleRate, minFreq);
+                effectiveSampleRate = minFreq;
+            }
+
+            if (maxFreq > 0 && effectiveSampleRate > maxFreq)
+            {
+                Debug.LogWarningFormat("Requested microphone sample rate {0}Hz exceeds the supported maximum of {1}Hz. Using {1}Hz instead.", requestedSampleRate, maxFreq);
+                effectiveSampleRate = maxFreq;
+            }
+        }
+
+        if (effectiveSampleRate <= 0)
+        {
+            int fallback = AudioSettings.outputSampleRate > 0 ? AudioSettings.outputSampleRate : 16000;
+            if (requestedSampleRate != fallback)
+            {
+                Debug.LogWarningFormat("Unable to determine a valid sample rate for device '{0}'. Falling back to {1}Hz.", deviceName, fallback);
+            }
+            effectiveSampleRate = fallback;
+        }
+
+        return effectiveSampleRate;
     }
 
     /// <summary>
