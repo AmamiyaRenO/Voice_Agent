@@ -34,6 +34,8 @@ namespace Mediapipe.Unity
     private static bool _IsPermitted = false;
 
     private WebCamTexture _webCamTexture;
+    private bool _shouldRequestExplicitWidthHeight;
+    private bool _shouldRequestExplicitFrameRate;
     private WebCamTexture webCamTexture
     {
       get => _webCamTexture;
@@ -230,10 +232,40 @@ namespace Mediapipe.Unity
 
     public override Texture GetCurrentTexture() => webCamTexture;
 
+    public override void SelectResolution(int resolutionId)
+    {
+      var resolutions = availableResolutions;
+
+      if (resolutions == null)
+      {
+        throw new InvalidOperationException("No available resolutions to select");
+      }
+
+      base.SelectResolution(resolutionId);
+      UpdateResolutionRequestState(resolutions, resolution);
+    }
+
     private ResolutionStruct GetDefaultResolution()
     {
       var resolutions = availableResolutions;
-      return resolutions == null || resolutions.Length == 0 ? new ResolutionStruct() : resolutions.OrderBy(resolution => resolution, new ResolutionStructComparer(_preferableDefaultWidth)).First();
+
+      if (resolutions == null || resolutions.Length == 0)
+      {
+        UpdateResolutionRequestState(resolutions, new ResolutionStruct());
+        return new ResolutionStruct();
+      }
+
+      var defaultResolution = resolutions.OrderBy(resolution => resolution, new ResolutionStructComparer(_preferableDefaultWidth)).First();
+      UpdateResolutionRequestState(resolutions, defaultResolution);
+      return defaultResolution;
+    }
+
+    private void UpdateResolutionRequestState(ResolutionStruct[] candidateResolutions, ResolutionStruct selectedResolution)
+    {
+      var usesFallbackList = candidateResolutions == null || ReferenceEquals(candidateResolutions, _defaultAvailableResolutions);
+
+      _shouldRequestExplicitWidthHeight = !usesFallbackList && selectedResolution.width > 0 && selectedResolution.height > 0;
+      _shouldRequestExplicitFrameRate = _shouldRequestExplicitWidthHeight && selectedResolution.frameRate > 0;
     }
 
     private void InitializeWebCamTexture()
