@@ -34,6 +34,7 @@ namespace RobotVoice
         private readonly SemaphoreSlim connectLock = new SemaphoreSlim(1, 1);
         private CancellationTokenSource reconnectCts;
         private bool isDisposing;
+        private SynchronizationContext mainThreadContext;
         private readonly object duplicatePublishLock = new object();
         private readonly HashSet<string> pendingPayloads = new HashSet<string>();
         private string lastPublishedPayload = string.Empty;
@@ -137,20 +138,12 @@ namespace RobotVoice
             }
 
             var payload = BuildLaunchPayload(gameName.Trim(), rawText);
-            if (IsSuppressed("LAUNCH_GAME:" + gameName))
-            {
-                return;
-            }
             await PublishAsync(payload);
         }
 
         public async Task PublishExitIntentAsync(string rawText)
         {
             var payload = BuildExitPayload(rawText);
-            if (IsSuppressed("BACK_HOME"))
-            {
-                return;
-            }
             await PublishAsync(payload);
         }
 
@@ -248,28 +241,7 @@ namespace RobotVoice
             }
         }
 
-        private bool IsSuppressed(string key)
-        {
-            lock (publishGuard)
-            {
-                var now = Time.realtimeSinceStartup;
-                if (!string.IsNullOrEmpty(key) && key == lastPublishKey && now - lastPublishTime < Mathf.Max(0f, publishCooldownSeconds))
-                {
-                    return true;
-                }
-                lastPublishKey = key;
-                // do not update time here; update on successful publish
-                return false;
-            }
-        }
-
-        private void RegisterPublishKey()
-        {
-            lock (publishGuard)
-            {
-                lastPublishTime = Time.realtimeSinceStartup;
-            }
-        }
+        // (legacy IsSuppressed/RegisterPublishKey removed; duplicate protection handled by TryReservePayload/MarkPayloadAsPublished)
 
         private string BuildLaunchPayload(string gameName, string rawText)
         {
