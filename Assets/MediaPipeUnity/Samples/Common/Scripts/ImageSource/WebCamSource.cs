@@ -241,7 +241,22 @@ namespace Mediapipe.Unity
       Stop();
       if (webCamDevice is WebCamDevice valueOfWebCamDevice)
       {
-        webCamTexture = new WebCamTexture(valueOfWebCamDevice.name, resolution.width, resolution.height, (int)resolution.frameRate);
+        var width = Mathf.Max(0, resolution.width);
+        var height = Mathf.Max(0, resolution.height);
+        var frameRate = resolution.frameRate;
+
+        if (frameRate > 0)
+        {
+          webCamTexture = new WebCamTexture(valueOfWebCamDevice.name, width, height, Mathf.Max(1, (int)Math.Round(frameRate)));
+        }
+        else if (width > 0 && height > 0)
+        {
+          webCamTexture = new WebCamTexture(valueOfWebCamDevice.name, width, height);
+        }
+        else
+        {
+          webCamTexture = new WebCamTexture(valueOfWebCamDevice.name);
+        }
         return;
       }
       throw new InvalidOperationException("Cannot initialize WebCamTexture because WebCamDevice is not selected");
