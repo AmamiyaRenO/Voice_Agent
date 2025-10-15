@@ -98,7 +98,7 @@ namespace Mediapipe.Unity
     ///   You need to call <see cref="Play" /> for the change to take effect.
     /// </remarks>
     /// <param name="resolutionId">The index of <see cref="availableResolutions" /></param>
-    public void SelectResolution(int resolutionId)
+    public virtual void SelectResolution(int resolutionId)
     {
       var resolutions = availableResolutions;
 
