@@ -1,5 +1,6 @@
 #if ROBOTVOICE_USE_MQTT
 using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -24,12 +25,19 @@ namespace RobotVoice
         [Header("MQTT Options")]
         [SerializeField] private bool autoConnectOnStart = true;
         [SerializeField] private string sourceLabel = "unity_vosk";
+        [Header("Flood Protection")]
+        [SerializeField, Tooltip("Minimum seconds between publishing identical payloads to the intent topic"), Min(0f)]
+        private float duplicatePublishCooldownSeconds = 0.5f;
 
         private SimpleMqttClient client;
         private SimpleMqttClientOptions options;
         private readonly SemaphoreSlim connectLock = new SemaphoreSlim(1, 1);
         private CancellationTokenSource reconnectCts;
         private bool isDisposing;
+        private readonly object duplicatePublishLock = new object();
+        private readonly HashSet<string> pendingPayloads = new HashSet<string>();
+        private string lastPublishedPayload = string.Empty;
+        private float lastPublishRealtime;
 
         private void Awake()
         {
@@ -134,27 +142,95 @@ namespace RobotVoice
 
         private async Task PublishAsync(string payload)
         {
-            await EnsureConnectedAsync();
-            if (client == null || !client.IsConnected)
+            if (!TryReservePayload(payload))
             {
-                Debug.LogWarning("[RobotVoice] MQTT client not connected; intent not sent");
                 return;
             }
 
-            var message = new SimpleMqttApplicationMessageBuilder()
-                .WithTopic(intentTopic)
-                .WithPayload(payload)
-                .WithQualityOfServiceLevel(SimpleMqttQualityOfServiceLevel.AtLeastOnce)
-                .Build();
-
             try
             {
-                await client.PublishAsync(message, CancellationToken.None);
-                Debug.Log($"[RobotVoice] Intent published: {payload}");
+                await EnsureConnectedAsync();
+                if (client == null || !client.IsConnected)
+                {
+                    Debug.LogWarning("[RobotVoice] MQTT client not connected; intent not sent");
+                    return;
+                }
+
+                var message = new SimpleMqttApplicationMessageBuilder()
+                    .WithTopic(intentTopic)
+                    .WithPayload(payload)
+                    .WithQualityOfServiceLevel(SimpleMqttQualityOfServiceLevel.AtLeastOnce)
+                    .Build();
+
+                try
+                {
+                    await client.PublishAsync(message, CancellationToken.None);
+                    MarkPayloadAsPublished(payload);
+                    Debug.Log($"[RobotVoice] Intent published: {payload}");
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[RobotVoice] Failed to publish MQTT intent: {ex.Message}");
+                }
             }
-            catch (Exception ex)
+            finally
             {
-                Debug.LogError($"[RobotVoice] Failed to publish MQTT intent: {ex.Message}");
+                ReleasePayloadReservation(payload);
+            }
+        }
+
+        private bool TryReservePayload(string payload)
+        {
+            if (string.IsNullOrEmpty(payload))
+            {
+                return true;
+            }
+
+            lock (duplicatePublishLock)
+            {
+                if (pendingPayloads.Contains(payload))
+                {
+                    return false;
+                }
+
+                if (duplicatePublishCooldownSeconds > 0f && string.Equals(lastPublishedPayload, payload, StringComparison.Ordinal))
+                {
+                    var elapsed = Time.realtimeSinceStartup - lastPublishRealtime;
+                    if (elapsed < Mathf.Max(0.01f, duplicatePublishCooldownSeconds))
+                    {
+                        return false;
+                    }
+                }
+
+                pendingPayloads.Add(payload);
+                return true;
+            }
+        }
+
+        private void MarkPayloadAsPublished(string payload)
+        {
+            if (string.IsNullOrEmpty(payload))
+            {
+                return;
+            }
+
+            lock (duplicatePublishLock)
+            {
+                lastPublishedPayload = payload;
+                lastPublishRealtime = Time.realtimeSinceStartup;
+            }
+        }
+
+        private void ReleasePayloadReservation(string payload)
+        {
+            if (string.IsNullOrEmpty(payload))
+            {
+                return;
+            }
+
+            lock (duplicatePublishLock)
+            {
+                pendingPayloads.Remove(payload);
             }
         }
 
