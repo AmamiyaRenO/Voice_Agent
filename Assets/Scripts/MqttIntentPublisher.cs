@@ -24,15 +24,22 @@ namespace RobotVoice
         [Header("MQTT Options")]
         [SerializeField] private bool autoConnectOnStart = true;
         [SerializeField] private string sourceLabel = "unity_vosk";
+        [Tooltip("Minimum interval between identical intents (seconds)")]
+        [SerializeField] private float publishCooldownSeconds = 10f;
 
         private SimpleMqttClient client;
         private SimpleMqttClientOptions options;
         private readonly SemaphoreSlim connectLock = new SemaphoreSlim(1, 1);
         private CancellationTokenSource reconnectCts;
         private bool isDisposing;
+        private SynchronizationContext mainThreadContext;
+        private static readonly object publishGuard = new object();
+        private static float lastPublishTime = -999f;
+        private static string lastPublishKey = string.Empty;
 
         private void Awake()
         {
+            mainThreadContext = SynchronizationContext.Current;
             InitialiseClient();
         }
 
@@ -49,15 +56,18 @@ namespace RobotVoice
             client = new SimpleMqttClient();
             client.Connected += () =>
             {
-                Debug.Log($"[RobotVoice] Connected to MQTT {host}:{port}");
+                PostToMainThread(() => Debug.Log($"[RobotVoice] Connected to MQTT {host}:{port}"));
             };
             client.Disconnected += reason =>
             {
-                Debug.LogWarning($"[RobotVoice] Disconnected from MQTT: {reason}");
-                if (!isDisposing)
+                PostToMainThread(() =>
                 {
-                    ScheduleReconnect();
-                }
+                    Debug.LogWarning($"[RobotVoice] Disconnected from MQTT: {reason}");
+                    if (!isDisposing)
+                    {
+                        ScheduleReconnect();
+                    }
+                });
             };
         }
 
@@ -124,12 +134,22 @@ namespace RobotVoice
                 return;
             }
 
-            await PublishAsync(BuildLaunchPayload(gameName.Trim(), rawText));
+            var payload = BuildLaunchPayload(gameName.Trim(), rawText);
+            if (IsSuppressed("LAUNCH_GAME:" + gameName))
+            {
+                return;
+            }
+            await PublishAsync(payload);
         }
 
         public async Task PublishExitIntentAsync(string rawText)
         {
-            await PublishAsync(BuildExitPayload(rawText));
+            var payload = BuildExitPayload(rawText);
+            if (IsSuppressed("BACK_HOME"))
+            {
+                return;
+            }
+            await PublishAsync(payload);
         }
 
         private async Task PublishAsync(string payload)
@@ -151,10 +171,34 @@ namespace RobotVoice
             {
                 await client.PublishAsync(message, CancellationToken.None);
                 Debug.Log($"[RobotVoice] Intent published: {payload}");
+                RegisterPublishKey();
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[RobotVoice] Failed to publish MQTT intent: {ex.Message}");
+            }
+        }
+
+        private bool IsSuppressed(string key)
+        {
+            lock (publishGuard)
+            {
+                var now = Time.realtimeSinceStartup;
+                if (!string.IsNullOrEmpty(key) && key == lastPublishKey && now - lastPublishTime < Mathf.Max(0f, publishCooldownSeconds))
+                {
+                    return true;
+                }
+                lastPublishKey = key;
+                // do not update time here; update on successful publish
+                return false;
+            }
+        }
+
+        private void RegisterPublishKey()
+        {
+            lock (publishGuard)
+            {
+                lastPublishTime = Time.realtimeSinceStartup;
             }
         }
 
@@ -223,10 +267,15 @@ namespace RobotVoice
 
         private void ScheduleReconnect()
         {
-            if (!autoConnectOnStart || !isActiveAndEnabled)
+            // This method may be called from non-main threads (MQTT callbacks).
+            // Guard against touching Unity API off the main thread by marshalling first.
+            if (SynchronizationContext.Current != mainThreadContext)
             {
+                PostToMainThread(ScheduleReconnect);
                 return;
             }
+
+            if (!autoConnectOnStart || !isActiveAndEnabled) return;
 
             reconnectCts?.Cancel();
             reconnectCts = new CancellationTokenSource();
@@ -246,6 +295,20 @@ namespace RobotVoice
                 {
                 }
             });
+        }
+
+        private void PostToMainThread(Action action)
+        {
+            if (action == null) return;
+            var ctx = mainThreadContext;
+            if (ctx != null)
+            {
+                ctx.Post(_ => action(), null);
+            }
+            else
+            {
+                action();
+            }
         }
 
         private async void OnDestroy()

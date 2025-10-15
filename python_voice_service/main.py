@@ -80,13 +80,36 @@ def _environment_int(key: str, default: int) -> int:
 def _load_model() -> WhisperModel:
     model_path = _environment("WHISPER_MODEL_PATH", "large-v3")
     compute_type = _environment("WHISPER_COMPUTE_TYPE", "int8_float16")
+    device_pref = _environment("WHISPER_DEVICE", "auto").lower()
 
-    model = WhisperModel(model_path, device="cuda", compute_type=compute_type)
+    def _cpu_compute(ct: str) -> str:
+        # If compute_type is tuned for GPU (e.g., float16), pick a CPU-friendly default
+        return "int8" if "float16" in ct.lower() else ct
+
+    # Explicit CPU request
+    if device_pref == "cpu":
+        model = WhisperModel(model_path, device="cpu", compute_type=_cpu_compute(compute_type))
+        try:
+            print(f"[VoiceService] Loaded Faster-Whisper model={model_path} device=cpu compute_type={_cpu_compute(compute_type)}")
+        except Exception:
+            pass
+        return model
+
+    # Prefer CUDA; fall back to CPU if unavailable or fails
     try:
-        print(f"[VoiceService] Loaded Faster-Whisper model={model_path} device=cuda compute_type={compute_type}")
-    except Exception:
-        pass
-    return model
+        model = WhisperModel(model_path, device="cuda", compute_type=compute_type)
+        try:
+            print(f"[VoiceService] Loaded Faster-Whisper model={model_path} device=cuda compute_type={compute_type}")
+        except Exception:
+            pass
+        return model
+    except Exception as exc:
+        model = WhisperModel(model_path, device="cpu", compute_type=_cpu_compute(compute_type))
+        try:
+            print(f"[VoiceService] Loaded Faster-Whisper model={model_path} device=cpu compute_type={_cpu_compute(compute_type)} (fallback from CUDA: {exc})")
+        except Exception:
+            pass
+        return model
 
 
 class RespondRequest(BaseModel):

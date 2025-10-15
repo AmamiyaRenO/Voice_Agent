@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+Assets/StreamingAssets/mediapipe/ filter=lfs diff=lfs merge=lfs -text
+Packages/com.github.homuler.mediapipe/Runtime/Plugins/Android//mediapipe_android.aar filter=lfs diff=lfs merge=lfs -text
+Assets/StreamingAssets/mediapipe filter=lfs diff=lfs merge=lfs -text

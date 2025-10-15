@@ -7,4 +7,5 @@ VOICE_AGENT_PIPER_HTTP_CMD:uvicorn piper_http:app --host 0.0.0.0 --port 5005
 VOICE_AGENT_PIPER_HTTP_CWD:D:\unityproject\Voice_Agent\python_voice_service
 VOICE_AGENT_VOICE_CMD:uvicorn main:app --host 0.0.0.0 --port 8000
 VOICE_AGENT_VOICE_CWD:D:\unityproject\Voice_Agent\python_voice_service
-
+WHISPER_DEVICE:cuda
+WHISPER_COMPUTE_TYPE:float16

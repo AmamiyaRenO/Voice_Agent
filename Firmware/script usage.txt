@@ -1,0 +1,14 @@
+ssh into RACHEL: RACHEL@10.0.0.194, password Rachel
+
+open a terminal for each script to run:
+
+go to the RACHEL folder
+
+face script: source venv/bin/activate 
+python faceScript.py
+
+Servo script: 
+python servoScript.py
+
+LED script: source venv/bin/activate
+sudo ~/RACHEL/venv/bin/python ledScript.py

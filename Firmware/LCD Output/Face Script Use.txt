@@ -1,0 +1,4 @@
+The face script runs through all face images in the facialExpressions folder. Currently they are animated through all faces (5 expressions). This script uses pygame to load, display, and transition through the PNGs. PNGs were made in Canva. This is faster and easier than drawing the faces directly with the script. 
+
+Next steps:
+Once MQTT is setup, this script can be replaced with one that triggers a face from the facialExpressions folder in response to a message from the broker.
