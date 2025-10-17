@@ -128,18 +128,26 @@ namespace Mediapipe.Unity.Sample
 
       while (_webCamReleasedForBackground && isActiveAndEnabled)
       {
+        var resumed = false;
+
         try
         {
           yield return webCamSource.Play();
-          _webCamReleasedForBackground = false;
-          isPaused = false;
-          break;
+          resumed = true;
         }
         catch (Exception ex)
         {
           Debug.LogWarning($"[{TAG}] Failed to reacquire WebCam after focus change: {ex.Message}");
-          yield return new WaitForSeconds(retryDelaySeconds);
         }
+
+        if (resumed)
+        {
+          _webCamReleasedForBackground = false;
+          isPaused = false;
+          break;
+        }
+
+        yield return new WaitForSeconds(retryDelaySeconds);
       }
 
       _webCamResumeCoroutine = null;

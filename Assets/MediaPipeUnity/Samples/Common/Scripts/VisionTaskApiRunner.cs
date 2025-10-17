@@ -120,21 +120,29 @@ namespace Mediapipe.Unity.Sample
     private IEnumerator ResumeWebCamAfterFocus(WebCamSource webCamSource)
     {
       const float retryDelaySeconds = 0.5f;
-
+https://github.com/AmamiyaRenO/Voice_Agent/pull/52/conflict?name=Assets%252FMediaPipeUnity%252FSamples%252FCommon%252FScripts%252FVisionTaskApiRunner.cs&ancestor_oid=1bd08d8b256cb371189019091dea6f78d7b9b6ee&base_oid=ba1fc7ddf1a13d1632533e3f3fd64bf386d31a4c&head_oid=af51ee761c81a7042b792bbd493b91dfc8a06803
       while (_webCamReleasedForBackground && isActiveAndEnabled)
       {
+        var resumed = false;
+
         try
         {
           yield return webCamSource.Play();
-          _webCamReleasedForBackground = false;
-          isPaused = false;
-          break;
+          resumed = true;
         }
         catch (Exception ex)
         {
           Debug.LogWarning($"[{TAG}] Failed to reacquire WebCam after focus change: {ex.Message}");
-          yield return new WaitForSeconds(retryDelaySeconds);
         }
+
+        if (resumed)
+        {
+          _webCamReleasedForBackground = false;
+          isPaused = false;
+          break;
+        }
+
+        yield return new WaitForSeconds(retryDelaySeconds);
       }
 
       _webCamResumeCoroutine = null;
