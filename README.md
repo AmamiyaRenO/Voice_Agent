@@ -31,6 +31,9 @@ seen in the project demos.
 * **Unity-first voice experience** – Prefab components (`VoskSpeechToText`,
   `VoiceGameLauncher`, `VoiceGameWiring`) take care of microphone capture,
   wake-word detection and intent routing.
+* **Focus-aware webcam hand-off** – MediaPipe runners stop their `WebCamTexture`
+  feeds when the agent is backgrounded, allowing another Unity project to claim
+  the camera while the voice agent keeps control of the microphone.
 * **Built-in MQTT publisher** – When the `ROBOTVOICE_USE_MQTT` scripting
   define is enabled, the agent publishes launch/exit messages to the
   `robot/intent` topic using a lightweight client that ships with the project,
