@@ -4,8 +4,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+using System;
 using System.Collections;
 using UnityEngine;
+
+using Mediapipe.Unity;
 
 namespace Mediapipe.Unity.Sample
 {
@@ -17,6 +20,9 @@ namespace Mediapipe.Unity.Sample
     protected TTask taskApi;
 
     public RunningMode runningMode;
+
+    private bool _webCamReleasedForBackground;
+    private Coroutine _webCamResumeCoroutine;
 
     public override void Play()
     {
@@ -47,6 +53,99 @@ namespace Mediapipe.Unity.Sample
       ImageSourceProvider.ImageSource.Stop();
       taskApi?.Close();
       taskApi = null;
+    }
+
+    private void OnDisable()
+    {
+      if (_webCamResumeCoroutine != null)
+      {
+        StopCoroutine(_webCamResumeCoroutine);
+        _webCamResumeCoroutine = null;
+      }
+      _webCamReleasedForBackground = false;
+    }
+
+    private void OnApplicationFocus(bool hasFocus)
+    {
+      HandleApplicationVisibilityChange(hasFocus);
+    }
+
+    private void OnApplicationPause(bool pauseStatus)
+    {
+      HandleApplicationVisibilityChange(!pauseStatus);
+    }
+
+    private void HandleApplicationVisibilityChange(bool isVisible)
+    {
+      if (!isActiveAndEnabled)
+      {
+        return;
+      }
+
+      if (bootstrap == null || !bootstrap.isFinished)
+      {
+        return;
+      }
+
+      var imageSource = ImageSourceProvider.ImageSource;
+      if (imageSource is not WebCamSource webCamSource)
+      {
+        return;
+      }
+
+      if (!isVisible)
+      {
+        if (!_webCamReleasedForBackground && webCamSource.isPrepared)
+        {
+          _webCamReleasedForBackground = true;
+          isPaused = true;
+          webCamSource.Stop();
+        }
+        return;
+      }
+
+      if (!_webCamReleasedForBackground)
+      {
+        return;
+      }
+
+      if (_webCamResumeCoroutine != null)
+      {
+        return;
+      }
+
+      _webCamResumeCoroutine = StartCoroutine(ResumeWebCamAfterFocus(webCamSource));
+    }
+
+    private IEnumerator ResumeWebCamAfterFocus(WebCamSource webCamSource)
+    {
+      const float retryDelaySeconds = 0.5f;
+
+      while (_webCamReleasedForBackground && isActiveAndEnabled)
+      {
+        var resumed = false;
+
+        try
+        {
+          yield return webCamSource.Play();
+          resumed = true;
+        }
+        catch (Exception ex)
+        {
+          Debug.LogWarning($"[{TAG}] Failed to reacquire WebCam after focus change: {ex.Message}");
+        }
+
+        if (resumed)
+        {
+          _webCamReleasedForBackground = false;
+          isPaused = false;
+          break;
+        }
+
+        yield return new WaitForSeconds(retryDelaySeconds);
+      }
+
+      _webCamResumeCoroutine = null;
     }
 
     protected abstract IEnumerator Run();

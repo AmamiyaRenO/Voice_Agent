@@ -106,10 +106,11 @@ namespace RobotVoice
             {
                 speechToText = GetComponent<VoskSpeechToText>();
             }
-			if (piHub == null)
-			{
-				piHub = FindObjectOfType<PiMessageHub>();
-			}
+            if (piHub == null)
+            {
+                piHub = FindObjectOfType<PiMessageHub>();
+            }
+            Application.runInBackground = true;
             ApplyFullscreenMode();
             runtimeConfig = BuildRuntimeConfig();
             ApplySpeechKeyPhrases();
