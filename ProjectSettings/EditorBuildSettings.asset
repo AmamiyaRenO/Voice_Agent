@@ -5,7 +5,10 @@ EditorBuildSettings:
   m_ObjectHideFlags: 0
   serializedVersion: 2
   m_Scenes:
-  - enabled: 1
+  - enabled: 0
     path: Assets/Scene/agent.unity
     guid: 775361a0115fb884884e0399d63ab493
+  - enabled: 1
+    path: Assets/Scene/RACHEL_UI.unity
+    guid: bca2ee0a19f12dc4088ce750069e974a
   m_configObjects: {}

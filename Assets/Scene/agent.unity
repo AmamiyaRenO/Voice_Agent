@@ -464,11 +464,10 @@ MonoBehaviour:
   - cloth
   - shut down
   - Notebook
-  - Flappy Bird
-  - flappybird
-  - Slow Boat
-  - boat
-  - slowboat
+  - Frisbee
+  - frisbee
+  - Cornhole
+  - cornhole
   - robot
 --- !u!114 &1307454269
 MonoBehaviour:

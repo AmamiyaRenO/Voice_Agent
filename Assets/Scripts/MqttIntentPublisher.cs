@@ -147,6 +147,39 @@ namespace RobotVoice
             await PublishAsync(payload);
         }
 
+        // Raw publish helper for custom topics (e.g., robot/pi/*)
+        public async Task PublishRawAsync(string topic, string payload, SimpleMqttQualityOfServiceLevel qos = SimpleMqttQualityOfServiceLevel.AtLeastOnce)
+        {
+            if (string.IsNullOrWhiteSpace(topic))
+            {
+                Debug.LogWarning("[RobotVoice] Raw publish ignored: empty topic");
+                return;
+            }
+
+            try
+            {
+                await EnsureConnectedAsync();
+                if (client == null || !client.IsConnected)
+                {
+                    Debug.LogWarning("[RobotVoice] MQTT client not connected; raw publish ignored");
+                    return;
+                }
+
+                var message = new SimpleMqttApplicationMessageBuilder()
+                    .WithTopic(topic)
+                    .WithPayload(payload)
+                    .WithQualityOfServiceLevel(qos)
+                    .Build();
+
+                await client.PublishAsync(message, CancellationToken.None);
+                Debug.Log($"[RobotVoice] Raw published: {topic} {payload}");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[RobotVoice] Raw publish failed: {ex.Message}");
+            }
+        }
+
         private async Task PublishAsync(string payload)
         {
             if (!TryReservePayload(payload))

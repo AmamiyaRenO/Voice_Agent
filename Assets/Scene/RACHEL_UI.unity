@@ -198,6 +198,82 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 92367692}
   m_CullTransparentMesh: 1
+--- !u!1 &143412777
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 143412780}
+  - component: {fileID: 143412779}
+  - component: {fileID: 143412778}
+  m_Layer: 0
+  m_Name: MessageHubPi
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &143412778
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 143412777}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f62f648592c8f1d43bde79e2cd967b6c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  publisher: {fileID: 143412779}
+  faceTopic: robot/pi/face/cmd
+  servoTopic: robot/pi/servo/cmd
+  ledTopic: robot/pi/led/cmd
+  defaultServoSeconds: 2
+  defaultFaceSeconds: 3
+  defaultLedBreathSeconds: 2
+--- !u!114 &143412779
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 143412777}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6e1e806f290598b4c9b32a8f656b6257, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  host: 10.0.0.1
+  port: 1883
+  username: 
+  password: 
+  intentTopic: robot/intent
+  clientId: unity-voice
+  useTls: 0
+  tlsTargetHost: 
+  allowUntrustedCertificates: 0
+  autoConnectOnStart: 1
+  sourceLabel: unity_vosk
+  duplicatePublishCooldownSeconds: 0.5
+--- !u!4 &143412780
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 143412777}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &246532872
 GameObject:
   m_ObjectHideFlags: 0
@@ -302,7 +378,18 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 6e1e806f290598b4c9b32a8f656b6257, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  host: 127.0.0.1
+  port: 1883
+  username: 
+  password: 
+  intentTopic: robot/intent
+  clientId: unity-voice
+  useTls: 0
+  tlsTargetHost: 
+  allowUntrustedCertificates: 0
+  autoConnectOnStart: 1
   sourceLabel: unity_vosk
+  duplicatePublishCooldownSeconds: 0.5
 --- !u!4 &265265949
 Transform:
   m_ObjectHideFlags: 0
@@ -1824,12 +1911,11 @@ MonoBehaviour:
   - close
   - cloth
   - shut down
-  - Notebook
-  - Flappy Bird
-  - flappybird
-  - Slow Boat
-  - boat
-  - slowboat
+  - bee
+  - Frisbee
+  - frisbee
+  - Cornhole
+  - cornhole
   - robot
 --- !u!114 &1489373251
 MonoBehaviour:
@@ -1892,7 +1978,18 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 6e1e806f290598b4c9b32a8f656b6257, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  host: 127.0.0.1
+  port: 1883
+  username: 
+  password: 
+  intentTopic: robot/intent
+  clientId: unity-voice
+  useTls: 0
+  tlsTargetHost: 
+  allowUntrustedCertificates: 0
+  autoConnectOnStart: 1
   sourceLabel: unity_vosk
+  duplicatePublishCooldownSeconds: 0.5
 --- !u!4 &1489373253
 Transform:
   m_ObjectHideFlags: 0
@@ -3186,10 +3283,10 @@ MonoBehaviour:
   floatingSlider: {fileID: 2123512310}
   cards:
   - cardRect: {fileID: 1297632027}
-    sceneName: Slow Boat
+    sceneName: Cornhole
     hoverHighlight: {fileID: 0}
   - cardRect: {fileID: 1978691664}
-    sceneName: Flappy Bird
+    sceneName: Frisbee
     hoverHighlight: {fileID: 0}
   dwellSeconds: 1.4
   sliderOffset: {x: 48, y: -48}
@@ -3718,3 +3815,4 @@ SceneRoots:
   - {fileID: 1489373253}
   - {fileID: 1337797878}
   - {fileID: 265265949}
+  - {fileID: 143412780}

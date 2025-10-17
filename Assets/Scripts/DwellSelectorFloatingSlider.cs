@@ -2,6 +2,7 @@
 using UnityEngine.UI;
 using UnityEngine.SceneManagement;
 using RobotVoice; // for MqttIntentPublisher
+using System.Threading.Tasks;
 
 public class DwellSelectorFloatingSlider : MonoBehaviour
 {
@@ -27,6 +28,7 @@ public class DwellSelectorFloatingSlider : MonoBehaviour
     public bool openViaMessageHub = true;
     [Tooltip("MQTT publisher (message hub)")]
     public MqttIntentPublisher mqttPublisher;
+    public PiMessageHub piHub;
 
     float _timer;
     int _hovered = -1;
@@ -85,6 +87,11 @@ public class DwellSelectorFloatingSlider : MonoBehaviour
                 string value = cards[_hovered].sceneName;
                 if (openViaMessageHub && mqttPublisher != null && !string.IsNullOrEmpty(value))
                 {
+                    // UI 启动前先让表情微笑
+                    if (piHub != null)
+                    {
+                        _ = piHub.SendFaceHappyAsync();
+                    }
                     _ = mqttPublisher.PublishLaunchIntentAsync(value, "ui_dwell");
                 }
                 else if (!string.IsNullOrEmpty(value))

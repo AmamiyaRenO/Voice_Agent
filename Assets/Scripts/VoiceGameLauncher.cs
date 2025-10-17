@@ -15,6 +15,7 @@ namespace RobotVoice
         [Header("Dependencies")]
         [SerializeField] private MqttIntentPublisher publisher;
         [SerializeField] private VoskSpeechToText speechToText;
+		[SerializeField] private PiMessageHub piHub;
 
         [Header("Configuration")]
         [SerializeField] private TextAsset intentConfigJson;
@@ -105,6 +106,10 @@ namespace RobotVoice
             {
                 speechToText = GetComponent<VoskSpeechToText>();
             }
+			if (piHub == null)
+			{
+				piHub = FindObjectOfType<PiMessageHub>();
+			}
             ApplyFullscreenMode();
             runtimeConfig = BuildRuntimeConfig();
             ApplySpeechKeyPhrases();
@@ -428,8 +433,14 @@ namespace RobotVoice
 
         private void HandleWakeWordOnlyDetected()
         {
-            // 先让 LLM 回复一句“我在听”（TTS 播放），再开启首条命令监听
-            StartCoroutine(WakeThenListenFlow());
+			// 唤醒词响应：同时开花并亮灯（短暂常亮）
+			if (piHub != null)
+			{
+				_ = piHub.OpenFlowerHoldAsync();
+				_ = piHub.SendLedRandomAsync();
+			}
+			// 先让 LLM 回复一句“我在听”（TTS 播放），再开启首条命令监听
+			StartCoroutine(WakeThenListenFlow());
         }
 
         private void TriggerWakeWordRecordingWindow()
@@ -625,7 +636,7 @@ namespace RobotVoice
             return false;
         }
 
-        private void PublishLaunch(string gameName, string rawText)
+		private void PublishLaunch(string gameName, string rawText)
         {
             if (string.IsNullOrWhiteSpace(gameName))
             {
@@ -635,6 +646,12 @@ namespace RobotVoice
                 }
                 return;
             }
+
+			// 启动游戏时在屏幕上显示笑脸
+			if (piHub != null)
+			{
+				_ = piHub.SendFaceHappyAsync();
+			}
 
             awaitingFirstCommand = false;
             ClearWakeWordWindow();
@@ -683,7 +700,7 @@ namespace RobotVoice
             coachSpeechCoroutine = StartCoroutine(GenerateAndSpeakCoachReply(trimmedRecognised));
         }
 
-        private IEnumerator GenerateAndSpeakCoachReply(string recognisedText)
+		private IEnumerator GenerateAndSpeakCoachReply(string recognisedText)
         {
             try
             {
@@ -719,12 +736,17 @@ namespace RobotVoice
                         if (!string.IsNullOrWhiteSpace(reply))
                         {
                             var finalReply = reply.Trim();
-                            ShowCoachResponseOnScreen(finalReply);
-                            Debug.Log($"[RobotVoice] Coach: {finalReply}");
-                            if (!string.IsNullOrWhiteSpace(piperSpeakUrl))
-                            {
-                                StartCoroutine(PlayTtsFromPiper(finalReply));
-                            }
+								ShowCoachResponseOnScreen(finalReply);
+								Debug.Log($"[RobotVoice] Coach: {finalReply}");
+								if (!string.IsNullOrWhiteSpace(piperSpeakUrl))
+								{
+									// 在 LLM 的 TTS 播放前触发呼吸灯
+									if (piHub != null)
+									{
+										_ = piHub.SendLedBreathAsync();
+									}
+									StartCoroutine(PlayTtsFromPiper(finalReply));
+								}
                         }
                         else
                         {

@@ -8,12 +8,12 @@
       "Variants": ["notebook"]
     },
     {
-      "Canonical": "Flappy Bird",
-      "Variants": ["flappy bird", "flappybird"]
+      "Canonical": "Frisbee",
+      "Variants": ["frisbee"]
     },
     {
-      "Canonical": "Slow Boat",
-      "Variants": ["boat", "slowboat"]
+      "Canonical": "Cornhole",
+      "Variants": ["cornhole"]
     }
   ]
 }
