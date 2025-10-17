@@ -36,6 +36,7 @@ namespace Mediapipe.Unity
     private WebCamTexture _webCamTexture;
     private bool _shouldRequestExplicitWidthHeight;
     private bool _shouldRequestExplicitFrameRate;
+    private bool _needsTextureReset = true;
     private WebCamTexture webCamTexture
     {
       get => _webCamTexture;
@@ -77,6 +78,7 @@ namespace Mediapipe.Unity
         }
         _webCamDevice = value;
         resolution = GetDefaultResolution();
+        _needsTextureReset = true;
       }
     }
     public override string sourceName => (webCamDevice is WebCamDevice valueOfWebCamDevice) ? valueOfWebCamDevice.name : null;
@@ -195,7 +197,18 @@ namespace Mediapipe.Unity
         throw new InvalidOperationException("Not permitted to access cameras");
       }
 
+      if (isPrepared && !_needsTextureReset)
+      {
+        if (!webCamTexture.isPlaying)
+        {
+          webCamTexture.Play();
+        }
+        yield return WaitForWebCamTexture();
+        yield break;
+      }
+
       InitializeWebCamTexture();
+      _needsTextureReset = false;
       webCamTexture.Play();
       yield return WaitForWebCamTexture();
     }
@@ -228,6 +241,7 @@ namespace Mediapipe.Unity
         webCamTexture.Stop();
       }
       webCamTexture = null;
+      _needsTextureReset = true;
     }
 
     public override Texture GetCurrentTexture() => webCamTexture;
@@ -243,6 +257,7 @@ namespace Mediapipe.Unity
 
       base.SelectResolution(resolutionId);
       UpdateResolutionRequestState(resolutions, resolution);
+      _needsTextureReset = true;
     }
 
     private ResolutionStruct GetDefaultResolution()
