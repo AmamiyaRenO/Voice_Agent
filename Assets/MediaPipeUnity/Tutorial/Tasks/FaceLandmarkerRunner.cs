@@ -12,6 +12,8 @@ namespace Mediapipe.Unity.Tutorial
     [SerializeField] private int fps;
 
     private WebCamTexture webCamTexture;
+    private bool _resumeRequested;
+    private Coroutine _resumeCoroutine;
 
     private IEnumerator Start()
     {
@@ -32,10 +34,63 @@ namespace Mediapipe.Unity.Tutorial
 
     private void OnDestroy()
     {
+      if (_resumeCoroutine != null)
+      {
+        StopCoroutine(_resumeCoroutine);
+        _resumeCoroutine = null;
+      }
+
       if (webCamTexture != null)
       {
         webCamTexture.Stop();
       }
+    }
+
+    private void OnApplicationFocus(bool hasFocus)
+    {
+      HandleApplicationVisibilityChange(hasFocus);
+    }
+
+    private void OnApplicationPause(bool pauseStatus)
+    {
+      HandleApplicationVisibilityChange(!pauseStatus);
+    }
+
+    private void HandleApplicationVisibilityChange(bool isVisible)
+    {
+      if (webCamTexture == null)
+      {
+        return;
+      }
+
+      if (!isVisible)
+      {
+        if (webCamTexture.isPlaying)
+        {
+          _resumeRequested = true;
+          webCamTexture.Stop();
+        }
+        return;
+      }
+
+      if (!_resumeRequested)
+      {
+        return;
+      }
+
+      if (_resumeCoroutine != null)
+      {
+        StopCoroutine(_resumeCoroutine);
+      }
+      _resumeCoroutine = StartCoroutine(ResumeAfterFocus());
+    }
+
+    private IEnumerator ResumeAfterFocus()
+    {
+      webCamTexture.Play();
+      yield return new WaitUntil(() => webCamTexture.width > 16);
+      _resumeRequested = false;
+      _resumeCoroutine = null;
     }
   }
 }
