@@ -136,6 +136,12 @@ def _ollama_system_prompt() -> str:
     return _environment("OLLAMA_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
 
 
+def _piper_http_base_url() -> str:
+    # Base URL for the Piper HTTP wrapper (piper_http.py)
+    # Defaults to local instance started by scripts/start_local_services.py
+    return _environment("PIPER_HTTP_URL", "http://127.0.0.1:5005").rstrip("/")
+
+
 async def _generate_coach_reply(user_text: str) -> str:
     payload = {
         "model": _ollama_model(),
@@ -309,6 +315,53 @@ async def respond(payload: RespondRequest) -> RespondResponse:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return RespondResponse(text=reply)
+
+
+# --- Compatibility TTS endpoint -------------------------------------------------
+# Some clients call POST /tts expecting a TTS service. Provide a thin proxy to the
+# Piper HTTP wrapper so existing integrations keep working without changes.
+
+
+class TtsRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+
+
+@app.post("/tts")
+async def tts(payload: TtsRequest) -> JSONResponse:
+    url = f"{_piper_http_base_url()}/speak"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            resp = await client.post(url, json={"text": payload.text})
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text.strip())
+
+    # Proxy Piper's JSON (audio_wav_base64 + sample_rate)
+    return JSONResponse(resp.json())
+
+
+from fastapi.responses import Response  # existing import above includes JSONResponse only
+
+
+@app.get("/tts")
+async def tts_get(text: str) -> Response:
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty text")
+
+    url = f"{_piper_http_base_url()}/speak"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            resp = await client.get(url, params={"text": text})
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text.strip())
+
+    return Response(content=resp.content, media_type="audio/wav")
 
 
 if __name__ == "__main__":

@@ -130,15 +130,10 @@ namespace Mediapipe.Unity.Sample
       {
         var resumed = false;
 
-        try
-        {
-          yield return webCamSource.Play();
-          resumed = true;
-        }
-        catch (Exception ex)
-        {
-          Debug.LogWarning($"[{TAG}] Failed to reacquire WebCam after focus change: {ex.Message}");
-        }
+        var playEnumerator = webCamSource.Play();
+        // 不要在带 catch 的 try 中 yield；直接等待枚举器
+        yield return playEnumerator;
+        resumed = true;
 
         if (resumed)
         {

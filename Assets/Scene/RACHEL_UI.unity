@@ -235,6 +235,9 @@ MonoBehaviour:
   defaultServoSeconds: 2
   defaultFaceSeconds: 3
   defaultLedBreathSeconds: 2
+  defaultLedOnSeconds: 1
+  defaultSlowSeconds: 3
+  defaultSpeedPercent: 30
 --- !u!114 &143412779
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1911,11 +1914,10 @@ MonoBehaviour:
   - close
   - cloth
   - shut down
-  - bee
+  - Notebook
   - Frisbee
-  - frisbee
   - Cornhole
-  - cornhole
+  - bee
   - robot
 --- !u!114 &1489373251
 MonoBehaviour:
@@ -1931,6 +1933,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   publisher: {fileID: 1489373252}
   speechToText: {fileID: 0}
+  piHub: {fileID: 0}
   intentConfigJson: {fileID: 4900000, guid: f886a37adc9721949b230d5dec74c8fc, type: 3}
   wakeWord: rachel
   wakeWordVariants:
@@ -2480,7 +2483,7 @@ MonoBehaviour:
   m_OnCullStateChanged:
     m_PersistentCalls:
       m_Calls: []
-  m_Sprite: {fileID: 21300000, guid: 1054f89f9350e484fa43399c8c7102ed, type: 3}
+  m_Sprite: {fileID: 21300000, guid: 4bb90aeccb77d1d4eb35d2051d68f22a, type: 3}
   m_Type: 0
   m_PreserveAspect: 1
   m_FillCenter: 1
@@ -3286,12 +3289,13 @@ MonoBehaviour:
     sceneName: Cornhole
     hoverHighlight: {fileID: 0}
   - cardRect: {fileID: 1978691664}
-    sceneName: Frisbee
+    sceneName: Disc golf
     hoverHighlight: {fileID: 0}
   dwellSeconds: 1.4
   sliderOffset: {x: 48, y: -48}
   openViaMessageHub: 1
   mqttPublisher: {fileID: 265265948}
+  piHub: {fileID: 0}
 --- !u!1 &1978691663
 GameObject:
   m_ObjectHideFlags: 0
