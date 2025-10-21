@@ -8,15 +8,10 @@ can reuse the existing message hub pipeline.
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import math
 import os
-import subprocess
-import tempfile
-from functools import lru_cache, partial
-from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from functools import lru_cache
+from typing import Iterable, List, Optional
 
 import numpy as np
 import httpx
@@ -178,117 +173,6 @@ async def _generate_coach_reply(user_text: str) -> str:
     return reply_text
 
 
-class TtsRequest(BaseModel):
-    text: str = Field(..., min_length=1, description="Text to synthesize")
-    voice: Optional[str] = Field(None, description="Optional voice or speaker hint")
-    speed: float = Field(1.0, ge=0.1, le=4.0, description="Playback speed multiplier")
-    volume: float = Field(1.0, ge=0.0, le=2.0, description="Volume hint (handled client-side)")
-    play: bool = Field(True, description="Whether the Unity client should auto-play")
-
-
-class TtsResponse(BaseModel):
-    audio_wav_base64: str
-    sample_rate: int
-
-
-_DEFAULT_TTS_SAMPLE_RATE = 22050
-
-
-@lru_cache(maxsize=1)
-def _piper_speaker_map() -> Dict[str, str]:
-    raw = _environment("PIPER_SPEAKER_MAP", "")
-    mapping: Dict[str, str] = {}
-    if not raw:
-        return mapping
-    for item in raw.split(","):
-        if not item:
-            continue
-        if ":" not in item:
-            continue
-        voice_key, speaker_value = item.split(":", 1)
-        voice_key = voice_key.strip().lower()
-        speaker_value = speaker_value.strip()
-        if voice_key and speaker_value:
-            mapping[voice_key] = speaker_value
-    return mapping
-
-
-def _resolve_speaker(requested_voice: Optional[str]) -> Optional[str]:
-    if requested_voice:
-        speaker = _piper_speaker_map().get(requested_voice.strip().lower())
-        if speaker:
-            return speaker
-    env_default = _environment("PIPER_SPEAKER", "")
-    return env_default or None
-
-
-def _build_piper_command(out_path: Path, requested_voice: Optional[str], speed: float) -> List[str]:
-    exe = _environment("PIPER_EXECUTABLE", "piper")
-    model = _environment("PIPER_MODEL_PATH", "")
-    if not model:
-        raise RuntimeError("PIPER_MODEL_PATH environment variable is not configured")
-
-    cmd: List[str] = [exe, "--model", model, "--output_file", str(out_path)]
-
-    cfg = _environment("PIPER_CONFIG_PATH", "")
-    if cfg:
-        cmd += ["--config", cfg]
-
-    speaker = _resolve_speaker(requested_voice)
-    if speaker:
-        cmd += ["--speaker", speaker]
-
-    clamped_speed = max(0.1, min(4.0, speed if speed and speed > 0 else 1.0))
-    if abs(clamped_speed - 1.0) > 1e-3:
-        # Piper uses length_scale (inverse of speed): lower values => faster speech
-        length_scale = round(1.0 / clamped_speed, 3)
-        cmd += ["--length_scale", f"{length_scale}"]
-
-    noise_scale = _environment("PIPER_NOISE_SCALE", "")
-    if noise_scale:
-        cmd += ["--noise_scale", noise_scale]
-
-    noise_w = _environment("PIPER_NOISE_W", "")
-    if noise_w:
-        cmd += ["--noise_w", noise_w]
-
-    if _environment("PIPER_SPEAKER_LATENCY", ""):
-        cmd += ["--speaker_latency", _environment("PIPER_SPEAKER_LATENCY", "")]
-
-    return cmd
-
-
-def _invoke_piper(text: str, requested_voice: Optional[str], speed: float) -> bytes:
-    with tempfile.TemporaryDirectory(prefix="voice-agent-tts-") as tmp_dir:
-        out_path = Path(tmp_dir) / "out.wav"
-        cmd = _build_piper_command(out_path, requested_voice, speed)
-        try:
-            completed = subprocess.run(
-                cmd,
-                input=text.encode("utf-8"),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-        except FileNotFoundError:
-            raise
-        except Exception as exc:  # pragma: no cover - defensive
-            raise RuntimeError(f"Failed to launch Piper: {exc}") from exc
-
-        if completed.returncode != 0:
-            stderr_text = completed.stderr.decode("utf-8", errors="ignore").strip()
-            raise RuntimeError(stderr_text or "Piper returned a non-zero exit code")
-
-        if not out_path.exists():
-            raise RuntimeError("Piper did not generate an output file")
-
-        return out_path.read_bytes()
-
-
-def _tts_sample_rate() -> int:
-    return _environment_int("PIPER_SAMPLE_RATE", _DEFAULT_TTS_SAMPLE_RATE)
-
-
 @app.on_event("startup")
 async def _startup_event() -> None:
     # Trigger model loading during startup so the first request does not pay the cost.
@@ -425,37 +309,6 @@ async def respond(payload: RespondRequest) -> RespondResponse:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return RespondResponse(text=reply)
-
-
-@app.post("/tts", response_model=TtsResponse)
-async def synthesize(payload: TtsRequest) -> TtsResponse:
-    text = payload.text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Empty text payload")
-
-    loop = asyncio.get_running_loop()
-
-    try:
-        audio_bytes = await loop.run_in_executor(
-            None,
-            partial(_invoke_piper, text, payload.voice, payload.speed),
-        )
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Piper executable was not found. Configure PIPER_EXECUTABLE or install Piper in PATH."
-            ),
-        ) from None
-    except RuntimeError as exc:
-        message = str(exc).strip() or "Piper synthesis failed"
-        if "PIPER_MODEL_PATH" in message:
-            raise HTTPException(status_code=503, detail=message) from exc
-        raise HTTPException(status_code=500, detail=message) from exc
-
-    audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
-
-    return TtsResponse(audio_wav_base64=audio_b64, sample_rate=_tts_sample_rate())
 
 
 if __name__ == "__main__":
