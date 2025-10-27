@@ -39,13 +39,13 @@ pip install -r requirements.txt
    export WHISPER_DEVICE=cpu          # or "cuda" if you have GPU support
    export WHISPER_COMPUTE_TYPE=int8   # tweak if you use CUDA (e.g. float16)
    # Optional decoding/audio guards against repeated phrases when using smaller models
-   export WHISPER_NO_REPEAT_NGRAM_SIZE=3
-   export WHISPER_REPETITION_PENALTY=1.05
+   export WHISPER_NO_REPEAT_NGRAM_SIZE=4
+   export WHISPER_REPETITION_PENALTY=1.15
    export WHISPER_LENGTH_PENALTY=1.0
-   export WHISPER_MAX_AUDIO_SECONDS=8.0
+   export WHISPER_MAX_AUDIO_SECONDS=5.0
    export WHISPER_VAD_SILENCE_MS=250
    export WHISPER_VAD_MIN_SPEECH_MS=150
-   export WHISPER_RECENT_WINDOW_PAD_MS=200
+   export WHISPER_RECENT_WINDOW_PAD_MS=100
    export WHISPER_CONDITION_ON_PREVIOUS_TEXT=false
    ```
 

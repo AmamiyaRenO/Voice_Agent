@@ -218,14 +218,14 @@ def _environment_bool(key: str, default: bool) -> bool:
 
 
 WHISPER_NO_REPEAT_NGRAM_SIZE = _positive_or_zero(
-    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 3)
+    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 4)
 )
-WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.05))
+WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.15))
 WHISPER_LENGTH_PENALTY = _non_negative_float(
     _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
 )
 WHISPER_MAX_AUDIO_SECONDS = _non_negative_float(
-    _environment_float("WHISPER_MAX_AUDIO_SECONDS", 8.0)
+    _environment_float("WHISPER_MAX_AUDIO_SECONDS", 5.0)
 )
 WHISPER_VAD_SILENCE_MS = _positive_or_zero(
     _environment_int("WHISPER_VAD_SILENCE_MS", 250)
@@ -234,7 +234,7 @@ WHISPER_VAD_MIN_SPEECH_MS = _positive_or_zero(
     _environment_int("WHISPER_VAD_MIN_SPEECH_MS", 150)
 )
 WHISPER_RECENT_WINDOW_PAD_MS = _positive_or_zero(
-    _environment_int("WHISPER_RECENT_WINDOW_PAD_MS", 200)
+    _environment_int("WHISPER_RECENT_WINDOW_PAD_MS", 100)
 )
 WHISPER_CONDITION_ON_PREVIOUS_TEXT = _environment_bool(
     "WHISPER_CONDITION_ON_PREVIOUS_TEXT", False
@@ -250,9 +250,9 @@ def _non_negative_float(value: float) -> float:
 
 
 WHISPER_NO_REPEAT_NGRAM_SIZE = _positive_or_zero(
-    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 3)
+    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 4)
 )
-WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.05))
+WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.15))
 WHISPER_LENGTH_PENALTY = _non_negative_float(
     _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
 )
