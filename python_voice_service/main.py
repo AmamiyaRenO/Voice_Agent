@@ -43,6 +43,36 @@ DEFAULT_SYSTEM_PROMPT = (
     "- If the user asks something outside your knowledge, politely say you don’t know and redirect them back to the exercise context."
 )
 
+DEFAULT_HTTP_TIMEOUT = httpx.Timeout(30.0)
+
+
+class _AsyncHttpClient:
+    """Singleton-style manager for a shared httpx.AsyncClient instance.
+
+    Creating a new AsyncClient for every request is relatively expensive because
+    it has to establish a fresh connection pool and negotiate TLS each time.
+    For chat-style interactions where the client repeatedly talks to the same
+    Ollama and Piper services, that overhead can add a noticeable delay before
+    the model even starts generating tokens.  Reusing a single client keeps the
+    connection pool warm while still allowing FastAPI to handle requests
+    concurrently.
+    """
+
+    _client: Optional[httpx.AsyncClient] = None
+
+    @classmethod
+    def get(cls) -> httpx.AsyncClient:
+        if cls._client is None:
+            cls._client = httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT)
+        return cls._client
+
+    @classmethod
+    async def aclose(cls) -> None:
+        if cls._client is not None:
+            await cls._client.aclose()
+            cls._client = None
+
+
 app = FastAPI(title=APP_TITLE)
 
 
@@ -280,8 +310,8 @@ async def _generate_coach_reply(user_text: str) -> str:
     url = f"{_ollama_base_url()}/api/generate"
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            response = await client.post(url, json=payload)
+        client = _AsyncHttpClient.get()
+        response = await client.post(url, json=payload)
     except httpx.HTTPError as exc:
         raise OllamaError(f"Failed to contact Ollama at {url}: {exc}") from exc
 
@@ -303,6 +333,13 @@ async def _generate_coach_reply(user_text: str) -> str:
 async def _startup_event() -> None:
     # Trigger model loading during startup so the first request does not pay the cost.
     _load_model()
+    # Warm the shared HTTP client so the first request can reuse an existing connection.
+    _AsyncHttpClient.get()
+
+
+@app.on_event("shutdown")
+async def _shutdown_event() -> None:
+    await _AsyncHttpClient.aclose()
 
 
 @app.get("/healthz")
@@ -606,8 +643,8 @@ class TtsRequest(BaseModel):
 async def tts(payload: TtsRequest) -> JSONResponse:
     url = f"{_piper_http_base_url()}/speak"
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.post(url, json={"text": payload.text})
+        client = _AsyncHttpClient.get()
+        resp = await client.post(url, json={"text": payload.text})
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
 
@@ -629,8 +666,8 @@ async def tts_get(text: str) -> Response:
 
     url = f"{_piper_http_base_url()}/speak"
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.get(url, params={"text": text})
+        client = _AsyncHttpClient.get()
+        resp = await client.get(url, params={"text": text})
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
 
