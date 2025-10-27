@@ -233,6 +233,38 @@ def _mean(values: List[float]) -> Optional[float]:
     return sum(values) / len(values)
 
 
+def _looks_like_meaningful_text(text: str) -> bool:
+    if not text:
+        return False
+
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    if stripped.lower() in {WAKE_WORD, *WAKE_WORD_ALIASES}:
+        return True
+
+    alpha_numeric = sum(ch.isalnum() for ch in stripped)
+    if alpha_numeric >= 3:
+        return True
+
+    return len(stripped.split()) >= 2
+
+
+def _audio_energy_metrics(audio: np.ndarray) -> tuple[float, float]:
+    if audio.size == 0:
+        return 0.0, 0.0
+
+    # Ensure calculations happen in float64 to avoid precision loss for tiny signals.
+    squared = np.square(audio, dtype=np.float64)
+    rms = float(np.sqrt(np.mean(squared))) if squared.size else 0.0
+    max_amplitude = float(np.max(np.abs(audio)))
+    return rms, max_amplitude
+
+
+LOW_CONFIDENCE_THRESHOLD = -0.6
+
+
 def _resample_audio(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
     if source_rate == target_rate or samples.size == 0:
         return samples
@@ -266,10 +298,7 @@ def _run_transcription(
     language: Optional[str],
     temperature_schedule: tuple[float, ...],
 ):
-    best_of = 1
-    if any(temp > 0.0 for temp in temperature_schedule):
-        best_of = max(beam_size, 5)
-
+    best_of = 1 if all(temp <= 0.0 for temp in temperature_schedule) else max(beam_size, 5)
     segments_generator, info = model.transcribe(
         audio,
         beam_size=beam_size,
@@ -293,7 +322,7 @@ def _should_retry_transcription(
     if not has_speech:
         return False
 
-    if avg_logprob is not None and avg_logprob < -1.0:
+    if avg_logprob is not None and avg_logprob < LOW_CONFIDENCE_THRESHOLD:
         return True
 
     if language_probability is not None and language_probability < 0.45:
@@ -321,13 +350,15 @@ async def transcribe(
     if sample_rate != DEFAULT_SAMPLE_RATE:
         audio = _resample_audio(audio, sample_rate, DEFAULT_SAMPLE_RATE)
 
+    rms, max_amplitude = _audio_energy_metrics(audio)
+
     model = _load_model()
 
     normalized_language = _normalize_language(language)
     effective_beam_size = max(1, min(beam_size, 10))
     primary_beam_size = max(5, effective_beam_size)
 
-    primary_temperatures = (0.0, 0.2)
+    primary_temperatures: tuple[float, ...] = (0.0,)
     segments, info = _run_transcription(
         model,
         audio,
@@ -342,14 +373,22 @@ async def transcribe(
     if _should_retry_transcription(avg_logprob, getattr(info, "language_probability", None), bool(segments)):
         retry_beam_size = max(primary_beam_size, 8)
         retry_temperatures = (0.0, 0.3, 0.6)
-        segments, info = _run_transcription(
+        retry_segments, retry_info = _run_transcription(
             model,
             audio,
             beam_size=retry_beam_size,
             language=normalized_language,
             temperature_schedule=retry_temperatures,
         )
-        avg_logprob_values = _collect_avg_logprobs(segments)
+        retry_logprob_values = _collect_avg_logprobs(retry_segments)
+        retry_avg_logprob = _mean(retry_logprob_values)
+
+        # Prefer whichever run yields the higher confidence while keeping the richer transcript.
+        if (retry_avg_logprob or float("-inf")) >= (avg_logprob or float("-inf")):
+            segments = retry_segments
+            info = retry_info
+            avg_logprob_values = retry_logprob_values
+            avg_logprob = retry_avg_logprob
 
     words: List[dict] = []
     combined_text_parts: List[str] = []
@@ -391,10 +430,15 @@ async def transcribe(
         "duration": getattr(info, "duration", None),
         "language_probability": getattr(info, "language_probability", None),
         "translation": False,
+        "rms": rms,
+        "max_amplitude": max_amplitude,
     }
 
-    if avg_logprob_values:
-        response["avg_logprob"] = float(round(sum(avg_logprob_values) / len(avg_logprob_values), 4))
+    if avg_logprob is not None:
+        if avg_logprob >= LOW_CONFIDENCE_THRESHOLD or not _looks_like_meaningful_text(full_text):
+            response["avg_logprob"] = float(round(avg_logprob, 4))
+        else:
+            response["avg_logprob_raw"] = float(round(avg_logprob, 4))
 
     return JSONResponse(response)
 
