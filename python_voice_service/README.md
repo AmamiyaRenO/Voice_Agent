@@ -39,36 +39,36 @@ pip install -r requirements.txt
    export WHISPER_DEVICE=cpu          # or "cuda" if you have GPU support
    export WHISPER_COMPUTE_TYPE=int8   # tweak if you use CUDA (e.g. float16)
    # Optional decoding/audio guards against repeated phrases when using smaller models
-   export WHISPER_NO_REPEAT_NGRAM_SIZE=3
-   export WHISPER_REPETITION_PENALTY=1.05
+   export WHISPER_NO_REPEAT_NGRAM_SIZE=4
+   export WHISPER_REPETITION_PENALTY=1.15
    export WHISPER_LENGTH_PENALTY=1.0
-   export WHISPER_MAX_AUDIO_SECONDS=8.0
-   export WHISPER_VAD_SILENCE_MS=250
+   export WHISPER_MAX_AUDIO_SECONDS=3.5
+   export WHISPER_VAD_SILENCE_MS=180
    export WHISPER_VAD_MIN_SPEECH_MS=150
-   export WHISPER_RECENT_WINDOW_PAD_MS=200
+   export WHISPER_RECENT_WINDOW_PAD_MS=60
    export WHISPER_CONDITION_ON_PREVIOUS_TEXT=false
    ```
 
    On Windows PowerShell replace `export` with `$env:VAR = "value"`.
 
    The service trims each request down to the most recent window of speech by
-   running a lightweight voice-activity detector before invoking Whisper. This
-   keeps short commands from being swamped by long histories and makes it easier
-   for smaller checkpoints to avoid looping. You can tweak the trimming window
-   and VAD behaviour with the `WHISPER_MAX_AUDIO_SECONDS`,
+   running a lightweight voice-activity detector before invoking Whisper. The
+   tighter defaults (3.5 s window, 60 ms pad, 180 ms silence gate) cut most
+   trailing quiet frames so the decoder only sees the fresh command. You can
+   still relax these limits with the `WHISPER_MAX_AUDIO_SECONDS`,
    `WHISPER_VAD_SILENCE_MS`, `WHISPER_VAD_MIN_SPEECH_MS`, and
-   `WHISPER_RECENT_WINDOW_PAD_MS` variables shown above. Conditioning on earlier
-   decoder text is now disabled by default to stop Whisper from reinforcing its
-   own repeats; set `WHISPER_CONDITION_ON_PREVIOUS_TEXT=true` if you want the old
-   behaviour back.
+   `WHISPER_RECENT_WINDOW_PAD_MS` variables if a particular microphone keeps
+   chopping words. Conditioning on earlier decoder text remains disabled by
+   default to stop Whisper from reinforcing its own repeats; set
+   `WHISPER_CONDITION_ON_PREVIOUS_TEXT=true` if you want the old behaviour back.
 
-   When loops are detected in the recognised text the service still performs an
-   automatic retry with stronger repetition penalties. Keeping the baseline
-   values moderate preserves normal accuracy while letting the retry clamp
-   runaway phrases from smaller Whisper checkpoints. If the decoder still
-   insists on echoing the same short wake phrase after those retries, the
-   response is collapsed down to a single occurrence so Unity never receives a
-   long "hi rachael" chain.
+   When loops are detected in the recognised text the service performs a single
+   repetition-aware retry with stronger penalties. Keeping the baseline values
+   moderate preserves normal accuracy while letting that retry clamp runaway
+   phrases from smaller Whisper checkpoints. If the decoder still insists on
+   echoing the same short wake phrase after the retry, the response is collapsed
+   down to a single occurrence so Unity never receives a long "hi rachael"
+   chain.
 
 2. Start the API:
 

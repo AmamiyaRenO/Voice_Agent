@@ -218,23 +218,23 @@ def _environment_bool(key: str, default: bool) -> bool:
 
 
 WHISPER_NO_REPEAT_NGRAM_SIZE = _positive_or_zero(
-    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 3)
+    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 4)
 )
-WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.05))
+WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.15))
 WHISPER_LENGTH_PENALTY = _non_negative_float(
     _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
 )
 WHISPER_MAX_AUDIO_SECONDS = _non_negative_float(
-    _environment_float("WHISPER_MAX_AUDIO_SECONDS", 8.0)
+    _environment_float("WHISPER_MAX_AUDIO_SECONDS", 3.5)
 )
 WHISPER_VAD_SILENCE_MS = _positive_or_zero(
-    _environment_int("WHISPER_VAD_SILENCE_MS", 250)
+    _environment_int("WHISPER_VAD_SILENCE_MS", 180)
 )
 WHISPER_VAD_MIN_SPEECH_MS = _positive_or_zero(
     _environment_int("WHISPER_VAD_MIN_SPEECH_MS", 150)
 )
 WHISPER_RECENT_WINDOW_PAD_MS = _positive_or_zero(
-    _environment_int("WHISPER_RECENT_WINDOW_PAD_MS", 200)
+    _environment_int("WHISPER_RECENT_WINDOW_PAD_MS", 60)
 )
 WHISPER_CONDITION_ON_PREVIOUS_TEXT = _environment_bool(
     "WHISPER_CONDITION_ON_PREVIOUS_TEXT", False
@@ -250,9 +250,9 @@ def _non_negative_float(value: float) -> float:
 
 
 WHISPER_NO_REPEAT_NGRAM_SIZE = _positive_or_zero(
-    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 3)
+    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 4)
 )
-WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.05))
+WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.15))
 WHISPER_LENGTH_PENALTY = _non_negative_float(
     _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
 )
@@ -597,7 +597,7 @@ def _audio_energy_metrics(audio: np.ndarray) -> tuple[float, float]:
     return rms, max_amplitude
 
 
-LOW_CONFIDENCE_THRESHOLD = -0.6
+LOW_CONFIDENCE_THRESHOLD = -0.9
 
 
 def _extract_recent_speech_window(audio: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -758,7 +758,7 @@ def _run_transcription(
         "task": "transcribe",
         "word_timestamps": True,
         "vad_filter": True,
-        "vad_parameters": {"min_silence_duration_ms": 300, "speech_pad_ms": 200},
+        "vad_parameters": {"min_silence_duration_ms": 200, "speech_pad_ms": 120},
         "initial_prompt": _wake_word_prompt(),
         "temperature": temperature_schedule,
         "best_of": best_of,
@@ -792,7 +792,7 @@ def _should_retry_transcription(
     if avg_logprob is not None and avg_logprob < LOW_CONFIDENCE_THRESHOLD:
         return True
 
-    if language_probability is not None and language_probability < 0.45:
+    if language_probability is not None and language_probability < 0.35:
         return True
 
     return False
@@ -870,10 +870,7 @@ async def transcribe(
         "compression_ratio_threshold": 2.3,
     }
 
-    for _ in range(2):
-        if not _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
-            break
-
+    if _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
         repetition_segments, repetition_info = _run_transcription(
             model,
             audio,
@@ -883,15 +880,13 @@ async def transcribe(
             overrides=repetition_overrides,
         )
 
-        if not repetition_segments:
-            break
-
-        segments = repetition_segments
-        info = repetition_info
-        segment_texts = _collect_segment_texts(segments)
-        full_raw_text = " ".join(segment_texts).strip()
-        avg_logprob_values = _collect_avg_logprobs(segments)
-        avg_logprob = _mean(avg_logprob_values)
+        if repetition_segments:
+            segments = repetition_segments
+            info = repetition_info
+            segment_texts = _collect_segment_texts(segments)
+            full_raw_text = " ".join(segment_texts).strip()
+            avg_logprob_values = _collect_avg_logprobs(segments)
+            avg_logprob = _mean(avg_logprob_values)
 
     words: List[dict] = []
     combined_text_parts: List[str] = []
