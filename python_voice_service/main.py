@@ -43,6 +43,36 @@ DEFAULT_SYSTEM_PROMPT = (
     "- If the user asks something outside your knowledge, politely say you don’t know and redirect them back to the exercise context."
 )
 
+DEFAULT_HTTP_TIMEOUT = httpx.Timeout(30.0)
+
+
+class _AsyncHttpClient:
+    """Singleton-style manager for a shared httpx.AsyncClient instance.
+
+    Creating a new AsyncClient for every request is relatively expensive because
+    it has to establish a fresh connection pool and negotiate TLS each time.
+    For chat-style interactions where the client repeatedly talks to the same
+    Ollama and Piper services, that overhead can add a noticeable delay before
+    the model even starts generating tokens.  Reusing a single client keeps the
+    connection pool warm while still allowing FastAPI to handle requests
+    concurrently.
+    """
+
+    _client: Optional[httpx.AsyncClient] = None
+
+    @classmethod
+    def get(cls) -> httpx.AsyncClient:
+        if cls._client is None:
+            cls._client = httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT)
+        return cls._client
+
+    @classmethod
+    async def aclose(cls) -> None:
+        if cls._client is not None:
+            await cls._client.aclose()
+            cls._client = None
+
+
 app = FastAPI(title=APP_TITLE)
 
 
@@ -196,6 +226,23 @@ def _environment_int(key: str, default: int) -> int:
         return default
 
 
+def _positive_or_zero(value: int) -> int:
+    return value if value >= 0 else 0
+
+
+def _non_negative_float(value: float) -> float:
+    return value if value >= 0.0 else 0.0
+
+
+WHISPER_NO_REPEAT_NGRAM_SIZE = _positive_or_zero(
+    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 3)
+)
+WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.05))
+WHISPER_LENGTH_PENALTY = _non_negative_float(
+    _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
+)
+
+
 @lru_cache(maxsize=1)
 def _load_model() -> WhisperModel:
     model_path = _environment("WHISPER_MODEL_PATH", "large-v3")
@@ -280,8 +327,8 @@ async def _generate_coach_reply(user_text: str) -> str:
     url = f"{_ollama_base_url()}/api/generate"
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            response = await client.post(url, json=payload)
+        client = _AsyncHttpClient.get()
+        response = await client.post(url, json=payload)
     except httpx.HTTPError as exc:
         raise OllamaError(f"Failed to contact Ollama at {url}: {exc}") from exc
 
@@ -303,6 +350,13 @@ async def _generate_coach_reply(user_text: str) -> str:
 async def _startup_event() -> None:
     # Trigger model loading during startup so the first request does not pay the cost.
     _load_model()
+    # Warm the shared HTTP client so the first request can reuse an existing connection.
+    _AsyncHttpClient.get()
+
+
+@app.on_event("shutdown")
+async def _shutdown_event() -> None:
+    await _AsyncHttpClient.aclose()
 
 
 @app.get("/healthz")
@@ -427,17 +481,26 @@ def _run_transcription(
     temperature_schedule: tuple[float, ...],
 ):
     best_of = 1 if all(temp <= 0.0 for temp in temperature_schedule) else max(beam_size, 5)
+    transcription_kwargs = {
+        "beam_size": beam_size,
+        "language": language,
+        "task": "transcribe",
+        "word_timestamps": True,
+        "vad_filter": True,
+        "vad_parameters": {"min_silence_duration_ms": 300, "speech_pad_ms": 200},
+        "initial_prompt": _wake_word_prompt(),
+        "temperature": temperature_schedule,
+        "best_of": best_of,
+        "length_penalty": WHISPER_LENGTH_PENALTY,
+        "repetition_penalty": WHISPER_REPETITION_PENALTY,
+    }
+
+    if WHISPER_NO_REPEAT_NGRAM_SIZE > 0:
+        transcription_kwargs["no_repeat_ngram_size"] = WHISPER_NO_REPEAT_NGRAM_SIZE
+
     segments_generator, info = model.transcribe(
         audio,
-        beam_size=beam_size,
-        language=language,
-        task="transcribe",
-        word_timestamps=True,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
-        initial_prompt=_wake_word_prompt(),
-        temperature=temperature_schedule,
-        best_of=best_of,
+        **transcription_kwargs,
     )
     return list(segments_generator), info
 
@@ -606,8 +669,8 @@ class TtsRequest(BaseModel):
 async def tts(payload: TtsRequest) -> JSONResponse:
     url = f"{_piper_http_base_url()}/speak"
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.post(url, json={"text": payload.text})
+        client = _AsyncHttpClient.get()
+        resp = await client.post(url, json={"text": payload.text})
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
 
@@ -629,8 +692,8 @@ async def tts_get(text: str) -> Response:
 
     url = f"{_piper_http_base_url()}/speak"
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.get(url, params={"text": text})
+        client = _AsyncHttpClient.get()
+        resp = await client.get(url, params={"text": text})
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
 
