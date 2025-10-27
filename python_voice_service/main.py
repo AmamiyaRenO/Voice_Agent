@@ -96,7 +96,7 @@ WAKE_WORD_ALIASES = [
     s.strip().lower()
     for s in os.getenv(
         "WAKE_WORD_ALIASES",
-        "rachel, richel, richelle, rachal, raychel, ra chel, rach el",
+        "rachel, rachael, richel, richelle, rachal, raychel, ra chel, rach el",
     ).split(",")
     if s.strip()
 ]
