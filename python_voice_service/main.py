@@ -183,6 +183,61 @@ def _canonicalize_wake_words(text: str) -> str:
     return _WAKE_WORD_REGEX.sub(WAKE_WORD, text)
 
 
+def _limit_repeated_sequence_indices(
+    tokens: List[str],
+    *,
+    max_repetitions: int = 3,
+    max_sequence_length: int = 4,
+) -> List[int]:
+    """Return indices that keep short repeated phrases under control.
+
+    Some Whisper models, especially the smaller variants, occasionally produce
+    a very short phrase over and over ("hi rachael" repeated dozens of times).
+    Downstream Unity logic then interprets the transcription as an excessively
+    long command.  To keep that in check while preserving genuine repetitions,
+    we detect short repeated sequences and keep only the first few occurrences.
+    """
+
+    if not tokens:
+        return []
+
+    n = len(tokens)
+    normalized = [
+        token.strip().lower() if isinstance(token, str) else ""
+        for token in tokens
+    ]
+    keep: List[int] = []
+    i = 0
+
+    while i < n:
+        best_repeat = 1
+        best_length = 1
+
+        max_span = min(max_sequence_length, n - i)
+        for span in range(1, max_span + 1):
+            sequence = normalized[i : i + span]
+            repeats = 1
+            j = i + span
+
+            while j + span <= n and normalized[j : j + span] == sequence:
+                repeats += 1
+                j += span
+
+            if repeats > best_repeat or (repeats == best_repeat and span > best_length):
+                best_repeat = repeats
+                best_length = span
+
+        allowed_repeats = min(best_repeat, max_repetitions)
+        for repeat_index in range(allowed_repeats):
+            for offset in range(best_length):
+                keep.append(i + repeat_index * best_length + offset)
+
+        i += best_length * best_repeat
+
+    keep.sort()
+    return keep
+
+
 def _build_wake_word_pattern() -> re.Pattern[str]:
     terms = []
     for term in {WAKE_WORD, *WAKE_WORD_ALIASES}:
@@ -595,6 +650,16 @@ async def transcribe(
         canonical = _canonicalize_wake_words(original)
         if canonical != original:
             word["word"] = canonical
+
+    if words:
+        token_strings = [word.get("word", "") for word in words]
+        keep_indices = _limit_repeated_sequence_indices(token_strings)
+
+        if keep_indices and len(keep_indices) < len(words):
+            words = [words[index] for index in keep_indices]
+            deduped_tokens = [token_strings[index] for index in keep_indices if token_strings[index]]
+            if deduped_tokens:
+                full_text = _canonicalize_wake_words(" ".join(deduped_tokens).strip()) or full_text
 
     response = {
         "text": full_text,
