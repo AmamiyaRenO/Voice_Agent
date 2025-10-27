@@ -12,7 +12,7 @@ import math
 import os
 import re
 from functools import lru_cache
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import httpx
@@ -42,6 +42,36 @@ DEFAULT_SYSTEM_PROMPT = (
     "- Use a friendly, supportive tone, like a personal trainer or companion.\n"
     "- If the user asks something outside your knowledge, politely say you don’t know and redirect them back to the exercise context."
 )
+
+DEFAULT_HTTP_TIMEOUT = httpx.Timeout(30.0)
+
+
+class _AsyncHttpClient:
+    """Singleton-style manager for a shared httpx.AsyncClient instance.
+
+    Creating a new AsyncClient for every request is relatively expensive because
+    it has to establish a fresh connection pool and negotiate TLS each time.
+    For chat-style interactions where the client repeatedly talks to the same
+    Ollama and Piper services, that overhead can add a noticeable delay before
+    the model even starts generating tokens.  Reusing a single client keeps the
+    connection pool warm while still allowing FastAPI to handle requests
+    concurrently.
+    """
+
+    _client: Optional[httpx.AsyncClient] = None
+
+    @classmethod
+    def get(cls) -> httpx.AsyncClient:
+        if cls._client is None:
+            cls._client = httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT)
+        return cls._client
+
+    @classmethod
+    async def aclose(cls) -> None:
+        if cls._client is not None:
+            await cls._client.aclose()
+            cls._client = None
+
 
 app = FastAPI(title=APP_TITLE)
 
@@ -104,6 +134,9 @@ def _build_wake_word_pattern() -> re.Pattern[str]:
 _WAKE_WORD_REGEX = _build_wake_word_pattern()
 
 
+_REPETITION_TOKEN_PATTERN = re.compile(r"[\w']+")
+
+
 def _build_wake_word_prefix_pattern() -> Optional[re.Pattern[str]]:
     prefixes = [prefix for prefix in WAKE_WORD_PREFIXES if prefix]
     if not prefixes:
@@ -153,39 +186,6 @@ def _canonicalize_wake_words(text: str) -> str:
     return _WAKE_WORD_REGEX.sub(WAKE_WORD, text)
 
 
-def _build_wake_word_pattern() -> re.Pattern[str]:
-    terms = []
-    for term in {WAKE_WORD, *WAKE_WORD_ALIASES}:
-        stripped = term.strip()
-        if not stripped:
-            continue
-        pieces = [re.escape(piece) for piece in stripped.split() if piece]
-        if not pieces:
-            continue
-        if len(pieces) == 1:
-            pattern = pieces[0]
-        else:
-            # Allow variable whitespace between the pieces so variants like "ra chel"
-            # collapse to the canonical wake word as well.
-            pattern = r"\s*".join(pieces)
-        terms.append(pattern)
-
-    if not terms:
-        terms.append(re.escape(WAKE_WORD))
-
-    combined = "|".join(sorted(terms, key=len, reverse=True))
-    return re.compile(rf"(?<!\w)(?:{combined})(?!\w)", re.IGNORECASE)
-
-
-_WAKE_WORD_REGEX = _build_wake_word_pattern()
-
-
-def _canonicalize_wake_words(text: str) -> str:
-    if not text:
-        return text
-    return _WAKE_WORD_REGEX.sub(WAKE_WORD, text)
-
-
 def _environment_int(key: str, default: int) -> int:
     value = os.getenv(key)
     if value is None:
@@ -194,6 +194,51 @@ def _environment_int(key: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def _positive_or_zero(value: int) -> int:
+    return value if value >= 0 else 0
+
+
+def _non_negative_float(value: float) -> float:
+    return value if value >= 0.0 else 0.0
+
+
+def _environment_bool(key: str, default: bool) -> bool:
+    value = os.getenv(key)
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    return default
+
+
+WHISPER_NO_REPEAT_NGRAM_SIZE = _positive_or_zero(
+    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 3)
+)
+WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.05))
+WHISPER_LENGTH_PENALTY = _non_negative_float(
+    _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
+)
+WHISPER_MAX_AUDIO_SECONDS = _non_negative_float(
+    _environment_float("WHISPER_MAX_AUDIO_SECONDS", 8.0)
+)
+WHISPER_VAD_SILENCE_MS = _positive_or_zero(
+    _environment_int("WHISPER_VAD_SILENCE_MS", 250)
+)
+WHISPER_VAD_MIN_SPEECH_MS = _positive_or_zero(
+    _environment_int("WHISPER_VAD_MIN_SPEECH_MS", 150)
+)
+WHISPER_RECENT_WINDOW_PAD_MS = _positive_or_zero(
+    _environment_int("WHISPER_RECENT_WINDOW_PAD_MS", 200)
+)
+WHISPER_CONDITION_ON_PREVIOUS_TEXT = _environment_bool(
+    "WHISPER_CONDITION_ON_PREVIOUS_TEXT", False
+)
 
 
 @lru_cache(maxsize=1)
@@ -280,8 +325,8 @@ async def _generate_coach_reply(user_text: str) -> str:
     url = f"{_ollama_base_url()}/api/generate"
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            response = await client.post(url, json=payload)
+        client = _AsyncHttpClient.get()
+        response = await client.post(url, json=payload)
     except httpx.HTTPError as exc:
         raise OllamaError(f"Failed to contact Ollama at {url}: {exc}") from exc
 
@@ -303,6 +348,13 @@ async def _generate_coach_reply(user_text: str) -> str:
 async def _startup_event() -> None:
     # Trigger model loading during startup so the first request does not pay the cost.
     _load_model()
+    # Warm the shared HTTP client so the first request can reuse an existing connection.
+    _AsyncHttpClient.get()
+
+
+@app.on_event("shutdown")
+async def _shutdown_event() -> None:
+    await _AsyncHttpClient.aclose()
 
 
 @app.get("/healthz")
@@ -355,6 +407,18 @@ def _collect_avg_logprobs(segments: Iterable) -> List[float]:
     return values
 
 
+def _collect_segment_texts(segments: Iterable) -> List[str]:
+    texts: List[str] = []
+    for segment in segments:
+        text = getattr(segment, "text", "")
+        if not isinstance(text, str):
+            continue
+        stripped = text.strip()
+        if stripped:
+            texts.append(stripped)
+    return texts
+
+
 def _mean(values: List[float]) -> Optional[float]:
     if not values:
         return None
@@ -379,6 +443,95 @@ def _looks_like_meaningful_text(text: str) -> bool:
     return len(stripped.split()) >= 2
 
 
+def _tokenize_for_repetition(text: str) -> List[str]:
+    if not text:
+        return []
+    return [match.group(0) for match in _REPETITION_TOKEN_PATTERN.finditer(text.lower())]
+
+
+def _dominant_repetition_window(tokens: List[str]) -> Optional[int]:
+    if len(tokens) < 4:
+        return None
+
+    max_window = min(4, len(tokens) // 2)
+    for window in range(1, max_window + 1):
+        index = window
+        repeats = 0
+        while index + window <= len(tokens) and tokens[index : index + window] == tokens[index - window : index]:
+            repeats += 1
+            index += window
+
+        if repeats == 0:
+            continue
+
+        coverage = window * (repeats + 1)
+        trailing = len(tokens) - coverage
+        if coverage >= int(len(tokens) * 0.6) and trailing <= max(1, window // 2):
+            return window
+
+    return None
+
+
+def _has_consecutive_repetition(tokens: List[str], window: int) -> bool:
+    if window <= 0:
+        return False
+    limit = len(tokens) - (2 * window) + 1
+    for index in range(max(0, limit)):
+        first = tokens[index : index + window]
+        second = tokens[index + window : index + (2 * window)]
+        if first == second:
+            return True
+    return False
+
+
+def _should_retry_for_repetition(text: str, compression_ratio: Optional[float]) -> bool:
+    tokens = _tokenize_for_repetition(text)
+    if len(tokens) < 4:
+        return False
+
+    for window in (1, 2, 3):
+        if _has_consecutive_repetition(tokens, window):
+            return True
+
+    if compression_ratio is not None and compression_ratio >= 2.4 and len(tokens) >= 6:
+        return True
+
+    unique_count = len(set(tokens))
+    if unique_count <= len(tokens) // 3 and len(tokens) >= 6:
+        return True
+
+    return False
+
+
+def _collapse_repetitive_output(text: str, words: List[dict]) -> tuple[str, List[dict]]:
+    if not text:
+        return text, words
+
+    word_tokens: List[str] = []
+    for word in words:
+        raw_word = word.get("word")
+        if isinstance(raw_word, str) and raw_word.strip():
+            word_tokens.append(raw_word.strip().lower())
+
+    window = _dominant_repetition_window(word_tokens)
+    if window is not None and window > 0:
+        trimmed_words = words[:window]
+        collapsed_text = " ".join(
+            word["word"].strip() for word in trimmed_words if isinstance(word.get("word"), str)
+        ).strip()
+        if collapsed_text:
+            return collapsed_text, trimmed_words
+
+    tokens = _tokenize_for_repetition(text)
+    window = _dominant_repetition_window(tokens)
+    if window is None or window <= 0:
+        return text, words
+
+    collapsed_tokens = tokens[:window]
+    collapsed_text = " ".join(collapsed_tokens).strip()
+    return collapsed_text if collapsed_text else text, words
+
+
 def _audio_energy_metrics(audio: np.ndarray) -> tuple[float, float]:
     if audio.size == 0:
         return 0.0, 0.0
@@ -391,6 +544,123 @@ def _audio_energy_metrics(audio: np.ndarray) -> tuple[float, float]:
 
 
 LOW_CONFIDENCE_THRESHOLD = -0.6
+
+
+def _extract_recent_speech_window(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+
+    trimmed = audio
+
+    if WHISPER_MAX_AUDIO_SECONDS > 0.0:
+        max_samples = int(WHISPER_MAX_AUDIO_SECONDS * sample_rate)
+        if max_samples > 0 and audio.size > max_samples:
+            trimmed = audio[-max_samples:]
+    else:
+        max_samples = trimmed.size
+
+    if trimmed.size == 0:
+        return trimmed
+
+    frame_ms = 30
+    hop_ms = 15
+    frame_length = max(1, int(sample_rate * frame_ms / 1000))
+    hop_length = max(1, int(sample_rate * hop_ms / 1000))
+
+    if trimmed.size <= frame_length * 2:
+        return trimmed
+
+    starts = list(range(0, trimmed.size - frame_length + 1, hop_length))
+    if not starts:
+        return trimmed
+
+    energies = np.empty(len(starts), dtype=np.float32)
+    for index, start in enumerate(starts):
+        frame = trimmed[start : start + frame_length]
+        energies[index] = float(np.sqrt(np.mean(np.square(frame)))) if frame.size else 0.0
+
+    high_energy = float(np.percentile(energies, 90)) if energies.size else 0.0
+    if high_energy <= 0.0005:
+        return trimmed
+
+    threshold = max(0.0005, high_energy * 0.35)
+
+    speech_mask = energies >= threshold
+    if not speech_mask.any():
+        return trimmed
+
+    min_silence_frames = max(1, int(max(WHISPER_VAD_SILENCE_MS, hop_ms) / hop_ms))
+    min_speech_frames = max(1, int(max(WHISPER_VAD_MIN_SPEECH_MS, hop_ms) / hop_ms))
+
+    segments: List[Tuple[int, int]] = []
+    start_frame: Optional[int] = None
+    silence_run = 0
+
+    for idx, is_speech in enumerate(speech_mask):
+        if is_speech:
+            if start_frame is None:
+                start_frame = idx
+            silence_run = 0
+            continue
+
+        if start_frame is None:
+            continue
+
+        silence_run += 1
+        if silence_run < min_silence_frames:
+            continue
+
+        end_frame = idx - silence_run
+        if end_frame < start_frame:
+            start_frame = None
+            silence_run = 0
+            continue
+
+        frame_count = end_frame - start_frame + 1
+        if frame_count >= min_speech_frames:
+            start_sample = starts[start_frame]
+            end_sample = starts[end_frame] + frame_length
+            segments.append((start_sample, min(trimmed.size, end_sample)))
+
+        start_frame = None
+        silence_run = 0
+
+    if start_frame is not None:
+        end_frame = len(starts) - 1 - (silence_run if silence_run else 0)
+        end_frame = max(end_frame, start_frame)
+        frame_count = end_frame - start_frame + 1
+        if frame_count >= min_speech_frames:
+            start_sample = starts[start_frame]
+            end_sample = starts[end_frame] + frame_length
+            segments.append((start_sample, min(trimmed.size, end_sample)))
+
+    if not segments:
+        return trimmed
+
+    last_start, last_end = segments[-1]
+
+    if WHISPER_MAX_AUDIO_SECONDS > 0.0:
+        max_samples = int(WHISPER_MAX_AUDIO_SECONDS * sample_rate)
+        if max_samples > 0 and last_end - last_start > max_samples:
+            last_start = max(0, last_end - max_samples)
+
+    pad_samples = int((WHISPER_RECENT_WINDOW_PAD_MS / 1000.0) * sample_rate)
+    if pad_samples > 0:
+        last_start = max(0, last_start - pad_samples)
+        last_end = min(trimmed.size, last_end + pad_samples)
+
+    window_start = last_start
+    window_end = last_end
+
+    if WHISPER_MAX_AUDIO_SECONDS > 0.0:
+        max_samples = int(WHISPER_MAX_AUDIO_SECONDS * sample_rate)
+        if max_samples > 0 and window_end - window_start > max_samples:
+            window_start = max(0, window_end - max_samples)
+
+    if window_end - window_start < frame_length:
+        return trimmed
+
+    return trimmed[window_start:window_end]
 
 
 def _resample_audio(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
@@ -425,19 +695,34 @@ def _run_transcription(
     beam_size: int,
     language: Optional[str],
     temperature_schedule: tuple[float, ...],
+    overrides: Optional[Dict[str, object]] = None,
 ):
     best_of = 1 if all(temp <= 0.0 for temp in temperature_schedule) else max(beam_size, 5)
+    transcription_kwargs = {
+        "beam_size": beam_size,
+        "language": language,
+        "task": "transcribe",
+        "word_timestamps": True,
+        "vad_filter": True,
+        "vad_parameters": {"min_silence_duration_ms": 300, "speech_pad_ms": 200},
+        "initial_prompt": _wake_word_prompt(),
+        "temperature": temperature_schedule,
+        "best_of": best_of,
+        "length_penalty": WHISPER_LENGTH_PENALTY,
+        "repetition_penalty": WHISPER_REPETITION_PENALTY,
+        "condition_on_previous_text": WHISPER_CONDITION_ON_PREVIOUS_TEXT,
+    }
+
+    if WHISPER_NO_REPEAT_NGRAM_SIZE > 0:
+        transcription_kwargs["no_repeat_ngram_size"] = WHISPER_NO_REPEAT_NGRAM_SIZE
+
+    if overrides:
+        for key, value in overrides.items():
+            transcription_kwargs[key] = value
+
     segments_generator, info = model.transcribe(
         audio,
-        beam_size=beam_size,
-        language=language,
-        task="transcribe",
-        word_timestamps=True,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
-        initial_prompt=_wake_word_prompt(),
-        temperature=temperature_schedule,
-        best_of=best_of,
+        **transcription_kwargs,
     )
     return list(segments_generator), info
 
@@ -477,6 +762,8 @@ async def transcribe(
     audio = audio.astype(np.float32) / 32768.0
     if sample_rate != DEFAULT_SAMPLE_RATE:
         audio = _resample_audio(audio, sample_rate, DEFAULT_SAMPLE_RATE)
+
+    audio = _extract_recent_speech_window(audio, DEFAULT_SAMPLE_RATE)
 
     rms, max_amplitude = _audio_energy_metrics(audio)
 
@@ -518,6 +805,40 @@ async def transcribe(
             avg_logprob_values = retry_logprob_values
             avg_logprob = retry_avg_logprob
 
+    segment_texts = _collect_segment_texts(segments)
+    full_raw_text = " ".join(segment_texts).strip()
+
+    repetition_overrides = {
+        "no_repeat_ngram_size": max(2, WHISPER_NO_REPEAT_NGRAM_SIZE),
+        "repetition_penalty": max(WHISPER_REPETITION_PENALTY, 1.15),
+        "length_penalty": min(WHISPER_LENGTH_PENALTY, 0.85),
+        "condition_on_previous_text": False,
+        "compression_ratio_threshold": 2.3,
+    }
+
+    for _ in range(2):
+        if not _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
+            break
+
+        repetition_segments, repetition_info = _run_transcription(
+            model,
+            audio,
+            beam_size=max(primary_beam_size, 8),
+            language=normalized_language,
+            temperature_schedule=(0.0, 0.2, 0.4),
+            overrides=repetition_overrides,
+        )
+
+        if not repetition_segments:
+            break
+
+        segments = repetition_segments
+        info = repetition_info
+        segment_texts = _collect_segment_texts(segments)
+        full_raw_text = " ".join(segment_texts).strip()
+        avg_logprob_values = _collect_avg_logprobs(segments)
+        avg_logprob = _mean(avg_logprob_values)
+
     words: List[dict] = []
     combined_text_parts: List[str] = []
     raw_text_parts: List[str] = []
@@ -548,6 +869,12 @@ async def transcribe(
     full_text = " ".join(part for part in combined_text_parts if part).strip()
     if not full_text and words:
         full_text = " ".join(word["word"] for word in words).strip()
+
+    if _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
+        collapsed_text, collapsed_words = _collapse_repetitive_output(full_text or full_raw_text, words)
+        if collapsed_text and collapsed_text != full_text:
+            full_text = collapsed_text
+            words = collapsed_words
 
     full_text = _canonicalize_wake_words(full_text)
 
@@ -606,8 +933,8 @@ class TtsRequest(BaseModel):
 async def tts(payload: TtsRequest) -> JSONResponse:
     url = f"{_piper_http_base_url()}/speak"
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.post(url, json={"text": payload.text})
+        client = _AsyncHttpClient.get()
+        resp = await client.post(url, json={"text": payload.text})
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
 
@@ -629,8 +956,8 @@ async def tts_get(text: str) -> Response:
 
     url = f"{_piper_http_base_url()}/speak"
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.get(url, params={"text": text})
+        client = _AsyncHttpClient.get()
+        resp = await client.get(url, params={"text": text})
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
 
