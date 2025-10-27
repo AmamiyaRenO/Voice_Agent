@@ -20,6 +20,11 @@ from fastapi.responses import JSONResponse
 from faster_whisper import WhisperModel
 from pydantic import BaseModel, Field
 
+try:  # Optional dependency used to improve resampling quality when available.
+    from scipy.signal import resample_poly
+except Exception:  # pragma: no cover - SciPy is optional at runtime.
+    resample_poly = None
+
 APP_TITLE = "Coach Voice Agent - Python Voice Service"
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
@@ -190,16 +195,61 @@ async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _wake_word_prompt() -> str:
+    # Include aliases to help Whisper bias toward the expected wake word variants.
+    unique_terms = sorted({WAKE_WORD, *WAKE_WORD_ALIASES})
+    return " ".join(unique_terms + ["open", "play", "back", "quit", "close", "shut", "down"])
+
+
+def _normalize_language(language: Optional[str]) -> Optional[str]:
+    if language is None:
+        return None
+
+    normalized = language.strip()
+    if not normalized:
+        return None
+
+    if normalized.lower() in {"auto", "detect"}:
+        return None
+
+    return normalized
+
+
+def _collect_avg_logprobs(segments: Iterable) -> List[float]:
+    values: List[float] = []
+    for segment in segments:
+        if segment.avg_logprob is None:
+            continue
+        try:
+            values.append(float(segment.avg_logprob))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def _mean(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def _resample_audio(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
     if source_rate == target_rate or samples.size == 0:
         return samples
 
+    if resample_poly is not None:
+        # Use polyphase filtering with a Kaiser window to minimize aliasing and ringing artefacts.
+        gcd = math.gcd(source_rate, target_rate)
+        up = target_rate // gcd
+        down = source_rate // gcd
+        resampled = resample_poly(samples, up, down, window=("kaiser", 8.0))
+        return np.asarray(resampled, dtype=np.float32)
+
+    # Fallback to linear interpolation if SciPy is unavailable.
     duration_seconds = samples.shape[0] / float(source_rate)
     target_length = max(1, int(math.ceil(duration_seconds * target_rate)))
-
     source_indices = np.linspace(0, samples.shape[0] - 1, num=samples.shape[0], dtype=np.float64)
     target_indices = np.linspace(0, samples.shape[0] - 1, num=target_length, dtype=np.float64)
-
     resampled = np.interp(target_indices, source_indices, samples)
     return resampled.astype(np.float32, copy=False)
 
@@ -207,6 +257,49 @@ def _resample_audio(samples: np.ndarray, source_rate: int, target_rate: int) -> 
 def _build_vosk_result(words: Iterable[dict]) -> List[dict]:
     # Vosk uses "result" for word-level entries. Unity expects "word" and timing fields.
     return list(words)
+
+
+def _run_transcription(
+    model: WhisperModel,
+    audio: np.ndarray,
+    beam_size: int,
+    language: Optional[str],
+    temperature_schedule: tuple[float, ...],
+):
+    best_of = 1
+    if any(temp > 0.0 for temp in temperature_schedule):
+        best_of = max(beam_size, 5)
+
+    segments_generator, info = model.transcribe(
+        audio,
+        beam_size=beam_size,
+        language=language,
+        task="transcribe",
+        word_timestamps=True,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
+        initial_prompt=_wake_word_prompt(),
+        temperature=temperature_schedule,
+        best_of=best_of,
+    )
+    return list(segments_generator), info
+
+
+def _should_retry_transcription(
+    avg_logprob: Optional[float],
+    language_probability: Optional[float],
+    has_speech: bool,
+) -> bool:
+    if not has_speech:
+        return False
+
+    if avg_logprob is not None and avg_logprob < -1.0:
+        return True
+
+    if language_probability is not None and language_probability < 0.45:
+        return True
+
+    return False
 
 
 @app.post("/transcribe")
@@ -230,40 +323,43 @@ async def transcribe(
 
     model = _load_model()
 
+    normalized_language = _normalize_language(language)
     effective_beam_size = max(1, min(beam_size, 10))
+    primary_beam_size = max(5, effective_beam_size)
 
-    segments_generator, info = model.transcribe(
+    primary_temperatures = (0.0, 0.2)
+    segments, info = _run_transcription(
+        model,
         audio,
-        beam_size=max(5, min(10, effective_beam_size)),
-        language="en",
-        task="transcribe",
-        word_timestamps=True,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
-        initial_prompt=(WAKE_WORD + " open play back quit close shut down"),
-        temperature=(0.0,),
-        best_of=1,
+        beam_size=primary_beam_size,
+        language=normalized_language,
+        temperature_schedule=primary_temperatures,
     )
 
-    segments = list(segments_generator)
+    avg_logprob_values = _collect_avg_logprobs(segments)
+    avg_logprob = _mean(avg_logprob_values)
+
+    if _should_retry_transcription(avg_logprob, getattr(info, "language_probability", None), bool(segments)):
+        retry_beam_size = max(primary_beam_size, 8)
+        retry_temperatures = (0.0, 0.3, 0.6)
+        segments, info = _run_transcription(
+            model,
+            audio,
+            beam_size=retry_beam_size,
+            language=normalized_language,
+            temperature_schedule=retry_temperatures,
+        )
+        avg_logprob_values = _collect_avg_logprobs(segments)
 
     words: List[dict] = []
     combined_text_parts: List[str] = []
     raw_text_parts: List[str] = []
-
-    avg_logprob_values: List[float] = []
 
     for segment in segments:
         text = segment.text.strip()
         if text:
             combined_text_parts.append(text)
             raw_text_parts.append(text)
-
-        if segment.avg_logprob is not None:
-            try:
-                avg_logprob_values.append(float(segment.avg_logprob))
-            except (TypeError, ValueError):
-                pass
 
         for word in segment.words or []:
             word_text = word.word.strip()
@@ -291,9 +387,9 @@ async def transcribe(
     response = {
         "text": full_text,
         "result": _build_vosk_result(words),
-        "language": info.language,
-        "duration": info.duration,
-        "language_probability": info.language_probability,
+        "language": getattr(info, "language", normalized_language),
+        "duration": getattr(info, "duration", None),
+        "language_probability": getattr(info, "language_probability", None),
         "translation": False,
     }
 
