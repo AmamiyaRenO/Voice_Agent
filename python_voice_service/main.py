@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from functools import lru_cache
 from typing import Iterable, List, Optional
 
@@ -69,6 +70,87 @@ WAKE_WORD_ALIASES = [
     ).split(",")
     if s.strip()
 ]
+WAKE_WORD_PREFIXES = [
+    s.strip().lower()
+    for s in os.getenv("WAKE_WORD_PREFIXES", "hey, hi").split(",")
+    if s.strip()
+]
+
+
+def _build_wake_word_pattern() -> re.Pattern[str]:
+    terms = []
+    for term in {WAKE_WORD, *WAKE_WORD_ALIASES}:
+        stripped = term.strip()
+        if not stripped:
+            continue
+        pieces = [re.escape(piece) for piece in stripped.split() if piece]
+        if not pieces:
+            continue
+        if len(pieces) == 1:
+            pattern = pieces[0]
+        else:
+            # Allow variable whitespace between the pieces so variants like "ra chel"
+            # collapse to the canonical wake word as well.
+            pattern = r"\s*".join(pieces)
+        terms.append(pattern)
+
+    if not terms:
+        terms.append(re.escape(WAKE_WORD))
+
+    combined = "|".join(sorted(terms, key=len, reverse=True))
+    return re.compile(rf"(?<!\w)(?:{combined})(?!\w)", re.IGNORECASE)
+
+
+_WAKE_WORD_REGEX = _build_wake_word_pattern()
+
+
+def _build_wake_word_prefix_pattern() -> Optional[re.Pattern[str]]:
+    prefixes = [prefix for prefix in WAKE_WORD_PREFIXES if prefix]
+    if not prefixes:
+        return None
+
+    prefix_pattern = "|".join(sorted({re.escape(p) for p in prefixes}, key=len, reverse=True))
+
+    wake_terms: list[str] = []
+    for term in {WAKE_WORD, *WAKE_WORD_ALIASES}:
+        stripped = term.strip()
+        if not stripped:
+            continue
+        pieces = [re.escape(piece) for piece in stripped.split() if piece]
+        if not pieces:
+            continue
+        if len(pieces) == 1:
+            wake_terms.append(pieces[0])
+        else:
+            wake_terms.append(r"\s*".join(pieces))
+
+    if not wake_terms:
+        wake_terms.append(re.escape(WAKE_WORD))
+
+    wake_pattern = "|".join(sorted(set(wake_terms), key=len, reverse=True))
+    separator = r"(?:\s|[,;:!\-])+"
+    return re.compile(
+        rf"(?<!\w)(?P<prefix>{prefix_pattern})(?:{separator})(?P<wake>{wake_pattern})(?!\w)",
+        re.IGNORECASE,
+    )
+
+
+_WAKE_WORD_PREFIX_REGEX = _build_wake_word_prefix_pattern()
+
+
+def _canonicalize_wake_words(text: str) -> str:
+    if not text:
+        return text
+
+    if _WAKE_WORD_PREFIX_REGEX is not None:
+        def _replace_prefix(match: re.Match[str]) -> str:
+            prefix_text = match.group("prefix")
+            normalized_prefix = re.sub(r"\s+", " ", prefix_text).strip().lower()
+            return f"{normalized_prefix} {WAKE_WORD}"
+
+        text = _WAKE_WORD_PREFIX_REGEX.sub(_replace_prefix, text)
+
+    return _WAKE_WORD_REGEX.sub(WAKE_WORD, text)
 
 
 def _environment_int(key: str, default: int) -> int:
@@ -198,7 +280,20 @@ async def healthcheck() -> dict[str, str]:
 def _wake_word_prompt() -> str:
     # Include aliases to help Whisper bias toward the expected wake word variants.
     unique_terms = sorted({WAKE_WORD, *WAKE_WORD_ALIASES})
-    return " ".join(unique_terms + ["open", "play", "back", "quit", "close", "shut", "down"])
+    prompt_terms: list[str] = []
+    prompt_terms.extend(unique_terms)
+
+    for prefix in WAKE_WORD_PREFIXES:
+        if not prefix:
+            continue
+        for term in unique_terms:
+            prompt_terms.append(f"{prefix} {term}")
+
+    prompt_terms.extend(["open", "play", "back", "quit", "close", "shut", "down"])
+
+    # Deduplicate while preserving the first occurrence order so the prompt stays predictable.
+    ordered_terms = list(dict.fromkeys(prompt_terms))
+    return " ".join(ordered_terms)
 
 
 def _normalize_language(language: Optional[str]) -> Optional[str]:
@@ -414,14 +509,22 @@ async def transcribe(
                 }
             )
 
-    # Wake word biasing: if the entire utterance is a short single token close to "rachel",
-    # normalize it to the exact form to stabilize wake-word detection on Whisper side.
+    # Wake word biasing: normalise recognised variants to the configured wake word so Unity
+    # only needs to reason about a single spelling. This mirrors the alias configuration
+    # exposed by the Python service.
     full_text = " ".join(part for part in combined_text_parts if part).strip()
-    normalized = full_text.lower()
-    if normalized in ("rachel", "ra chel", "rachal", "richel", "richelle", "rach el"):
-        full_text = "rachel"
     if not full_text and words:
         full_text = " ".join(word["word"] for word in words).strip()
+
+    full_text = _canonicalize_wake_words(full_text)
+
+    for word in words:
+        original = word.get("word")
+        if not isinstance(original, str):
+            continue
+        canonical = _canonicalize_wake_words(original)
+        if canonical != original:
+            word["word"] = canonical
 
     response = {
         "text": full_text,
