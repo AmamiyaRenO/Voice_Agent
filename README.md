@@ -4,7 +4,7 @@
 - WHISPER_MODEL_PATH（默认 `large-v3`），可选 `medium.en`、`small.en` 等
 - WHISPER_COMPUTE_TYPE（默认 `int8_float16`，显存足够可用 `float16`）
 - WAKE_WORD（默认 `rachel`）
-- WAKE_WORD_ALIASES（默认 `rachel, richel, richelle, rachal, raychel, ra chel, rach el`，Python 服务会据此将识别结果统一规范化，Unity 端无需再重复配置同义词）
+- WAKE_WORD_ALIASES（默认 `rachel, rachael, richel, richelle, rachal, raychel, ra chel, rach el`，Python 服务会据此将识别结果统一规范化，Unity 端无需再重复配置同义词）
 - WAKE_WORD_PREFIXES（默认 `hey, hi`，用于提示识别器优先听出“Hey Rachel”之类的组合，同时在服务端统一规范化这些前缀）
 
 示例（Windows PowerShell）：
