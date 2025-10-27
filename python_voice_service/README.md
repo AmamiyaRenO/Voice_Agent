@@ -38,9 +38,19 @@ pip install -r requirements.txt
    export WHISPER_MODEL_PATH="/path/to/faster-whisper-large-v3"
    export WHISPER_DEVICE=cpu          # or "cuda" if you have GPU support
    export WHISPER_COMPUTE_TYPE=int8   # tweak if you use CUDA (e.g. float16)
+   # Optional decoding guards against repeated phrases when using smaller models
+   export WHISPER_NO_REPEAT_NGRAM_SIZE=3
+   export WHISPER_REPETITION_PENALTY=1.05
+   export WHISPER_LENGTH_PENALTY=1.0
    ```
 
    On Windows PowerShell replace `export` with `$env:VAR = "value"`.
+
+   When loops are detected in the recognised text the service now performs an
+   automatic retry with stronger repetition penalties (including forcing at
+   least a 2-gram ban and disabling conditioning on earlier text). Keeping the
+   baseline values moderate preserves normal accuracy while letting the retry
+   clamp runaway phrases from smaller Whisper checkpoints.
 
 2. Start the API:
 
