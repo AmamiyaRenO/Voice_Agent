@@ -153,6 +153,39 @@ def _canonicalize_wake_words(text: str) -> str:
     return _WAKE_WORD_REGEX.sub(WAKE_WORD, text)
 
 
+def _build_wake_word_pattern() -> re.Pattern[str]:
+    terms = []
+    for term in {WAKE_WORD, *WAKE_WORD_ALIASES}:
+        stripped = term.strip()
+        if not stripped:
+            continue
+        pieces = [re.escape(piece) for piece in stripped.split() if piece]
+        if not pieces:
+            continue
+        if len(pieces) == 1:
+            pattern = pieces[0]
+        else:
+            # Allow variable whitespace between the pieces so variants like "ra chel"
+            # collapse to the canonical wake word as well.
+            pattern = r"\s*".join(pieces)
+        terms.append(pattern)
+
+    if not terms:
+        terms.append(re.escape(WAKE_WORD))
+
+    combined = "|".join(sorted(terms, key=len, reverse=True))
+    return re.compile(rf"(?<!\w)(?:{combined})(?!\w)", re.IGNORECASE)
+
+
+_WAKE_WORD_REGEX = _build_wake_word_pattern()
+
+
+def _canonicalize_wake_words(text: str) -> str:
+    if not text:
+        return text
+    return _WAKE_WORD_REGEX.sub(WAKE_WORD, text)
+
+
 def _environment_int(key: str, default: int) -> int:
     value = os.getenv(key)
     if value is None:
