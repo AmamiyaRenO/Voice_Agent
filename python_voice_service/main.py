@@ -241,6 +241,23 @@ WHISPER_CONDITION_ON_PREVIOUS_TEXT = _environment_bool(
 )
 
 
+def _positive_or_zero(value: int) -> int:
+    return value if value >= 0 else 0
+
+
+def _non_negative_float(value: float) -> float:
+    return value if value >= 0.0 else 0.0
+
+
+WHISPER_NO_REPEAT_NGRAM_SIZE = _positive_or_zero(
+    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 3)
+)
+WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.05))
+WHISPER_LENGTH_PENALTY = _non_negative_float(
+    _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
+)
+
+
 @lru_cache(maxsize=1)
 def _load_model() -> WhisperModel:
     model_path = _environment("WHISPER_MODEL_PATH", "large-v3")
@@ -885,6 +902,16 @@ async def transcribe(
         canonical = _canonicalize_wake_words(original)
         if canonical != original:
             word["word"] = canonical
+
+    if words:
+        token_strings = [word.get("word", "") for word in words]
+        keep_indices = _limit_repeated_sequence_indices(token_strings)
+
+        if keep_indices and len(keep_indices) < len(words):
+            words = [words[index] for index in keep_indices]
+            deduped_tokens = [token_strings[index] for index in keep_indices if token_strings[index]]
+            if deduped_tokens:
+                full_text = _canonicalize_wake_words(" ".join(deduped_tokens).strip()) or full_text
 
     response = {
         "text": full_text,
