@@ -12,7 +12,7 @@ import math
 import os
 import re
 from functools import lru_cache
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 import httpx
@@ -132,6 +132,9 @@ def _build_wake_word_pattern() -> re.Pattern[str]:
 
 
 _WAKE_WORD_REGEX = _build_wake_word_pattern()
+
+
+_REPETITION_TOKEN_PATTERN = re.compile(r"[\w']+")
 
 
 def _build_wake_word_prefix_pattern() -> Optional[re.Pattern[str]]:
@@ -464,6 +467,18 @@ def _collect_avg_logprobs(segments: Iterable) -> List[float]:
     return values
 
 
+def _collect_segment_texts(segments: Iterable) -> List[str]:
+    texts: List[str] = []
+    for segment in segments:
+        text = getattr(segment, "text", "")
+        if not isinstance(text, str):
+            continue
+        stripped = text.strip()
+        if stripped:
+            texts.append(stripped)
+    return texts
+
+
 def _mean(values: List[float]) -> Optional[float]:
     if not values:
         return None
@@ -486,6 +501,43 @@ def _looks_like_meaningful_text(text: str) -> bool:
         return True
 
     return len(stripped.split()) >= 2
+
+
+def _tokenize_for_repetition(text: str) -> List[str]:
+    if not text:
+        return []
+    return [match.group(0) for match in _REPETITION_TOKEN_PATTERN.finditer(text.lower())]
+
+
+def _has_consecutive_repetition(tokens: List[str], window: int) -> bool:
+    if window <= 0:
+        return False
+    limit = len(tokens) - (2 * window) + 1
+    for index in range(max(0, limit)):
+        first = tokens[index : index + window]
+        second = tokens[index + window : index + (2 * window)]
+        if first == second:
+            return True
+    return False
+
+
+def _should_retry_for_repetition(text: str, compression_ratio: Optional[float]) -> bool:
+    tokens = _tokenize_for_repetition(text)
+    if len(tokens) < 4:
+        return False
+
+    for window in (1, 2, 3):
+        if _has_consecutive_repetition(tokens, window):
+            return True
+
+    if compression_ratio is not None and compression_ratio >= 2.4 and len(tokens) >= 6:
+        return True
+
+    unique_count = len(set(tokens))
+    if unique_count <= len(tokens) // 3 and len(tokens) >= 6:
+        return True
+
+    return False
 
 
 def _audio_energy_metrics(audio: np.ndarray) -> tuple[float, float]:
@@ -534,6 +586,7 @@ def _run_transcription(
     beam_size: int,
     language: Optional[str],
     temperature_schedule: tuple[float, ...],
+    overrides: Optional[Dict[str, object]] = None,
 ):
     best_of = 1 if all(temp <= 0.0 for temp in temperature_schedule) else max(beam_size, 5)
     transcription_kwargs = {
@@ -552,6 +605,10 @@ def _run_transcription(
 
     if WHISPER_NO_REPEAT_NGRAM_SIZE > 0:
         transcription_kwargs["no_repeat_ngram_size"] = WHISPER_NO_REPEAT_NGRAM_SIZE
+
+    if overrides:
+        for key, value in overrides.items():
+            transcription_kwargs[key] = value
 
     segments_generator, info = model.transcribe(
         audio,
@@ -635,6 +692,40 @@ async def transcribe(
             info = retry_info
             avg_logprob_values = retry_logprob_values
             avg_logprob = retry_avg_logprob
+
+    segment_texts = _collect_segment_texts(segments)
+    full_raw_text = " ".join(segment_texts).strip()
+
+    repetition_overrides = {
+        "no_repeat_ngram_size": max(2, WHISPER_NO_REPEAT_NGRAM_SIZE),
+        "repetition_penalty": max(WHISPER_REPETITION_PENALTY, 1.15),
+        "length_penalty": min(WHISPER_LENGTH_PENALTY, 0.85),
+        "condition_on_previous_text": False,
+        "compression_ratio_threshold": 2.3,
+    }
+
+    for _ in range(2):
+        if not _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
+            break
+
+        repetition_segments, repetition_info = _run_transcription(
+            model,
+            audio,
+            beam_size=max(primary_beam_size, 8),
+            language=normalized_language,
+            temperature_schedule=(0.0, 0.2, 0.4),
+            overrides=repetition_overrides,
+        )
+
+        if not repetition_segments:
+            break
+
+        segments = repetition_segments
+        info = repetition_info
+        segment_texts = _collect_segment_texts(segments)
+        full_raw_text = " ".join(segment_texts).strip()
+        avg_logprob_values = _collect_avg_logprobs(segments)
+        avg_logprob = _mean(avg_logprob_values)
 
     words: List[dict] = []
     combined_text_parts: List[str] = []

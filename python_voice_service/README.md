@@ -46,6 +46,12 @@ pip install -r requirements.txt
 
    On Windows PowerShell replace `export` with `$env:VAR = "value"`.
 
+   When loops are detected in the recognised text the service now performs an
+   automatic retry with stronger repetition penalties (including forcing at
+   least a 2-gram ban and disabling conditioning on earlier text). Keeping the
+   baseline values moderate preserves normal accuracy while letting the retry
+   clamp runaway phrases from smaller Whisper checkpoints.
+
 2. Start the API:
 
    ```bash
