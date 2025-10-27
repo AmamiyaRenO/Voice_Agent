@@ -43,6 +43,36 @@ DEFAULT_SYSTEM_PROMPT = (
     "- If the user asks something outside your knowledge, politely say you don’t know and redirect them back to the exercise context."
 )
 
+DEFAULT_HTTP_TIMEOUT = httpx.Timeout(30.0)
+
+
+class _AsyncHttpClient:
+    """Singleton-style manager for a shared httpx.AsyncClient instance.
+
+    Creating a new AsyncClient for every request is relatively expensive because
+    it has to establish a fresh connection pool and negotiate TLS each time.
+    For chat-style interactions where the client repeatedly talks to the same
+    Ollama and Piper services, that overhead can add a noticeable delay before
+    the model even starts generating tokens.  Reusing a single client keeps the
+    connection pool warm while still allowing FastAPI to handle requests
+    concurrently.
+    """
+
+    _client: Optional[httpx.AsyncClient] = None
+
+    @classmethod
+    def get(cls) -> httpx.AsyncClient:
+        if cls._client is None:
+            cls._client = httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT)
+        return cls._client
+
+    @classmethod
+    async def aclose(cls) -> None:
+        if cls._client is not None:
+            await cls._client.aclose()
+            cls._client = None
+
+
 app = FastAPI(title=APP_TITLE)
 
 
@@ -151,6 +181,61 @@ def _canonicalize_wake_words(text: str) -> str:
         text = _WAKE_WORD_PREFIX_REGEX.sub(_replace_prefix, text)
 
     return _WAKE_WORD_REGEX.sub(WAKE_WORD, text)
+
+
+def _limit_repeated_sequence_indices(
+    tokens: List[str],
+    *,
+    max_repetitions: int = 3,
+    max_sequence_length: int = 4,
+) -> List[int]:
+    """Return indices that keep short repeated phrases under control.
+
+    Some Whisper models, especially the smaller variants, occasionally produce
+    a very short phrase over and over ("hi rachael" repeated dozens of times).
+    Downstream Unity logic then interprets the transcription as an excessively
+    long command.  To keep that in check while preserving genuine repetitions,
+    we detect short repeated sequences and keep only the first few occurrences.
+    """
+
+    if not tokens:
+        return []
+
+    n = len(tokens)
+    normalized = [
+        token.strip().lower() if isinstance(token, str) else ""
+        for token in tokens
+    ]
+    keep: List[int] = []
+    i = 0
+
+    while i < n:
+        best_repeat = 1
+        best_length = 1
+
+        max_span = min(max_sequence_length, n - i)
+        for span in range(1, max_span + 1):
+            sequence = normalized[i : i + span]
+            repeats = 1
+            j = i + span
+
+            while j + span <= n and normalized[j : j + span] == sequence:
+                repeats += 1
+                j += span
+
+            if repeats > best_repeat or (repeats == best_repeat and span > best_length):
+                best_repeat = repeats
+                best_length = span
+
+        allowed_repeats = min(best_repeat, max_repetitions)
+        for repeat_index in range(allowed_repeats):
+            for offset in range(best_length):
+                keep.append(i + repeat_index * best_length + offset)
+
+        i += best_length * best_repeat
+
+    keep.sort()
+    return keep
 
 
 def _build_wake_word_pattern() -> re.Pattern[str]:
@@ -280,8 +365,8 @@ async def _generate_coach_reply(user_text: str) -> str:
     url = f"{_ollama_base_url()}/api/generate"
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            response = await client.post(url, json=payload)
+        client = _AsyncHttpClient.get()
+        response = await client.post(url, json=payload)
     except httpx.HTTPError as exc:
         raise OllamaError(f"Failed to contact Ollama at {url}: {exc}") from exc
 
@@ -303,6 +388,13 @@ async def _generate_coach_reply(user_text: str) -> str:
 async def _startup_event() -> None:
     # Trigger model loading during startup so the first request does not pay the cost.
     _load_model()
+    # Warm the shared HTTP client so the first request can reuse an existing connection.
+    _AsyncHttpClient.get()
+
+
+@app.on_event("shutdown")
+async def _shutdown_event() -> None:
+    await _AsyncHttpClient.aclose()
 
 
 @app.get("/healthz")
@@ -559,6 +651,16 @@ async def transcribe(
         if canonical != original:
             word["word"] = canonical
 
+    if words:
+        token_strings = [word.get("word", "") for word in words]
+        keep_indices = _limit_repeated_sequence_indices(token_strings)
+
+        if keep_indices and len(keep_indices) < len(words):
+            words = [words[index] for index in keep_indices]
+            deduped_tokens = [token_strings[index] for index in keep_indices if token_strings[index]]
+            if deduped_tokens:
+                full_text = _canonicalize_wake_words(" ".join(deduped_tokens).strip()) or full_text
+
     response = {
         "text": full_text,
         "result": _build_vosk_result(words),
@@ -606,8 +708,8 @@ class TtsRequest(BaseModel):
 async def tts(payload: TtsRequest) -> JSONResponse:
     url = f"{_piper_http_base_url()}/speak"
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.post(url, json={"text": payload.text})
+        client = _AsyncHttpClient.get()
+        resp = await client.post(url, json={"text": payload.text})
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
 
@@ -629,8 +731,8 @@ async def tts_get(text: str) -> Response:
 
     url = f"{_piper_http_base_url()}/speak"
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.get(url, params={"text": text})
+        client = _AsyncHttpClient.get()
+        resp = await client.get(url, params={"text": text})
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
 
