@@ -4,7 +4,7 @@
 - WHISPER_MODEL_PATH（默认 `large-v3`），可选 `medium.en`、`small.en` 等
 - WHISPER_COMPUTE_TYPE（默认 `int8_float16`，显存足够可用 `float16`）
 - WAKE_WORD（默认 `rachel`）
-- WAKE_WORD_ALIASES（默认 `rachel, richel, richelle, rachal, raychel, ra chel, rach el`）
+- WAKE_WORD_ALIASES（默认 `rachel, richel, richelle, rachal, raychel, ra chel, rach el`，Python 服务会据此将识别结果统一规范化，Unity 端无需再重复配置同义词）
 
 示例（Windows PowerShell）：
 

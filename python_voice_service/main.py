@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from functools import lru_cache
 from typing import Iterable, List, Optional
 
@@ -69,6 +70,39 @@ WAKE_WORD_ALIASES = [
     ).split(",")
     if s.strip()
 ]
+
+
+def _build_wake_word_pattern() -> re.Pattern[str]:
+    terms = []
+    for term in {WAKE_WORD, *WAKE_WORD_ALIASES}:
+        stripped = term.strip()
+        if not stripped:
+            continue
+        pieces = [re.escape(piece) for piece in stripped.split() if piece]
+        if not pieces:
+            continue
+        if len(pieces) == 1:
+            pattern = pieces[0]
+        else:
+            # Allow variable whitespace between the pieces so variants like "ra chel"
+            # collapse to the canonical wake word as well.
+            pattern = r"\s*".join(pieces)
+        terms.append(pattern)
+
+    if not terms:
+        terms.append(re.escape(WAKE_WORD))
+
+    combined = "|".join(sorted(terms, key=len, reverse=True))
+    return re.compile(rf"(?<!\w)(?:{combined})(?!\w)", re.IGNORECASE)
+
+
+_WAKE_WORD_REGEX = _build_wake_word_pattern()
+
+
+def _canonicalize_wake_words(text: str) -> str:
+    if not text:
+        return text
+    return _WAKE_WORD_REGEX.sub(WAKE_WORD, text)
 
 
 def _environment_int(key: str, default: int) -> int:
@@ -414,14 +448,22 @@ async def transcribe(
                 }
             )
 
-    # Wake word biasing: if the entire utterance is a short single token close to "rachel",
-    # normalize it to the exact form to stabilize wake-word detection on Whisper side.
+    # Wake word biasing: normalise recognised variants to the configured wake word so Unity
+    # only needs to reason about a single spelling. This mirrors the alias configuration
+    # exposed by the Python service.
     full_text = " ".join(part for part in combined_text_parts if part).strip()
-    normalized = full_text.lower()
-    if normalized in ("rachel", "ra chel", "rachal", "richel", "richelle", "rach el"):
-        full_text = "rachel"
     if not full_text and words:
         full_text = " ".join(word["word"] for word in words).strip()
+
+    full_text = _canonicalize_wake_words(full_text)
+
+    for word in words:
+        original = word.get("word")
+        if not isinstance(original, str):
+            continue
+        canonical = _canonicalize_wake_words(original)
+        if canonical != original:
+            word["word"] = canonical
 
     response = {
         "text": full_text,

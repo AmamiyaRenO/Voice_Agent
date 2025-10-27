@@ -20,8 +20,6 @@ namespace RobotVoice
         [Header("Configuration")]
         [SerializeField] private TextAsset intentConfigJson;
         [SerializeField] private string wakeWord = "hi rachel";
-        [SerializeField, Tooltip("Additional variants accepted as wake word prefixes (case-insensitive)")]
-        private string[] wakeWordVariants = new[] { "hi rachel", "hey rachel", "hi richel", "hey richel" };
         [SerializeField] private bool requireWakeWord = true;
         [SerializeField] private bool requireLaunchKeyword = false;
         [SerializeField] private string[] launchKeywords = { "open", "play" };
@@ -542,18 +540,6 @@ namespace RobotVoice
                 return true;
             }
 
-            if (wakeWordVariants != null)
-            {
-                for (int i = 0; i < wakeWordVariants.Length; i++)
-                {
-                    var v = wakeWordVariants[i];
-                    if (!string.IsNullOrWhiteSpace(v) && recognised.StartsWith(v.Trim(), StringComparison.OrdinalIgnoreCase))
-                    {
-                        return true;
-                    }
-                }
-            }
-
             return false;
         }
 
@@ -567,18 +553,6 @@ namespace RobotVoice
             if (!string.IsNullOrEmpty(configured) && recognised.IndexOf(configured, StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 return true;
-            }
-
-            if (wakeWordVariants != null)
-            {
-                for (int i = 0; i < wakeWordVariants.Length; i++)
-                {
-                    var v = wakeWordVariants[i];
-                    if (!string.IsNullOrWhiteSpace(v) && recognised.IndexOf(v.Trim(), StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        return true;
-                    }
-                }
             }
 
             return false;
