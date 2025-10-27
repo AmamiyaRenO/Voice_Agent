@@ -549,6 +549,43 @@ def _collapse_repetitive_output(text: str, words: List[dict]) -> tuple[str, List
     return collapsed_text if collapsed_text else text, words
 
 
+def _limit_repeated_sequence_indices(tokens: List[str]) -> List[int]:
+    """Return indices that keep only the first occurrence of repeated sequences.
+
+    Whisper can occasionally emit the same 1–4 token sequence multiple times in
+    a row.  When that happens we keep the first instance of the repeated block
+    and discard the subsequent duplicates so the Unity client does not surface
+    "echoed" words to the player.
+    """
+
+    total = len(tokens)
+    if total == 0:
+        return []
+
+    keep_mask = [True] * total
+    max_window = min(4, total // 2) or 1
+
+    for window in range(1, max_window + 1):
+        index = 0
+        while index + (2 * window) <= total:
+            first = tokens[index : index + window]
+            second = tokens[index + window : index + (2 * window)]
+            if first != second:
+                index += 1
+                continue
+
+            # Mark all subsequent consecutive repetitions of the same window
+            # for removal, keeping only the first occurrence.
+            repeat_index = index + window
+            while repeat_index + window <= total and tokens[repeat_index : repeat_index + window] == first:
+                for drop in range(repeat_index, repeat_index + window):
+                    keep_mask[drop] = False
+                repeat_index += window
+            index = repeat_index
+
+    return [idx for idx, keep in enumerate(keep_mask) if keep]
+
+
 def _audio_energy_metrics(audio: np.ndarray) -> tuple[float, float]:
     if audio.size == 0:
         return 0.0, 0.0
