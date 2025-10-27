@@ -1936,11 +1936,6 @@ MonoBehaviour:
   piHub: {fileID: 0}
   intentConfigJson: {fileID: 4900000, guid: f886a37adc9721949b230d5dec74c8fc, type: 3}
   wakeWord: rachel
-  wakeWordVariants:
-  - rachel
-  - richelle
-  - richel
-  - rachal
   requireWakeWord: 0
   requireLaunchKeyword: 0
   launchKeywords:
