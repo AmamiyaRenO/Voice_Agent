@@ -217,44 +217,61 @@ def _environment_bool(key: str, default: bool) -> bool:
     return default
 
 
+def _environment_temperature_schedule(key: str, default: tuple[float, ...]) -> tuple[float, ...]:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+
+    temperatures: list[float] = []
+    for part in raw.split(","):
+        stripped = part.strip()
+        if not stripped:
+            continue
+        try:
+            temperatures.append(float(stripped))
+        except ValueError:
+            continue
+
+    return tuple(temperatures) if temperatures else default
+
+
 WHISPER_NO_REPEAT_NGRAM_SIZE = _positive_or_zero(
-    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 3)
+    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 4)
 )
-WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.05))
+WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.15))
 WHISPER_LENGTH_PENALTY = _non_negative_float(
     _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
 )
 WHISPER_MAX_AUDIO_SECONDS = _non_negative_float(
-    _environment_float("WHISPER_MAX_AUDIO_SECONDS", 8.0)
+    _environment_float("WHISPER_MAX_AUDIO_SECONDS", 3.5)
 )
 WHISPER_VAD_SILENCE_MS = _positive_or_zero(
-    _environment_int("WHISPER_VAD_SILENCE_MS", 250)
+    _environment_int("WHISPER_VAD_SILENCE_MS", 180)
 )
 WHISPER_VAD_MIN_SPEECH_MS = _positive_or_zero(
     _environment_int("WHISPER_VAD_MIN_SPEECH_MS", 150)
 )
 WHISPER_RECENT_WINDOW_PAD_MS = _positive_or_zero(
-    _environment_int("WHISPER_RECENT_WINDOW_PAD_MS", 200)
+    _environment_int("WHISPER_RECENT_WINDOW_PAD_MS", 60)
 )
 WHISPER_CONDITION_ON_PREVIOUS_TEXT = _environment_bool(
     "WHISPER_CONDITION_ON_PREVIOUS_TEXT", False
 )
-
-
-def _positive_or_zero(value: int) -> int:
-    return value if value >= 0 else 0
-
-
-def _non_negative_float(value: float) -> float:
-    return value if value >= 0.0 else 0.0
-
-
-WHISPER_NO_REPEAT_NGRAM_SIZE = _positive_or_zero(
-    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 3)
+WHISPER_WAKE_FAST_MAX_SECONDS = _non_negative_float(
+    _environment_float("WHISPER_WAKE_FAST_MAX_SECONDS", 1.8)
 )
-WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.05))
-WHISPER_LENGTH_PENALTY = _non_negative_float(
-    _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
+WHISPER_WAKE_FAST_BEAM_SIZE = max(1, _environment_int("WHISPER_WAKE_FAST_BEAM_SIZE", 1))
+WHISPER_WAKE_FAST_TEMPERATURES = _environment_temperature_schedule(
+    "WHISPER_WAKE_FAST_TEMPERATURES", (0.0,)
+)
+WHISPER_WAKE_FAST_VAD_SILENCE_MS = _positive_or_zero(
+    _environment_int("WHISPER_WAKE_FAST_VAD_SILENCE_MS", 120)
+)
+WHISPER_WAKE_FAST_VAD_PAD_MS = _positive_or_zero(
+    _environment_int("WHISPER_WAKE_FAST_VAD_PAD_MS", 80)
+)
+WHISPER_WAKE_FAST_DISABLE_RETRY = _environment_bool(
+    "WHISPER_WAKE_FAST_DISABLE_RETRY", True
 )
 
 
@@ -412,6 +429,17 @@ def _normalize_language(language: Optional[str]) -> Optional[str]:
     return normalized
 
 
+def _looks_like_english(language: Optional[str]) -> bool:
+    if language is None:
+        return True
+
+    lowered = language.strip().lower()
+    if not lowered:
+        return True
+
+    return lowered.startswith("en")
+
+
 def _collect_avg_logprobs(segments: Iterable) -> List[float]:
     values: List[float] = []
     for segment in segments:
@@ -510,11 +538,11 @@ def _should_retry_for_repetition(text: str, compression_ratio: Optional[float]) 
         if _has_consecutive_repetition(tokens, window):
             return True
 
-    if compression_ratio is not None and compression_ratio >= 2.4 and len(tokens) >= 6:
+    if compression_ratio is not None and compression_ratio >= 2.8 and len(tokens) >= 6:
         return True
 
     unique_count = len(set(tokens))
-    if unique_count <= len(tokens) // 3 and len(tokens) >= 6:
+    if unique_count <= len(tokens) // 4 and len(tokens) >= 8:
         return True
 
     return False
@@ -597,7 +625,9 @@ def _audio_energy_metrics(audio: np.ndarray) -> tuple[float, float]:
     return rms, max_amplitude
 
 
-LOW_CONFIDENCE_THRESHOLD = -0.6
+LOW_CONFIDENCE_THRESHOLD = -1.2
+LANGUAGE_PROBABILITY_RETRY_THRESHOLD = 0.15
+LANGUAGE_RETRY_LOGPROB_BUFFER = 0.2
 
 
 def _extract_recent_speech_window(audio: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -758,7 +788,7 @@ def _run_transcription(
         "task": "transcribe",
         "word_timestamps": True,
         "vad_filter": True,
-        "vad_parameters": {"min_silence_duration_ms": 300, "speech_pad_ms": 200},
+        "vad_parameters": {"min_silence_duration_ms": 200, "speech_pad_ms": 120},
         "initial_prompt": _wake_word_prompt(),
         "temperature": temperature_schedule,
         "best_of": best_of,
@@ -792,8 +822,12 @@ def _should_retry_transcription(
     if avg_logprob is not None and avg_logprob < LOW_CONFIDENCE_THRESHOLD:
         return True
 
-    if language_probability is not None and language_probability < 0.45:
-        return True
+    if language_probability is not None and language_probability < LANGUAGE_PROBABILITY_RETRY_THRESHOLD:
+        if avg_logprob is None:
+            return True
+
+        if avg_logprob < LOW_CONFIDENCE_THRESHOLD + LANGUAGE_RETRY_LOGPROB_BUFFER:
+            return True
 
     return False
 
@@ -818,6 +852,7 @@ async def transcribe(
         audio = _resample_audio(audio, sample_rate, DEFAULT_SAMPLE_RATE)
 
     audio = _extract_recent_speech_window(audio, DEFAULT_SAMPLE_RATE)
+    audio_duration_seconds = audio.shape[0] / float(DEFAULT_SAMPLE_RATE) if audio.size else 0.0
 
     rms, max_amplitude = _audio_energy_metrics(audio)
 
@@ -825,23 +860,91 @@ async def transcribe(
 
     normalized_language = _normalize_language(language)
     effective_beam_size = max(1, min(beam_size, 10))
-    primary_beam_size = max(5, effective_beam_size)
+    primary_beam_size = max(1, min(effective_beam_size, 3))
 
-    primary_temperatures: tuple[float, ...] = (0.0,)
-    segments, info = _run_transcription(
-        model,
-        audio,
-        beam_size=primary_beam_size,
-        language=normalized_language,
-        temperature_schedule=primary_temperatures,
+    def _execute_pass(
+        pass_beam_size: int,
+        pass_temperatures: tuple[float, ...],
+        overrides: Optional[Dict[str, object]] = None,
+    ) -> Tuple[List, object, List[float], Optional[float], Optional[float]]:
+        run_segments, run_info = _run_transcription(
+            model,
+            audio,
+            beam_size=pass_beam_size,
+            language=normalized_language,
+            temperature_schedule=pass_temperatures,
+            overrides=overrides,
+        )
+        logprob_values = _collect_avg_logprobs(run_segments)
+        avg_logprob_value = _mean(logprob_values)
+        language_prob = getattr(run_info, "language_probability", None)
+        return run_segments, run_info, logprob_values, avg_logprob_value, language_prob
+
+    use_fast_wake_path = (
+        WHISPER_WAKE_FAST_MAX_SECONDS > 0.0
+        and audio_duration_seconds <= WHISPER_WAKE_FAST_MAX_SECONDS
+        and _looks_like_english(normalized_language)
     )
 
-    avg_logprob_values = _collect_avg_logprobs(segments)
-    avg_logprob = _mean(avg_logprob_values)
+    primary_temperatures: tuple[float, ...] = (0.0,)
+    segments: List = []
+    info = None
+    avg_logprob_values: List[float] = []
+    avg_logprob: Optional[float] = None
+    language_probability: Optional[float] = None
+    allow_additional_retry = True
 
-    if _should_retry_transcription(avg_logprob, getattr(info, "language_probability", None), bool(segments)):
-        retry_beam_size = max(primary_beam_size, 8)
-        retry_temperatures = (0.0, 0.3, 0.6)
+    if use_fast_wake_path:
+        fast_beam_size = max(1, min(effective_beam_size, WHISPER_WAKE_FAST_BEAM_SIZE))
+        fast_temperatures = WHISPER_WAKE_FAST_TEMPERATURES or (0.0,)
+        fast_overrides: Dict[str, object] = {
+            "vad_parameters": {
+                "min_silence_duration_ms": WHISPER_WAKE_FAST_VAD_SILENCE_MS,
+                "speech_pad_ms": WHISPER_WAKE_FAST_VAD_PAD_MS,
+            }
+        }
+        (
+            segments,
+            info,
+            avg_logprob_values,
+            avg_logprob,
+            language_probability,
+        ) = _execute_pass(fast_beam_size, fast_temperatures, overrides=fast_overrides)
+
+        allow_additional_retry = not WHISPER_WAKE_FAST_DISABLE_RETRY
+        need_standard_pass = False
+
+        if not segments:
+            need_standard_pass = True
+        elif allow_additional_retry and _should_retry_transcription(
+            avg_logprob, language_probability, bool(segments)
+        ):
+            need_standard_pass = True
+
+        if need_standard_pass:
+            allow_additional_retry = True
+            (
+                segments,
+                info,
+                avg_logprob_values,
+                avg_logprob,
+                language_probability,
+            ) = _execute_pass(primary_beam_size, primary_temperatures)
+
+    else:
+        (
+            segments,
+            info,
+            avg_logprob_values,
+            avg_logprob,
+            language_probability,
+        ) = _execute_pass(primary_beam_size, primary_temperatures)
+
+    if allow_additional_retry and _should_retry_transcription(
+        avg_logprob, language_probability, bool(segments)
+    ):
+        retry_beam_size = min(max(primary_beam_size + 1, 2), max(2, min(effective_beam_size, 4)))
+        retry_temperatures = (0.0, 0.2)
         retry_segments, retry_info = _run_transcription(
             model,
             audio,
@@ -862,37 +965,8 @@ async def transcribe(
     segment_texts = _collect_segment_texts(segments)
     full_raw_text = " ".join(segment_texts).strip()
 
-    repetition_overrides = {
-        "no_repeat_ngram_size": max(2, WHISPER_NO_REPEAT_NGRAM_SIZE),
-        "repetition_penalty": max(WHISPER_REPETITION_PENALTY, 1.15),
-        "length_penalty": min(WHISPER_LENGTH_PENALTY, 0.85),
-        "condition_on_previous_text": False,
-        "compression_ratio_threshold": 2.3,
-    }
-
-    for _ in range(2):
-        if not _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
-            break
-
-        repetition_segments, repetition_info = _run_transcription(
-            model,
-            audio,
-            beam_size=max(primary_beam_size, 8),
-            language=normalized_language,
-            temperature_schedule=(0.0, 0.2, 0.4),
-            overrides=repetition_overrides,
-        )
-
-        if not repetition_segments:
-            break
-
-        segments = repetition_segments
-        info = repetition_info
-        segment_texts = _collect_segment_texts(segments)
-        full_raw_text = " ".join(segment_texts).strip()
-        avg_logprob_values = _collect_avg_logprobs(segments)
-        avg_logprob = _mean(avg_logprob_values)
-
+    compression_ratio = getattr(info, "compression_ratio", None)
+    should_retry_repetition = _should_retry_for_repetition(full_raw_text, compression_ratio)
     words: List[dict] = []
     combined_text_parts: List[str] = []
     raw_text_parts: List[str] = []
@@ -924,7 +998,7 @@ async def transcribe(
     if not full_text and words:
         full_text = " ".join(word["word"] for word in words).strip()
 
-    if _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
+    if should_retry_repetition:
         collapsed_text, collapsed_words = _collapse_repetitive_output(full_text or full_raw_text, words)
         if collapsed_text and collapsed_text != full_text:
             full_text = collapsed_text
