@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import asyncio
 from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -224,6 +225,7 @@ WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PEN
 WHISPER_LENGTH_PENALTY = _non_negative_float(
     _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
 )
+WHISPER_CPU_THREADS = max(1, _environment_int("WHISPER_CPU_THREADS", os.cpu_count() or 4))
 WHISPER_MAX_AUDIO_SECONDS = _non_negative_float(
     _environment_float("WHISPER_MAX_AUDIO_SECONDS", 5.0)
 )
@@ -270,9 +272,18 @@ def _load_model() -> WhisperModel:
 
     # Explicit CPU request
     if device_pref == "cpu":
-        model = WhisperModel(model_path, device="cpu", compute_type=_cpu_compute(compute_type))
+        model = WhisperModel(
+            model_path,
+            device="cpu",
+            compute_type=_cpu_compute(compute_type),
+            cpu_threads=WHISPER_CPU_THREADS,
+        )
         try:
-            print(f"[VoiceService] Loaded Faster-Whisper model={model_path} device=cpu compute_type={_cpu_compute(compute_type)}")
+            print(
+                "[VoiceService] Loaded Faster-Whisper "
+                f"model={model_path} device=cpu compute_type={_cpu_compute(compute_type)} "
+                f"cpu_threads={WHISPER_CPU_THREADS}"
+            )
         except Exception:
             pass
         return model
@@ -286,9 +297,18 @@ def _load_model() -> WhisperModel:
             pass
         return model
     except Exception as exc:
-        model = WhisperModel(model_path, device="cpu", compute_type=_cpu_compute(compute_type))
+        model = WhisperModel(
+            model_path,
+            device="cpu",
+            compute_type=_cpu_compute(compute_type),
+            cpu_threads=WHISPER_CPU_THREADS,
+        )
         try:
-            print(f"[VoiceService] Loaded Faster-Whisper model={model_path} device=cpu compute_type={_cpu_compute(compute_type)} (fallback from CUDA: {exc})")
+            print(
+                "[VoiceService] Loaded Faster-Whisper "
+                f"model={model_path} device=cpu compute_type={_cpu_compute(compute_type)} "
+                f"cpu_threads={WHISPER_CPU_THREADS} (fallback from CUDA: {exc})"
+            )
         except Exception:
             pass
         return model
@@ -811,12 +831,13 @@ async def transcribe(
     primary_beam_size = effective_beam_size
 
     primary_temperatures: tuple[float, ...] = (0.0,)
-    segments, info = _run_transcription(
+    segments, info = await asyncio.to_thread(
+        _run_transcription,
         model,
         audio,
-        beam_size=primary_beam_size,
-        language=normalized_language,
-        temperature_schedule=primary_temperatures,
+        primary_beam_size,
+        normalized_language,
+        primary_temperatures,
     )
 
     avg_logprob_values = _collect_avg_logprobs(segments)
