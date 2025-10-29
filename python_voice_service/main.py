@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import asyncio
 from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -224,6 +225,9 @@ WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PEN
 WHISPER_LENGTH_PENALTY = _non_negative_float(
     _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
 )
+WHISPER_CPU_THREADS = _positive_or_zero(
+    _environment_int("WHISPER_CPU_THREADS", os.cpu_count() or 4)
+)
 WHISPER_MAX_AUDIO_SECONDS = _non_negative_float(
     _environment_float("WHISPER_MAX_AUDIO_SECONDS", 5.0)
 )
@@ -269,26 +273,58 @@ def _load_model() -> WhisperModel:
         return "int8" if "float16" in ct.lower() else ct
 
     # Explicit CPU request
+    cpu_thread_kwargs: dict[str, int] = {}
+    if WHISPER_CPU_THREADS > 0:
+        cpu_thread_kwargs["cpu_threads"] = WHISPER_CPU_THREADS
+
     if device_pref == "cpu":
-        model = WhisperModel(model_path, device="cpu", compute_type=_cpu_compute(compute_type))
+        model = WhisperModel(
+            model_path,
+            device="cpu",
+            compute_type=_cpu_compute(compute_type),
+            **cpu_thread_kwargs,
+        )
         try:
-            print(f"[VoiceService] Loaded Faster-Whisper model={model_path} device=cpu compute_type={_cpu_compute(compute_type)}")
+            print(
+                "[VoiceService] Loaded Faster-Whisper model="
+                f"{model_path} device=cpu compute_type={_cpu_compute(compute_type)}"
+                f" cpu_threads={cpu_thread_kwargs.get('cpu_threads', 'default')}"
+            )
         except Exception:
             pass
         return model
 
     # Prefer CUDA; fall back to CPU if unavailable or fails
     try:
-        model = WhisperModel(model_path, device="cuda", compute_type=compute_type)
+        model = WhisperModel(
+            model_path,
+            device="cuda",
+            compute_type=compute_type,
+            **cpu_thread_kwargs,
+        )
         try:
-            print(f"[VoiceService] Loaded Faster-Whisper model={model_path} device=cuda compute_type={compute_type}")
+            print(
+                "[VoiceService] Loaded Faster-Whisper model="
+                f"{model_path} device=cuda compute_type={compute_type}"
+                f" cpu_threads={cpu_thread_kwargs.get('cpu_threads', 'default')}"
+            )
         except Exception:
             pass
         return model
     except Exception as exc:
-        model = WhisperModel(model_path, device="cpu", compute_type=_cpu_compute(compute_type))
+        model = WhisperModel(
+            model_path,
+            device="cpu",
+            compute_type=_cpu_compute(compute_type),
+            **cpu_thread_kwargs,
+        )
         try:
-            print(f"[VoiceService] Loaded Faster-Whisper model={model_path} device=cpu compute_type={_cpu_compute(compute_type)} (fallback from CUDA: {exc})")
+            print(
+                "[VoiceService] Loaded Faster-Whisper model="
+                f"{model_path} device=cpu compute_type={_cpu_compute(compute_type)}"
+                f" cpu_threads={cpu_thread_kwargs.get('cpu_threads', 'default')}"
+                f" (fallback from CUDA: {exc})"
+            )
         except Exception:
             pass
         return model
@@ -781,6 +817,25 @@ def _run_transcription(
     return list(segments_generator), info
 
 
+async def _run_transcription_async(
+    model: WhisperModel,
+    audio: np.ndarray,
+    beam_size: int,
+    language: Optional[str],
+    temperature_schedule: tuple[float, ...],
+    overrides: Optional[Dict[str, object]] = None,
+):
+    return await asyncio.to_thread(
+        _run_transcription,
+        model,
+        audio,
+        beam_size,
+        language,
+        temperature_schedule,
+        overrides,
+    )
+
+
 def _should_retry_transcription(
     avg_logprob: Optional[float],
     language_probability: Optional[float],
@@ -828,7 +883,7 @@ async def transcribe(
     primary_beam_size = max(5, effective_beam_size)
 
     primary_temperatures: tuple[float, ...] = (0.0,)
-    segments, info = _run_transcription(
+    segments, info = await _run_transcription_async(
         model,
         audio,
         beam_size=primary_beam_size,
@@ -842,7 +897,7 @@ async def transcribe(
     if _should_retry_transcription(avg_logprob, getattr(info, "language_probability", None), bool(segments)):
         retry_beam_size = max(primary_beam_size, 8)
         retry_temperatures = (0.0, 0.3, 0.6)
-        retry_segments, retry_info = _run_transcription(
+        retry_segments, retry_info = await _run_transcription_async(
             model,
             audio,
             beam_size=retry_beam_size,
@@ -874,7 +929,7 @@ async def transcribe(
         if not _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
             break
 
-        repetition_segments, repetition_info = _run_transcription(
+        repetition_segments, repetition_info = await _run_transcription_async(
             model,
             audio,
             beam_size=max(primary_beam_size, 8),
