@@ -493,11 +493,11 @@ def _should_retry_for_repetition(text: str, compression_ratio: Optional[float]) 
         if _has_consecutive_repetition(tokens, window):
             return True
 
-    if compression_ratio is not None and compression_ratio >= 2.4 and len(tokens) >= 6:
+    if compression_ratio is not None and compression_ratio >= 2.8 and len(tokens) >= 6:
         return True
 
     unique_count = len(set(tokens))
-    if unique_count <= len(tokens) // 3 and len(tokens) >= 6:
+    if unique_count <= len(tokens) // 4 and len(tokens) >= 8:
         return True
 
     return False
@@ -580,9 +580,9 @@ def _audio_energy_metrics(audio: np.ndarray) -> tuple[float, float]:
     return rms, max_amplitude
 
 
-LOW_CONFIDENCE_THRESHOLD = -1.05
-LANGUAGE_PROBABILITY_RETRY_THRESHOLD = 0.25
-LANGUAGE_RETRY_LOGPROB_BUFFER = 0.25
+LOW_CONFIDENCE_THRESHOLD = -1.2
+LANGUAGE_PROBABILITY_RETRY_THRESHOLD = 0.15
+LANGUAGE_RETRY_LOGPROB_BUFFER = 0.2
 
 
 def _extract_recent_speech_window(audio: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -814,7 +814,7 @@ async def transcribe(
 
     normalized_language = _normalize_language(language)
     effective_beam_size = max(1, min(beam_size, 10))
-    primary_beam_size = max(5, effective_beam_size)
+    primary_beam_size = max(1, min(effective_beam_size, 3))
 
     primary_temperatures: tuple[float, ...] = (0.0,)
     segments, info = _run_transcription(
@@ -831,8 +831,8 @@ async def transcribe(
     language_probability = getattr(info, "language_probability", None)
 
     if _should_retry_transcription(avg_logprob, language_probability, bool(segments)):
-        retry_beam_size = max(primary_beam_size, 6)
-        retry_temperatures = (0.0, 0.3)
+        retry_beam_size = min(max(primary_beam_size + 1, 2), max(2, min(effective_beam_size, 4)))
+        retry_temperatures = (0.0, 0.2)
         retry_segments, retry_info = _run_transcription(
             model,
             audio,
@@ -853,47 +853,8 @@ async def transcribe(
     segment_texts = _collect_segment_texts(segments)
     full_raw_text = " ".join(segment_texts).strip()
 
-    repetition_overrides = {
-        "no_repeat_ngram_size": max(2, WHISPER_NO_REPEAT_NGRAM_SIZE),
-        "repetition_penalty": max(WHISPER_REPETITION_PENALTY, 1.15),
-        "length_penalty": min(WHISPER_LENGTH_PENALTY, 0.85),
-        "condition_on_previous_text": False,
-        "compression_ratio_threshold": 2.3,
-    }
-
     compression_ratio = getattr(info, "compression_ratio", None)
-    repetition_token_count = len(_tokenize_for_repetition(full_raw_text))
     should_retry_repetition = _should_retry_for_repetition(full_raw_text, compression_ratio)
-
-    if should_retry_repetition:
-        allow_repetition_retry = (
-            (compression_ratio is not None and compression_ratio >= 2.6)
-            or repetition_token_count >= 8
-        )
-
-        if allow_repetition_retry:
-            repetition_segments, repetition_info = _run_transcription(
-                model,
-                audio,
-                beam_size=max(primary_beam_size, 6),
-                language=normalized_language,
-                temperature_schedule=(0.0, 0.2, 0.4),
-                overrides=repetition_overrides,
-            )
-
-            if repetition_segments:
-                segments = repetition_segments
-                info = repetition_info
-                segment_texts = _collect_segment_texts(segments)
-                full_raw_text = " ".join(segment_texts).strip()
-                avg_logprob_values = _collect_avg_logprobs(segments)
-                avg_logprob = _mean(avg_logprob_values)
-                compression_ratio = getattr(info, "compression_ratio", None)
-                repetition_token_count = len(_tokenize_for_repetition(full_raw_text))
-                should_retry_repetition = _should_retry_for_repetition(
-                    full_raw_text, compression_ratio
-                )
-
     words: List[dict] = []
     combined_text_parts: List[str] = []
     raw_text_parts: List[str] = []
