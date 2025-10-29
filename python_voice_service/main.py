@@ -751,7 +751,7 @@ def _run_transcription(
     temperature_schedule: tuple[float, ...],
     overrides: Optional[Dict[str, object]] = None,
 ):
-    best_of = 1 if all(temp <= 0.0 for temp in temperature_schedule) else max(beam_size, 5)
+    best_of = 1 if all(temp <= 0.0 for temp in temperature_schedule) else max(beam_size, 1)
     transcription_kwargs = {
         "beam_size": beam_size,
         "language": language,
@@ -781,23 +781,6 @@ def _run_transcription(
     return list(segments_generator), info
 
 
-def _should_retry_transcription(
-    avg_logprob: Optional[float],
-    language_probability: Optional[float],
-    has_speech: bool,
-) -> bool:
-    if not has_speech:
-        return False
-
-    if avg_logprob is not None and avg_logprob < LOW_CONFIDENCE_THRESHOLD:
-        return True
-
-    if language_probability is not None and language_probability < 0.45:
-        return True
-
-    return False
-
-
 @app.post("/transcribe")
 async def transcribe(
     request: Request,
@@ -825,7 +808,7 @@ async def transcribe(
 
     normalized_language = _normalize_language(language)
     effective_beam_size = max(1, min(beam_size, 10))
-    primary_beam_size = max(5, effective_beam_size)
+    primary_beam_size = effective_beam_size
 
     primary_temperatures: tuple[float, ...] = (0.0,)
     segments, info = _run_transcription(
@@ -839,59 +822,8 @@ async def transcribe(
     avg_logprob_values = _collect_avg_logprobs(segments)
     avg_logprob = _mean(avg_logprob_values)
 
-    if _should_retry_transcription(avg_logprob, getattr(info, "language_probability", None), bool(segments)):
-        retry_beam_size = max(primary_beam_size, 8)
-        retry_temperatures = (0.0, 0.3, 0.6)
-        retry_segments, retry_info = _run_transcription(
-            model,
-            audio,
-            beam_size=retry_beam_size,
-            language=normalized_language,
-            temperature_schedule=retry_temperatures,
-        )
-        retry_logprob_values = _collect_avg_logprobs(retry_segments)
-        retry_avg_logprob = _mean(retry_logprob_values)
-
-        # Prefer whichever run yields the higher confidence while keeping the richer transcript.
-        if (retry_avg_logprob or float("-inf")) >= (avg_logprob or float("-inf")):
-            segments = retry_segments
-            info = retry_info
-            avg_logprob_values = retry_logprob_values
-            avg_logprob = retry_avg_logprob
-
     segment_texts = _collect_segment_texts(segments)
     full_raw_text = " ".join(segment_texts).strip()
-
-    repetition_overrides = {
-        "no_repeat_ngram_size": max(2, WHISPER_NO_REPEAT_NGRAM_SIZE),
-        "repetition_penalty": max(WHISPER_REPETITION_PENALTY, 1.15),
-        "length_penalty": min(WHISPER_LENGTH_PENALTY, 0.85),
-        "condition_on_previous_text": False,
-        "compression_ratio_threshold": 2.3,
-    }
-
-    for _ in range(2):
-        if not _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
-            break
-
-        repetition_segments, repetition_info = _run_transcription(
-            model,
-            audio,
-            beam_size=max(primary_beam_size, 8),
-            language=normalized_language,
-            temperature_schedule=(0.0, 0.2, 0.4),
-            overrides=repetition_overrides,
-        )
-
-        if not repetition_segments:
-            break
-
-        segments = repetition_segments
-        info = repetition_info
-        segment_texts = _collect_segment_texts(segments)
-        full_raw_text = " ".join(segment_texts).strip()
-        avg_logprob_values = _collect_avg_logprobs(segments)
-        avg_logprob = _mean(avg_logprob_values)
 
     words: List[dict] = []
     combined_text_parts: List[str] = []
