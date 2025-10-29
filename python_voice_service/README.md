@@ -62,13 +62,20 @@ pip install -r requirements.txt
    default to stop Whisper from reinforcing its own repeats; set
    `WHISPER_CONDITION_ON_PREVIOUS_TEXT=true` if you want the old behaviour back.
 
-   When loops are detected in the recognised text the service performs a single
-   repetition-aware retry with stronger penalties. Keeping the baseline values
-   moderate preserves normal accuracy while letting that retry clamp runaway
-   phrases from smaller Whisper checkpoints. If the decoder still insists on
-   echoing the same short wake phrase after the retry, the response is collapsed
-   down to a single occurrence so Unity never receives a long "hi rachael"
-   chain.
+   When loops are detected in the recognised text the service performs at most a
+   single repetition-aware retry with stronger penalties. The retry now only
+   kicks in for longer phrases or extremely compressed outputs so quick wake
+   commands do not trigger an expensive second decode. If the decoder still
+   insists on echoing the same short wake phrase after the retry, the response
+   is collapsed down to a single occurrence so Unity never receives a long "hi
+   rachael" chain.
+
+   Confidence-based retries also respect a tighter threshold: the CPU-friendly
+   default only runs the higher-temperature pass when both the average
+   log-probability and the language probability fall well below normal ranges.
+   This keeps the latency closer to the 3–4 second mark on Ryzen-class laptops
+   while leaving the environment variables in place if you need to revert to
+   the more aggressive fallback behaviour.
 
 2. Start the API:
 

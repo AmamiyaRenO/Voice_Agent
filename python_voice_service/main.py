@@ -241,23 +241,6 @@ WHISPER_CONDITION_ON_PREVIOUS_TEXT = _environment_bool(
 )
 
 
-def _positive_or_zero(value: int) -> int:
-    return value if value >= 0 else 0
-
-
-def _non_negative_float(value: float) -> float:
-    return value if value >= 0.0 else 0.0
-
-
-WHISPER_NO_REPEAT_NGRAM_SIZE = _positive_or_zero(
-    _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 4)
-)
-WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PENALTY", 1.15))
-WHISPER_LENGTH_PENALTY = _non_negative_float(
-    _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
-)
-
-
 @lru_cache(maxsize=1)
 def _load_model() -> WhisperModel:
     model_path = _environment("WHISPER_MODEL_PATH", "large-v3")
@@ -597,7 +580,9 @@ def _audio_energy_metrics(audio: np.ndarray) -> tuple[float, float]:
     return rms, max_amplitude
 
 
-LOW_CONFIDENCE_THRESHOLD = -0.9
+LOW_CONFIDENCE_THRESHOLD = -1.05
+LANGUAGE_PROBABILITY_RETRY_THRESHOLD = 0.25
+LANGUAGE_RETRY_LOGPROB_BUFFER = 0.25
 
 
 def _extract_recent_speech_window(audio: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -792,8 +777,12 @@ def _should_retry_transcription(
     if avg_logprob is not None and avg_logprob < LOW_CONFIDENCE_THRESHOLD:
         return True
 
-    if language_probability is not None and language_probability < 0.35:
-        return True
+    if language_probability is not None and language_probability < LANGUAGE_PROBABILITY_RETRY_THRESHOLD:
+        if avg_logprob is None:
+            return True
+
+        if avg_logprob < LOW_CONFIDENCE_THRESHOLD + LANGUAGE_RETRY_LOGPROB_BUFFER:
+            return True
 
     return False
 
@@ -839,9 +828,11 @@ async def transcribe(
     avg_logprob_values = _collect_avg_logprobs(segments)
     avg_logprob = _mean(avg_logprob_values)
 
-    if _should_retry_transcription(avg_logprob, getattr(info, "language_probability", None), bool(segments)):
-        retry_beam_size = max(primary_beam_size, 8)
-        retry_temperatures = (0.0, 0.3, 0.6)
+    language_probability = getattr(info, "language_probability", None)
+
+    if _should_retry_transcription(avg_logprob, language_probability, bool(segments)):
+        retry_beam_size = max(primary_beam_size, 6)
+        retry_temperatures = (0.0, 0.3)
         retry_segments, retry_info = _run_transcription(
             model,
             audio,
@@ -870,23 +861,38 @@ async def transcribe(
         "compression_ratio_threshold": 2.3,
     }
 
-    if _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
-        repetition_segments, repetition_info = _run_transcription(
-            model,
-            audio,
-            beam_size=max(primary_beam_size, 8),
-            language=normalized_language,
-            temperature_schedule=(0.0, 0.2, 0.4),
-            overrides=repetition_overrides,
+    compression_ratio = getattr(info, "compression_ratio", None)
+    repetition_token_count = len(_tokenize_for_repetition(full_raw_text))
+    should_retry_repetition = _should_retry_for_repetition(full_raw_text, compression_ratio)
+
+    if should_retry_repetition:
+        allow_repetition_retry = (
+            (compression_ratio is not None and compression_ratio >= 2.6)
+            or repetition_token_count >= 8
         )
 
-        if repetition_segments:
-            segments = repetition_segments
-            info = repetition_info
-            segment_texts = _collect_segment_texts(segments)
-            full_raw_text = " ".join(segment_texts).strip()
-            avg_logprob_values = _collect_avg_logprobs(segments)
-            avg_logprob = _mean(avg_logprob_values)
+        if allow_repetition_retry:
+            repetition_segments, repetition_info = _run_transcription(
+                model,
+                audio,
+                beam_size=max(primary_beam_size, 6),
+                language=normalized_language,
+                temperature_schedule=(0.0, 0.2, 0.4),
+                overrides=repetition_overrides,
+            )
+
+            if repetition_segments:
+                segments = repetition_segments
+                info = repetition_info
+                segment_texts = _collect_segment_texts(segments)
+                full_raw_text = " ".join(segment_texts).strip()
+                avg_logprob_values = _collect_avg_logprobs(segments)
+                avg_logprob = _mean(avg_logprob_values)
+                compression_ratio = getattr(info, "compression_ratio", None)
+                repetition_token_count = len(_tokenize_for_repetition(full_raw_text))
+                should_retry_repetition = _should_retry_for_repetition(
+                    full_raw_text, compression_ratio
+                )
 
     words: List[dict] = []
     combined_text_parts: List[str] = []
@@ -919,7 +925,7 @@ async def transcribe(
     if not full_text and words:
         full_text = " ".join(word["word"] for word in words).strip()
 
-    if _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
+    if should_retry_repetition:
         collapsed_text, collapsed_words = _collapse_repetitive_output(full_text or full_raw_text, words)
         if collapsed_text and collapsed_text != full_text:
             full_text = collapsed_text
