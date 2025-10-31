@@ -1,13 +1,15 @@
 # Voice Agent for Robot OPR
-## Python 语音服务（Faster-Whisper）环境变量
+## Python Speech Service (Faster-Whisper) Environment Variables
 
-- WHISPER_MODEL_PATH（默认 `large-v3`），可选 `medium.en`、`small.en` 等
-- WHISPER_COMPUTE_TYPE（默认 `int8_float16`，显存足够可用 `float16`）
-- WAKE_WORD（默认 `rachel`）
-- WAKE_WORD_ALIASES（默认 `rachel, rachael, richel, richelle, rachal, raychel, ra chel, rach el`，Python 服务会据此将识别结果统一规范化，Unity 端无需再重复配置同义词）
-- WAKE_WORD_PREFIXES（默认 `hey, hi`，用于提示识别器优先听出“Hey Rachel”之类的组合，同时在服务端统一规范化这些前缀）
+- WHISPER_MODEL_PATH (default `large-v3`), optional values include `medium.en`, `small.en`, etc.
+- WHISPER_COMPUTE_TYPE (default `int8_float16`; use `float16` if sufficient GPU memory is available)
+- WAKE_WORD (default `rachel`)
+- WAKE_WORD_ALIASES (default `rachel, rachael, richel, richelle, rachal, raychel, ra chel, rach el`; Python service normalizes recognition results based on these aliases, eliminating the need for duplicate synonym configuration in Unity)
+- WAKE_WORD_PREFIXES (default `hey, hi`; prompts the recognizer to prioritize detecting phrases like “Hey Rachel” while standardizing these prefixes on the server)
 
-示例（Windows PowerShell）：
+Example (Windows PowerShell):
+
+Translated with DeepL.com (free version)
 
 ```powershell
 pip install -r python_voice_service/requirements.txt
