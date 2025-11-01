@@ -250,6 +250,9 @@ WHISPER_VAD_MIN_SPEECH_MS = _positive_or_zero(
 WHISPER_RECENT_WINDOW_PAD_MS = _positive_or_zero(
     _environment_int("WHISPER_RECENT_WINDOW_PAD_MS", 100)
 )
+WHISPER_RECENT_WINDOW_MAX_GAP_MS = _positive_or_zero(
+    _environment_int("WHISPER_RECENT_WINDOW_MAX_GAP_MS", 600)
+)
 WHISPER_CONDITION_ON_PREVIOUS_TEXT = _environment_bool(
     "WHISPER_CONDITION_ON_PREVIOUS_TEXT", False
 )
@@ -725,6 +728,14 @@ def _extract_recent_speech_window(audio: np.ndarray, sample_rate: int) -> np.nda
         return trimmed
 
     last_start, last_end = segments[-1]
+
+    max_gap_samples = int((WHISPER_RECENT_WINDOW_MAX_GAP_MS / 1000.0) * sample_rate)
+    if max_gap_samples > 0:
+        for start_sample, end_sample in reversed(segments[:-1]):
+            if last_start - end_sample > max_gap_samples:
+                break
+            last_start = start_sample
+            last_end = max(last_end, end_sample)
 
     if WHISPER_MAX_AUDIO_SECONDS > 0.0:
         max_samples = int(WHISPER_MAX_AUDIO_SECONDS * sample_rate)
