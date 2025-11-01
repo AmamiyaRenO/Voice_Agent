@@ -12,6 +12,8 @@ import math
 import os
 import re
 import asyncio
+import logging
+import time
 from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -74,12 +76,22 @@ class _AsyncHttpClient:
             cls._client = None
 
 
+logger = logging.getLogger("coach_voice_service")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+
+
 app = FastAPI(title=APP_TITLE)
 
 
 def _environment(key: str, default: str) -> str:
     value = os.getenv(key)
     return value.strip() if value is not None else default
+
+
+logger.setLevel(
+    getattr(logging, _environment("VOICE_SERVICE_LOG_LEVEL", "INFO").upper(), logging.INFO)
+)
 
 
 def _environment_float(key: str, default: float) -> float:
@@ -320,6 +332,7 @@ class RespondRequest(BaseModel):
 
 class RespondResponse(BaseModel):
     text: str
+    generation_seconds: Optional[float] = Field(default=None, ge=0.0)
 
 
 class OllamaError(RuntimeError):
@@ -808,6 +821,7 @@ async def transcribe(
     language: Optional[str] = Query("en", min_length=1, max_length=8),
     beam_size: int = Query(5, ge=1, le=10),
 ) -> JSONResponse:
+    start_time = time.perf_counter()
     payload = await request.body()
     if not payload:
         raise HTTPException(status_code=400, detail="Empty audio payload")
@@ -920,11 +934,22 @@ async def transcribe(
         else:
             response["avg_logprob_raw"] = float(round(avg_logprob, 4))
 
+    processing_seconds = round(time.perf_counter() - start_time, 4)
+    response["processing_seconds"] = processing_seconds
+
+    logger.info(
+        "Transcription finished in %.3fs (language=%s, tokens=%d)",
+        processing_seconds,
+        response.get("language"),
+        len(words),
+    )
+
     return JSONResponse(response)
 
 
 @app.post("/respond", response_model=RespondResponse)
 async def respond(payload: RespondRequest) -> RespondResponse:
+    start_time = time.perf_counter()
     user_text = payload.text.strip()
     if not user_text:
         raise HTTPException(status_code=400, detail="Empty text payload")
@@ -934,7 +959,10 @@ async def respond(payload: RespondRequest) -> RespondResponse:
     except OllamaError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    return RespondResponse(text=reply)
+    generation_seconds = round(time.perf_counter() - start_time, 4)
+    logger.info("LLM response generated in %.3fs", generation_seconds)
+
+    return RespondResponse(text=reply, generation_seconds=generation_seconds)
 
 
 # --- Compatibility TTS endpoint -------------------------------------------------
@@ -948,6 +976,7 @@ class TtsRequest(BaseModel):
 
 @app.post("/tts")
 async def tts(payload: TtsRequest) -> JSONResponse:
+    start_time = time.perf_counter()
     url = f"{_piper_http_base_url()}/speak"
     try:
         client = _AsyncHttpClient.get()
@@ -958,8 +987,13 @@ async def tts(payload: TtsRequest) -> JSONResponse:
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=resp.text.strip())
 
-    # Proxy Piper's JSON (audio_wav_base64 + sample_rate)
-    return JSONResponse(resp.json())
+    # Proxy Piper's JSON (audio_wav_base64 + sample_rate) and include timing info
+    synthesis_seconds = round(time.perf_counter() - start_time, 4)
+    data = resp.json()
+    data["synthesis_seconds"] = synthesis_seconds
+    logger.info("TTS synthesis finished in %.3fs", synthesis_seconds)
+
+    return JSONResponse(data)
 
 
 from fastapi.responses import Response  # existing import above includes JSONResponse only
@@ -967,6 +1001,7 @@ from fastapi.responses import Response  # existing import above includes JSONRes
 
 @app.get("/tts")
 async def tts_get(text: str) -> Response:
+    start_time = time.perf_counter()
     text = (text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
@@ -981,7 +1016,14 @@ async def tts_get(text: str) -> Response:
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=resp.text.strip())
 
-    return Response(content=resp.content, media_type="audio/wav")
+    synthesis_seconds = round(time.perf_counter() - start_time, 4)
+    logger.info("TTS synthesis finished in %.3fs", synthesis_seconds)
+
+    return Response(
+        content=resp.content,
+        media_type="audio/wav",
+        headers={"X-Synthesis-Seconds": f"{synthesis_seconds:.4f}"},
+    )
 
 
 if __name__ == "__main__":
