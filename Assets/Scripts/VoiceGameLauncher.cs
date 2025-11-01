@@ -53,7 +53,7 @@ namespace RobotVoice
         [SerializeField, Tooltip("Prompt text sent to LLM when wake word is detected. Keep it short.")]
         private string wakeAcknowledgeUserText = "Wake word detected. Reply briefly that you are listening.";
         [Header("Wake/First Command")]
-        [SerializeField, Min(0.5f)] private float firstCommandListenSeconds = 3f;
+        [SerializeField, Min(0.5f)] private float firstCommandListenSeconds = 4.5f;
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
         private readonly List<KeywordPhrase> keywordPhrases = new List<KeywordPhrase>();

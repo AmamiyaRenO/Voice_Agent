@@ -448,7 +448,7 @@ MonoBehaviour:
   PythonServiceLanguage: 
   PythonServiceBeamSize: 5
   PythonServiceSilenceThreshold: 0.02
-  PythonMaxRecordLength: 1.5
+  PythonMaxRecordLength: 4.5
   PythonFrameLength: 256
   VoiceProcessor: {fileID: 1558954883}
   MaxAlternatives: 3

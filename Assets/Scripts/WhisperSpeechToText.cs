@@ -23,7 +23,11 @@ public class WhisperSpeechToText : MonoBehaviour
 
         [Tooltip("Max record length per segment when using the Python speech service (seconds).")]
         [Range(0.1f, 10f)]
-        public float PythonMaxRecordLength = 1.5f;
+        public float PythonMaxRecordLength = 4.5f;
+
+        [Tooltip("Trailing silence (seconds) required before forcing a flush when using the Python service.")]
+        [Range(0f, 2f)]
+        public float PythonPostSpeechSilenceSeconds = 0.6f;
 
         [Tooltip("Frame length for VoiceProcessor when using the Python speech service.")]
         public int PythonFrameLength = 256;
@@ -50,6 +54,8 @@ public class WhisperSpeechToText : MonoBehaviour
         private bool _pythonRequestInFlight;
         private float _pythonLastSegmentMaxAmplitude;
         private float _pythonLastSegmentRms;
+        private float _pythonSilenceStartTime;
+        private bool _pythonDetectedSpeechThisSegment;
 
         void Awake()
         {
@@ -146,6 +152,8 @@ public class WhisperSpeechToText : MonoBehaviour
                 {
                         _pythonSegmentActive = true;
                         _pythonSegmentStartTime = Time.realtimeSinceStartup;
+                        _pythonSilenceStartTime = 0f;
+                        _pythonDetectedSpeechThisSegment = false;
                 }
 
                 if (PythonMaxRecordLength > 0 && _pythonSegmentActive)
@@ -156,6 +164,29 @@ public class WhisperSpeechToText : MonoBehaviour
                                 _pythonForceFlushRequested = true;
                         }
                 }
+
+                if (PythonPostSpeechSilenceSeconds > 0f)
+                {
+                        var frameMaxAmplitude = CalculateFrameMaxAmplitude(samples);
+                        var frameHasSpeech = frameMaxAmplitude > PythonServiceSilenceThreshold;
+
+                        if (frameHasSpeech)
+                        {
+                                _pythonDetectedSpeechThisSegment = true;
+                                _pythonSilenceStartTime = 0f;
+                        }
+                        else if (_pythonSegmentActive && _pythonDetectedSpeechThisSegment)
+                        {
+                                if (_pythonSilenceStartTime <= 0f)
+                                {
+                                        _pythonSilenceStartTime = Time.realtimeSinceStartup;
+                                }
+                                else if (Time.realtimeSinceStartup - _pythonSilenceStartTime >= PythonPostSpeechSilenceSeconds)
+                                {
+                                        _pythonForceFlushRequested = true;
+                                }
+                        }
+                }
         }
 
         private void VoiceProcessorOnRecordingStart()
@@ -163,6 +194,8 @@ public class WhisperSpeechToText : MonoBehaviour
                 ClearPythonBuffer();
                 _pythonSegmentActive = false;
                 _pythonSegmentStartTime = 0f;
+                _pythonSilenceStartTime = 0f;
+                _pythonDetectedSpeechThisSegment = false;
         }
 
         private void VoiceProcessorOnOnRecordingStop()
@@ -179,6 +212,8 @@ public class WhisperSpeechToText : MonoBehaviour
 
                 _pythonSegmentActive = false;
                 _pythonSegmentStartTime = 0f;
+                _pythonSilenceStartTime = 0f;
+                _pythonDetectedSpeechThisSegment = false;
         }
 
         private IEnumerator HandlePythonRecordingStop(bool restartRecording)
@@ -195,6 +230,8 @@ public class WhisperSpeechToText : MonoBehaviour
 
                         _pythonSegmentActive = false;
                         _pythonSegmentStartTime = 0f;
+                        _pythonSilenceStartTime = 0f;
+                        _pythonDetectedSpeechThisSegment = false;
                 }
 
                 if (samples != null && samples.Length > 0)
@@ -287,6 +324,27 @@ public class WhisperSpeechToText : MonoBehaviour
                 _pythonRequestInFlight = false;
                 _pythonLastSegmentMaxAmplitude = 0f;
                 _pythonLastSegmentRms = 0f;
+        }
+
+        private float CalculateFrameMaxAmplitude(short[] samples)
+        {
+                if (samples == null || samples.Length == 0)
+                {
+                        return 0f;
+                }
+
+                float maxAmplitude = 0f;
+
+                for (int i = 0; i < samples.Length; i++)
+                {
+                        float amplitude = Mathf.Abs(samples[i]) / 32768f;
+                        if (amplitude > maxAmplitude)
+                        {
+                                maxAmplitude = amplitude;
+                        }
+                }
+
+                return maxAmplitude;
         }
 
         private bool IsPythonAudioSegmentSilent(short[] samples, out float maxAmplitude, out float rms)
