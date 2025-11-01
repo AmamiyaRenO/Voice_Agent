@@ -92,7 +92,7 @@ namespace RobotVoice
                 var builder = new SimpleMqttClientOptionsBuilder()
                     .WithTcpServer(host, port)
                     .WithClientId(string.IsNullOrWhiteSpace(clientId) ? Guid.NewGuid().ToString("N") : clientId)
-                    .WithKeepAlivePeriod(TimeSpan.FromSeconds(15))
+                    .WithKeepAlivePeriod(TimeSpan.Zero)
                     .WithCleanSession();
 
                 if (!string.IsNullOrEmpty(username))

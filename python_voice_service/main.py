@@ -424,7 +424,7 @@ def _wake_word_prompt() -> str:
         for term in unique_terms:
             prompt_terms.append(f"{prefix} {term}")
 
-    prompt_terms.extend(["open", "play", "back", "quit", "close", "shut", "down"])
+    prompt_terms.extend(["open", "back", "cornhole", "disc golf"])
 
     # Deduplicate while preserving the first occurrence order so the prompt stays predictable.
     ordered_terms = list(dict.fromkeys(prompt_terms))
