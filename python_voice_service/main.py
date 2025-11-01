@@ -250,6 +250,9 @@ WHISPER_VAD_MIN_SPEECH_MS = _positive_or_zero(
 WHISPER_RECENT_WINDOW_PAD_MS = _positive_or_zero(
     _environment_int("WHISPER_RECENT_WINDOW_PAD_MS", 100)
 )
+WHISPER_RECENT_WINDOW_MAX_GAP_MS = _positive_or_zero(
+    _environment_int("WHISPER_RECENT_WINDOW_MAX_GAP_MS", 600)
+)
 WHISPER_CONDITION_ON_PREVIOUS_TEXT = _environment_bool(
     "WHISPER_CONDITION_ON_PREVIOUS_TEXT", False
 )
@@ -726,23 +729,34 @@ def _extract_recent_speech_window(audio: np.ndarray, sample_rate: int) -> np.nda
 
     last_start, last_end = segments[-1]
 
-    if WHISPER_MAX_AUDIO_SECONDS > 0.0:
-        max_samples = int(WHISPER_MAX_AUDIO_SECONDS * sample_rate)
-        if max_samples > 0 and last_end - last_start > max_samples:
-            last_start = max(0, last_end - max_samples)
+    max_gap_samples = int((WHISPER_RECENT_WINDOW_MAX_GAP_MS / 1000.0) * sample_rate)
+    max_samples = int(WHISPER_MAX_AUDIO_SECONDS * sample_rate) if WHISPER_MAX_AUDIO_SECONDS > 0.0 else 0
+    min_start = max(0, last_end - max_samples) if max_samples > 0 else 0
+
+    if segments[:-1]:
+        previous_start = last_start
+        for start_sample, end_sample in reversed(segments[:-1]):
+            if end_sample <= min_start:
+                break
+            gap = previous_start - end_sample
+            if max_gap_samples > 0 and gap > max_gap_samples and start_sample < min_start:
+                break
+            last_start = min(last_start, start_sample)
+            previous_start = start_sample
+
+    if max_samples > 0 and last_end - last_start > max_samples:
+        last_start = max(min_start, last_end - max_samples)
 
     pad_samples = int((WHISPER_RECENT_WINDOW_PAD_MS / 1000.0) * sample_rate)
     if pad_samples > 0:
         last_start = max(0, last_start - pad_samples)
         last_end = min(trimmed.size, last_end + pad_samples)
 
-    window_start = last_start
+    window_start = max(last_start, min_start)
     window_end = last_end
 
-    if WHISPER_MAX_AUDIO_SECONDS > 0.0:
-        max_samples = int(WHISPER_MAX_AUDIO_SECONDS * sample_rate)
-        if max_samples > 0 and window_end - window_start > max_samples:
-            window_start = max(0, window_end - max_samples)
+    if max_samples > 0 and window_end - window_start > max_samples:
+        window_start = max(0, window_end - max_samples)
 
     if window_end - window_start < frame_length:
         return trimmed
