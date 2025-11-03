@@ -92,9 +92,32 @@ class WindowsSpeechRecognizer:
 
     def start(self) -> None:
         pythoncom.CoInitialize()
-        recognizer = win32com.client.Dispatch("SAPI.SpSharedRecognizer")
+        # ``SpInprocRecognizer`` gives us full control over the audio input and
+        # avoids depending on the system-wide shared recognizer configuration,
+        # which can leave the capture device unset on some Windows installs.
+        recognizer = win32com.client.Dispatch("SAPI.SpInprocRecognizer")
+
+        # Bind the recognizer to the default multimedia microphone so that SAPI
+        # actually opens the capture device even when the shared recognizer is
+        # disabled. ``SpMMAudioIn`` exposes ``GetDescription`` for logging.
+        try:
+            audio_in = win32com.client.Dispatch("SAPI.SpMMAudioIn")
+            recognizer.AudioInputStream = audio_in
+            print(
+                "[WindowsSpeechRecognizer] Using input device: "
+                f"{audio_in.GetDescription()}"
+            )
+        except Exception as exc:
+            print(
+                "[WindowsSpeechRecognizer] Falling back to recognizer default "
+                f"audio input ({exc})."
+            )
+
         context = recognizer.CreateRecoContext()
+        recognizer.State = 1  # 1 == Active
         grammar = context.CreateGrammar()
+        # Dictation grammars must be explicitly loaded before activation.
+        grammar.DictationLoad()
         grammar.DictationSetState(1)  # 1 == SGDSActive
 
         # Subscribe to recognition events.
