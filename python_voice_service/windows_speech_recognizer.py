@@ -57,7 +57,9 @@ class RecognitionResult:
 class _SpeechEvents:
     """Event sink passed to DispatchWithEvents to receive callbacks."""
 
-    def __init__(self, handler: "WindowsSpeechRecognizer") -> None:
+    def __init__(self, handler: Optional["WindowsSpeechRecognizer"] = None) -> None:
+        # ``win32com.client.WithEvents`` instantiates the sink without arguments, so we
+        # allow ``handler`` to be provided later.
         self._handler = handler
 
     def OnRecognition(self, _stream_number, _stream_position, _recognition_type, result):
@@ -67,12 +69,16 @@ class _SpeechEvents:
             confidence = phrase.PhraseInfo.Elements.Item(0).EngineConfidence
         except Exception:  # pragma: no cover - EngineConfidence can be missing.
             confidence = None
-        self._handler.enqueue_result(RecognitionResult(text=text, is_final=True, confidence=confidence))
+        if self._handler is not None:
+            self._handler.enqueue_result(
+                RecognitionResult(text=text, is_final=True, confidence=confidence)
+            )
 
     def OnHypothesis(self, _stream_number, _stream_position, result):
         phrase = win32com.client.Dispatch(result)
         text = phrase.PhraseInfo.GetText()
-        self._handler.enqueue_result(RecognitionResult(text=text, is_final=False))
+        if self._handler is not None:
+            self._handler.enqueue_result(RecognitionResult(text=text, is_final=False))
 
 
 class WindowsSpeechRecognizer:
@@ -120,8 +126,6 @@ class WindowsSpeechRecognizer:
 
 if __name__ == "__main__":
     ensure_windows()
-
-    import queue
 
     recognizer = WindowsSpeechRecognizer()
     recognizer.start()
