@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import subprocess
 import tempfile
@@ -11,6 +12,8 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Piper TTS Wrapper")
 
@@ -108,7 +111,38 @@ async def _synthesize_audio(text: str) -> tuple[bytes, int]:
     sample_rate = int(_env("PIPER_SAMPLE_RATE", "22050"))
     server_url = _env("PIPER_SERVER_URL")
     if server_url:
-        audio_bytes = await _request_piper_server(text)
+        try:
+            audio_bytes = await _request_piper_server(text)
+        except HTTPException as exc:
+            if exc.status_code >= 500:
+                detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                logger.warning(
+                    "Piper server request failed (%s); attempting subprocess fallback",
+                    detail,
+                )
+                try:
+                    audio_bytes = _run_piper_subprocess(text)
+                except HTTPException as fallback_exc:
+                    fallback_detail = (
+                        fallback_exc.detail
+                        if isinstance(fallback_exc.detail, str)
+                        else str(fallback_exc.detail)
+                    )
+                    logger.error(
+                        "Piper subprocess fallback failed after server error; "
+                        "server=%s fallback=%s",
+                        detail,
+                        fallback_detail,
+                    )
+                    raise HTTPException(
+                        status_code=fallback_exc.status_code,
+                        detail={
+                            "server_error": detail,
+                            "fallback_error": fallback_detail,
+                        },
+                    ) from fallback_exc
+            else:
+                raise
     else:
         audio_bytes = _run_piper_subprocess(text)
     return audio_bytes, sample_rate
