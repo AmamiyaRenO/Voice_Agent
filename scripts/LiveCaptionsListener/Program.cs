@@ -30,6 +30,7 @@ class Program
         AutomationElement captionElement = null;
         AutomationEventHandler textChangedHandler = null;
         AutomationPropertyChangedEventHandler valueChangedHandler = null;
+        AutomationEventHandler liveRegionChangedHandler = null;
         string lastText = string.Empty;
 
         void RemoveHandlers()
@@ -46,6 +47,12 @@ class Program
             {
                 Automation.RemoveAutomationPropertyChangedEventHandler(captionElement, valueChangedHandler);
                 valueChangedHandler = null;
+            }
+
+            if (liveRegionChangedHandler != null)
+            {
+                Automation.RemoveAutomationEventHandler(AutomationElementIdentifiers.LiveRegionChangedEvent, captionElement, liveRegionChangedHandler);
+                liveRegionChangedHandler = null;
             }
         }
 
@@ -191,6 +198,8 @@ class Program
                 var queue = new Queue<AutomationElement>();
                 queue.Enqueue(live);
                 var visited = new HashSet<string>();
+                AutomationElement bestCandidate = null;
+                int bestScore = int.MinValue;
 
                 while (queue.Count > 0)
                 {
@@ -206,21 +215,61 @@ class Program
                         visited.Add(key);
                     }
 
+                    bool supportsText = false;
+                    bool supportsValue = false;
                     try
                     {
-                        if (current.TryGetCurrentPattern(TextPattern.Pattern, out _)
-                            || current.TryGetCurrentPattern(ValuePattern.Pattern, out _))
-                        {
-                            var text = TryReadText(current);
-                            if (!string.IsNullOrWhiteSpace(text))
-                            {
-                                return current;
-                            }
-                        }
+                        supportsText = current.TryGetCurrentPattern(TextPattern.Pattern, out _);
+                        supportsValue = current.TryGetCurrentPattern(ValuePattern.Pattern, out _);
                     }
                     catch (ElementNotAvailableException)
                     {
                         continue;
+                    }
+
+                    if (supportsText || supportsValue)
+                    {
+                        int score = 0;
+                        string preview = string.Empty;
+
+                        if (supportsText)
+                            score += 2;
+
+                        if (supportsValue)
+                            score += 1;
+
+                        try
+                        {
+                            preview = TryReadText(current);
+                        }
+                        catch
+                        {
+                            preview = string.Empty;
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(preview))
+                        {
+                            score += 5;
+                        }
+
+                        try
+                        {
+                            var controlType = current.Current.ControlType;
+                            if (controlType == ControlType.Document || controlType == ControlType.Text)
+                                score += 3;
+                        }
+                        catch (ElementNotAvailableException)
+                        {
+                        }
+
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
+                            bestCandidate = current;
+
+                            if (score >= 5 && !string.IsNullOrWhiteSpace(preview))
+                                return current;
+                        }
                     }
 
                     foreach (var child in EnumerateChildren(current))
@@ -228,6 +277,9 @@ class Program
                         queue.Enqueue(child);
                     }
                 }
+
+                if (bestCandidate != null)
+                    return bestCandidate;
             }
             catch (Exception ex)
             {
@@ -249,6 +301,32 @@ class Program
 
             bool hasTextPattern = captionElement.TryGetCurrentPattern(TextPattern.Pattern, out var textPatternObj);
             bool hasValuePattern = captionElement.TryGetCurrentPattern(ValuePattern.Pattern, out var valuePatternObj);
+
+            liveRegionChangedHandler = (sender, e) =>
+            {
+                try
+                {
+                    var source = sender as AutomationElement ?? captionElement;
+                    if (source == null) return;
+                    var updated = TryReadText(source);
+                    if (string.IsNullOrEmpty(updated) && !ReferenceEquals(source, captionElement))
+                        updated = TryReadText(captionElement);
+                    OutputCaption(updated);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ 文本读取失败: {ex.Message}");
+                }
+            };
+
+            try
+            {
+                Automation.AddAutomationEventHandler(AutomationElementIdentifiers.LiveRegionChangedEvent, captionElement, TreeScope.Element, liveRegionChangedHandler);
+            }
+            catch (Exception)
+            {
+                liveRegionChangedHandler = null;
+            }
 
             if (hasTextPattern && textPatternObj is TextPattern textPattern)
             {
