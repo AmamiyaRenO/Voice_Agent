@@ -9,9 +9,9 @@ Windows workstation.
 
 | Component | Description |
 | --- | --- |
-| **LiveCaptionsListener.exe** | Headless UI Automation listener that watches the Live Captions text control. |
+| **LiveCaptionsListener.exe** | Headless UI Automation listener that watches the Live Captions text control and forwards MQTT messages. |
 | **Sentence assembly** | Coalesces partial caption updates into full utterances using newline and silence detection. |
-| **Unity transport** | Publish each completed sentence to Unity by logging, piping, or forwarding over MQTT/IPC. |
+| **Unity transport** | Unity subscribes to the MQTT topic (or optional legacy transports) to react to finished sentences. |
 
 The workflow requires **Windows 11 22H2+** with the Live Captions feature enabled (press
 `Win + Ctrl + L`). Enable the "Include microphone audio" option and keep the Live Captions window
@@ -33,9 +33,39 @@ dotnet new console -n LiveCaptionsBridge --framework net6.0
 dotnet publish -c Release -r win-x64 --self-contained false
 ```
 
-When running, the console writes each completed sentence in the format `[Sentence] hello world`. The
-`FinalizeSentence` method is the appropriate place to forward utterances to Unity through MQTT,
-Named Pipes, stdin/stdout relays, or any other integration point that suits your deployment.
+When running, the console writes each completed sentence in the format `[Sentence] hello world` and
+publishes a JSON payload to the configured MQTT topic. You can also disable MQTT entirely by omitting
+the topic configuration if you prefer to consume the console output directly.
+
+### MQTT publishing configuration
+
+`LiveCaptionsListener.exe` reads its broker settings from either command-line switches or
+environment variables. The following options are available:
+
+| Setting | Environment variable | Command-line switch | Default |
+| --- | --- | --- | --- |
+| Broker host | `LIVE_CAPTIONS_MQTT_HOST` | `--mqtt-host=HOST` | `127.0.0.1` |
+| Broker port | `LIVE_CAPTIONS_MQTT_PORT` | `--mqtt-port=PORT` | `1883` |
+| Topic | `LIVE_CAPTIONS_MQTT_TOPIC` | `--mqtt-topic=TOPIC` | `robot/live_captions` |
+| Client ID | `LIVE_CAPTIONS_MQTT_CLIENT_ID` | `--mqtt-client-id=ID` | `live-captions-{machine}` |
+| Username | `LIVE_CAPTIONS_MQTT_USERNAME` | `--mqtt-username=USER` | *(empty)* |
+| Password | `LIVE_CAPTIONS_MQTT_PASSWORD` | `--mqtt-password=PASS` | *(empty)* |
+| Source label | `LIVE_CAPTIONS_SOURCE_LABEL` | `--source-label=LABEL` | `live_captions` |
+
+Set `LIVE_CAPTIONS_MQTT_TOPIC` (or `--mqtt-topic`) to an empty string to disable MQTT output.
+Each published payload looks like this:
+
+```json
+{
+  "type": "LIVE_CAPTION",
+  "text": "hello world",
+  "source": "live_captions",
+  "timestamp": "2024-05-17T11:05:30.1234567Z"
+}
+```
+
+The lightweight MQTT publisher opens a fresh connection for every sentence, keeping the listener
+self-contained with no additional NuGet dependencies.
 
 ## 3. Unity side ingestion
 
