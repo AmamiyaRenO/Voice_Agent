@@ -122,10 +122,20 @@ class Program
                 }
             }
 
-            // Some Live Captions builds expose the text only in the raw tree.
-            // Fall back to RawViewWalker so that we do not miss virtualized nodes.
+            foreach (var rawChild in EnumerateRawChildren(parent, controlChildren))
+            {
+                yield return rawChild;
+            }
+        }
+
+        IEnumerable<AutomationElement> EnumerateRawChildren(AutomationElement parent, AutomationElementCollection controlChildren)
+        {
+            var results = new List<AutomationElement>();
+
             try
             {
+                // Some Live Captions builds expose the text only in the raw tree.
+                // Fall back to RawViewWalker so that we do not miss virtualized nodes.
                 var walker = TreeWalker.RawViewWalker;
                 var rawChild = walker.GetFirstChild(parent);
                 while (rawChild != null)
@@ -144,7 +154,9 @@ class Program
                     }
 
                     if (!duplicate)
-                        yield return rawChild;
+                    {
+                        results.Add(rawChild);
+                    }
 
                     rawChild = walker.GetNextSibling(rawChild);
                 }
@@ -152,6 +164,8 @@ class Program
             catch (ElementNotAvailableException)
             {
             }
+
+            return results;
         }
 
         string GetRuntimeIdKey(AutomationElement element)
