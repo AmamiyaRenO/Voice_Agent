@@ -14,7 +14,8 @@ class Program
         var live = root.FindFirst(TreeScope.Subtree,
             new OrCondition(
                 new PropertyCondition(AutomationElement.NameProperty, "Live Captions"),
-                new PropertyCondition(AutomationElement.NameProperty, "实时字幕")
+                new PropertyCondition(AutomationElement.NameProperty, "实时字幕"),
+                new PropertyCondition(AutomationElement.NameProperty, "实时辅助字幕")
             ));
 
         if (live == null)
@@ -87,17 +88,109 @@ class Program
             return string.Empty;
         }
 
+        bool AreSameElement(AutomationElement a, AutomationElement b)
+        {
+            if (a == null || b == null) return false;
+            try
+            {
+                return a.Equals(b);
+            }
+            catch (ElementNotAvailableException)
+            {
+                return false;
+            }
+        }
+
+        IEnumerable<AutomationElement> EnumerateChildren(AutomationElement parent)
+        {
+            AutomationElementCollection controlChildren = null;
+            try
+            {
+                controlChildren = parent.FindAll(TreeScope.Children, Condition.TrueCondition);
+            }
+            catch (ElementNotAvailableException)
+            {
+                controlChildren = null;
+            }
+
+            if (controlChildren != null)
+            {
+                foreach (AutomationElement child in controlChildren)
+                {
+                    if (child != null)
+                        yield return child;
+                }
+            }
+
+            // Some Live Captions builds expose the text only in the raw tree.
+            // Fall back to RawViewWalker so that we do not miss virtualized nodes.
+            try
+            {
+                var walker = TreeWalker.RawViewWalker;
+                var rawChild = walker.GetFirstChild(parent);
+                while (rawChild != null)
+                {
+                    bool duplicate = false;
+                    if (controlChildren != null)
+                    {
+                        foreach (AutomationElement child in controlChildren)
+                        {
+                            if (AreSameElement(rawChild, child))
+                            {
+                                duplicate = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!duplicate)
+                        yield return rawChild;
+
+                    rawChild = walker.GetNextSibling(rawChild);
+                }
+            }
+            catch (ElementNotAvailableException)
+            {
+            }
+        }
+
+        string GetRuntimeIdKey(AutomationElement element)
+        {
+            try
+            {
+                var runtimeId = element.GetRuntimeId();
+                if (runtimeId == null || runtimeId.Length == 0)
+                    return null;
+
+                return string.Join("_", runtimeId);
+            }
+            catch (ElementNotAvailableException)
+            {
+                return null;
+            }
+        }
+
         AutomationElement FindCaptionElement()
         {
             try
             {
                 var queue = new Queue<AutomationElement>();
                 queue.Enqueue(live);
+                var visited = new HashSet<string>();
 
                 while (queue.Count > 0)
                 {
                     var current = queue.Dequeue();
                     if (current == null) continue;
+
+                    var key = GetRuntimeIdKey(current);
+                    if (key != null)
+                    {
+                        if (visited.Contains(key))
+                            continue;
+
+                        visited.Add(key);
+                    }
 
                     try
                     {
@@ -116,17 +209,7 @@ class Program
                         continue;
                     }
 
-                    AutomationElementCollection children;
-                    try
-                    {
-                        children = current.FindAll(TreeScope.Children, Condition.TrueCondition);
-                    }
-                    catch (ElementNotAvailableException)
-                    {
-                        continue;
-                    }
-
-                    foreach (AutomationElement child in children)
+                    foreach (var child in EnumerateChildren(current))
                     {
                         queue.Enqueue(child);
                     }
