@@ -1,19 +1,21 @@
-using System;
-using System.Collections.Generic;
+﻿using System;
+using System.Text;
 using System.Threading;
 using System.Windows.Automation;
 
 class Program
 {
+    [STAThread]
     static void Main()
     {
-        Console.OutputEncoding = System.Text.Encoding.UTF8;
+        Console.OutputEncoding = Encoding.UTF8;
         Console.WriteLine("🔍 正在查找 Live Captions 窗口…");
 
+        // 1️⃣ 查找 Live Captions 主窗口
         var root = AutomationElement.RootElement;
         var live = root.FindFirst(TreeScope.Subtree,
             new OrCondition(
-                new PropertyCondition(AutomationElement.NameProperty, "Live Captions"),
+                new PropertyCondition(AutomationElement.NameProperty, "Live Captions", PropertyConditionFlags.IgnoreCase),
                 new PropertyCondition(AutomationElement.NameProperty, "实时字幕"),
                 new PropertyCondition(AutomationElement.NameProperty, "实时辅助字幕")
             ));
@@ -25,402 +27,146 @@ class Program
         }
 
         Console.WriteLine("✅ 找到字幕窗口！");
+
+        // 2️⃣ 查找 CaptionsTextBlock 元素
+        var captionsBlock = FindCaptionsBlock(live);
+        if (captionsBlock == null)
+        {
+            Console.WriteLine("⚠️ 未找到 CaptionsTextBlock 控件。请确认系统版本支持此 AutomationId。");
+            return;
+        }
+
+        Console.WriteLine("✅ 找到字幕文本控件 CaptionsTextBlock！");
         Console.WriteLine("📡 正在监听字幕变化…");
 
-        AutomationElement captionElement = null;
-        AutomationEventHandler textChangedHandler = null;
-        AutomationPropertyChangedEventHandler valueChangedHandler = null;
-        AutomationEventHandler liveRegionChangedHandler = null;
-        string lastText = string.Empty;
+        string lastText = "";
+        string stableSentence = "";
+        DateTime lastChange = DateTime.Now;
+        bool sentenceSent = false;
 
-        void RemoveHandlers()
+        // 🧩 LiveRegionChanged 事件监听
+        AutomationEventHandler liveRegionChanged = (sender, e) =>
         {
-            if (captionElement == null) return;
-
-            if (textChangedHandler != null)
-            {
-                Automation.RemoveAutomationEventHandler(TextPattern.TextChangedEvent, captionElement, textChangedHandler);
-                textChangedHandler = null;
-            }
-
-            if (valueChangedHandler != null)
-            {
-                Automation.RemoveAutomationPropertyChangedEventHandler(captionElement, valueChangedHandler);
-                valueChangedHandler = null;
-            }
-
-            if (liveRegionChangedHandler != null)
-            {
-                Automation.RemoveAutomationEventHandler(AutomationElementIdentifiers.LiveRegionChangedEvent, captionElement, liveRegionChangedHandler);
-                liveRegionChangedHandler = null;
-            }
-        }
-
-        void OutputCaption(string caption)
-        {
-            caption = caption?.Trim();
-            if (!string.IsNullOrEmpty(caption) && caption != lastText)
-            {
-                Console.WriteLine($"[字幕] {caption}");
-                lastText = caption;
-            }
-        }
-
-        string TryReadText(AutomationElement element)
-        {
-            if (element == null)
-                return string.Empty;
-
             try
             {
-                if (element.TryGetCurrentPattern(TextPattern.Pattern, out var textObj) && textObj is TextPattern textPattern)
+                var src = sender as AutomationElement ?? captionsBlock;
+                if (src == null) return;
+
+                string text = src.Current.Name?.Trim() ?? "";
+                if (!string.IsNullOrEmpty(text) && text != lastText)
                 {
-                    return textPattern.DocumentRange.GetText(-1);
+                    lastChange = DateTime.Now;
+                    stableSentence = text;
+                    lastText = text;
+                    sentenceSent = false;
                 }
-
-                if (element.TryGetCurrentPattern(ValuePattern.Pattern, out var valueObj) && valueObj is ValuePattern valuePattern)
-                {
-                    return valuePattern.Current.Value;
-                }
-            }
-            catch (ElementNotAvailableException)
-            {
-                return string.Empty;
-            }
-            catch (InvalidOperationException)
-            {
-                return string.Empty;
-            }
-
-            return string.Empty;
-        }
-
-        bool AreSameElement(AutomationElement a, AutomationElement b)
-        {
-            if (a == null || b == null) return false;
-            try
-            {
-                return a.Equals(b);
-            }
-            catch (ElementNotAvailableException)
-            {
-                return false;
-            }
-        }
-
-        IEnumerable<AutomationElement> EnumerateChildren(AutomationElement parent)
-        {
-            AutomationElementCollection controlChildren = null;
-            try
-            {
-                controlChildren = parent.FindAll(TreeScope.Children, Condition.TrueCondition);
-            }
-            catch (ElementNotAvailableException)
-            {
-                controlChildren = null;
-            }
-
-            if (controlChildren != null)
-            {
-                foreach (AutomationElement child in controlChildren)
-                {
-                    if (child != null)
-                        yield return child;
-                }
-            }
-
-            foreach (var rawChild in EnumerateRawChildren(parent, controlChildren))
-            {
-                yield return rawChild;
-            }
-        }
-
-        IEnumerable<AutomationElement> EnumerateRawChildren(AutomationElement parent, AutomationElementCollection controlChildren)
-        {
-            var results = new List<AutomationElement>();
-
-            try
-            {
-                // Some Live Captions builds expose the text only in the raw tree.
-                // Fall back to RawViewWalker so that we do not miss virtualized nodes.
-                var walker = TreeWalker.RawViewWalker;
-                var rawChild = walker.GetFirstChild(parent);
-                while (rawChild != null)
-                {
-                    bool duplicate = false;
-                    if (controlChildren != null)
-                    {
-                        foreach (AutomationElement child in controlChildren)
-                        {
-                            if (AreSameElement(rawChild, child))
-                            {
-                                duplicate = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (!duplicate)
-                    {
-                        results.Add(rawChild);
-                    }
-
-                    rawChild = walker.GetNextSibling(rawChild);
-                }
-            }
-            catch (ElementNotAvailableException)
-            {
-            }
-
-            return results;
-        }
-
-        string GetRuntimeIdKey(AutomationElement element)
-        {
-            try
-            {
-                var runtimeId = element.GetRuntimeId();
-                if (runtimeId == null || runtimeId.Length == 0)
-                    return null;
-
-                return string.Join("_", runtimeId);
-            }
-            catch (ElementNotAvailableException)
-            {
-                return null;
-            }
-        }
-
-        AutomationElement FindCaptionElement()
-        {
-            try
-            {
-                var queue = new Queue<AutomationElement>();
-                queue.Enqueue(live);
-                var visited = new HashSet<string>();
-                AutomationElement bestCandidate = null;
-                int bestScore = int.MinValue;
-
-                while (queue.Count > 0)
-                {
-                    var current = queue.Dequeue();
-                    if (current == null) continue;
-
-                    var key = GetRuntimeIdKey(current);
-                    if (key != null)
-                    {
-                        if (visited.Contains(key))
-                            continue;
-
-                        visited.Add(key);
-                    }
-
-                    bool supportsText = false;
-                    bool supportsValue = false;
-                    try
-                    {
-                        supportsText = current.TryGetCurrentPattern(TextPattern.Pattern, out _);
-                        supportsValue = current.TryGetCurrentPattern(ValuePattern.Pattern, out _);
-                    }
-                    catch (ElementNotAvailableException)
-                    {
-                        continue;
-                    }
-
-                    if (supportsText || supportsValue)
-                    {
-                        int score = 0;
-                        string preview = string.Empty;
-
-                        if (supportsText)
-                            score += 2;
-
-                        if (supportsValue)
-                            score += 1;
-
-                        try
-                        {
-                            preview = TryReadText(current);
-                        }
-                        catch
-                        {
-                            preview = string.Empty;
-                        }
-
-                        if (!string.IsNullOrWhiteSpace(preview))
-                        {
-                            score += 5;
-                        }
-
-                        try
-                        {
-                            var controlType = current.Current.ControlType;
-                            if (controlType == ControlType.Document || controlType == ControlType.Text)
-                                score += 3;
-                        }
-                        catch (ElementNotAvailableException)
-                        {
-                        }
-
-                        if (score > bestScore)
-                        {
-                            bestScore = score;
-                            bestCandidate = current;
-
-                            if (score >= 5 && !string.IsNullOrWhiteSpace(preview))
-                                return current;
-                        }
-                    }
-
-                    foreach (var child in EnumerateChildren(current))
-                    {
-                        queue.Enqueue(child);
-                    }
-                }
-
-                if (bestCandidate != null)
-                    return bestCandidate;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"⚠️ 搜索字幕控件失败: {ex.Message}");
+                Console.WriteLine($"⚠️ 事件读取失败: {ex.Message}");
             }
+        };
 
-            return null;
-        }
+        Automation.AddAutomationEventHandler(
+            AutomationElementIdentifiers.LiveRegionChangedEvent,
+            captionsBlock,
+            TreeScope.Element,
+            liveRegionChanged
+        );
 
-        void AttachToElement(AutomationElement element)
+        // 3️⃣ 主循环 - 检测稳定文本并输出完整句
+        while (true)
         {
-            RemoveHandlers();
-            captionElement = element;
-
-            if (captionElement == null)
-            {
-                return;
-            }
-
-            bool hasTextPattern = captionElement.TryGetCurrentPattern(TextPattern.Pattern, out var textPatternObj);
-            bool hasValuePattern = captionElement.TryGetCurrentPattern(ValuePattern.Pattern, out var valuePatternObj);
-
-            liveRegionChangedHandler = (sender, e) =>
-            {
-                try
-                {
-                    var source = sender as AutomationElement ?? captionElement;
-                    if (source == null) return;
-                    var updated = TryReadText(source);
-                    if (string.IsNullOrEmpty(updated) && !ReferenceEquals(source, captionElement))
-                        updated = TryReadText(captionElement);
-                    OutputCaption(updated);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"⚠️ 文本读取失败: {ex.Message}");
-                }
-            };
-
             try
             {
-                Automation.AddAutomationEventHandler(AutomationElementIdentifiers.LiveRegionChangedEvent, captionElement, TreeScope.Element, liveRegionChangedHandler);
-            }
-            catch (Exception)
-            {
-                liveRegionChangedHandler = null;
-            }
+                string current = captionsBlock.Current.Name?.Trim() ?? "";
 
-            if (hasTextPattern && textPatternObj is TextPattern textPattern)
-            {
-                textChangedHandler = (sender, e) =>
+                if (!string.IsNullOrEmpty(current))
                 {
-                    try
+                    // 如果字幕变化
+                    if (current != lastText)
                     {
-                        var source = sender as AutomationElement ?? captionElement;
-                        if (source == null) return;
-                        if (!source.TryGetCurrentPattern(TextPattern.Pattern, out var patternObj) || patternObj is not TextPattern pattern)
-                            return;
-
-                        string caption = pattern.DocumentRange.GetText(-1);
-                        OutputCaption(caption);
+                        lastChange = DateTime.Now;
+                        stableSentence = current;
+                        lastText = current;
+                        sentenceSent = false;
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        Console.WriteLine($"⚠️ 文本读取失败: {ex.Message}");
+                        // 若 1 秒无变化且还没发，说明一句结束
+                        if (!sentenceSent && (DateTime.Now - lastChange).TotalMilliseconds > 1000)
+                        {
+                            if (IsSentenceEnd(stableSentence))
+                            {
+                                SendSentence(stableSentence);
+                                sentenceSent = true;
+                            }
+                        }
                     }
-                };
-
-                Automation.AddAutomationEventHandler(TextPattern.TextChangedEvent, captionElement, TreeScope.Element, textChangedHandler);
-
-                try
-                {
-                    OutputCaption(textPattern.DocumentRange.GetText(-1));
                 }
-                catch (Exception ex)
+                else
                 {
-                    Console.WriteLine($"⚠️ 文本读取失败: {ex.Message}");
-                }
-            }
-            else if (hasValuePattern && valuePatternObj is ValuePattern valuePattern)
-            {
-                valueChangedHandler = (sender, e) =>
-                {
-                    if (e.Property != ValuePattern.ValueProperty)
-                        return;
-
-                    try
+                    // Live Captions 清空 → 上一句结束
+                    if (!sentenceSent && !string.IsNullOrEmpty(stableSentence))
                     {
-                        var source = sender as AutomationElement ?? captionElement;
-                        if (source == null) return;
-                        if (!source.TryGetCurrentPattern(ValuePattern.Pattern, out var patternObj) || patternObj is not ValuePattern vp)
-                            return;
-
-                        OutputCaption(vp.Current.Value);
+                        SendSentence(stableSentence);
+                        sentenceSent = true;
                     }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"⚠️ 文本读取失败: {ex.Message}");
-                    }
-                };
 
-                Automation.AddAutomationPropertyChangedEventHandler(captionElement, TreeScope.Element, valueChangedHandler, ValuePattern.ValueProperty);
-
-                try
-                {
-                    OutputCaption(valuePattern.Current.Value);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"⚠️ 文本读取失败: {ex.Message}");
+                    lastText = "";
+                    stableSentence = "";
                 }
             }
-            else
+            catch (ElementNotAvailableException)
             {
-                Console.WriteLine("⚠️ 找到字幕控件但不支持 TextPattern 或 ValuePattern。");
+                Console.WriteLine("⚠️ 控件失效，尝试重新查找…");
+                captionsBlock = FindCaptionsBlock(live);
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ 错误: {ex.Message}");
+            }
+
+            Thread.Sleep(150); // 每秒约7次检查
         }
+    }
 
-        var initialElement = FindCaptionElement();
-        if (initialElement == null)
+    // ✅ 句尾标点检测函数
+    static bool IsSentenceEnd(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+        char last = text[^1];
+        return ".!?。？！".Contains(last);
+    }
+
+    // ✅ 输出或发MQTT的统一函数
+    static void SendSentence(string sentence)
+    {
+        sentence = sentence.Trim();
+        if (string.IsNullOrEmpty(sentence)) return;
+
+        Console.WriteLine($"🗣 完整句: {sentence}");
+
+        // ⚙️ 这里可以发布到 MQTT
+        // var payload = Encoding.UTF8.GetBytes(sentence);
+        // mqttClient.Publish("captions/output", payload);
+    }
+
+    // ✅ 查找 CaptionsTextBlock
+    static AutomationElement FindCaptionsBlock(AutomationElement live)
+    {
+        try
         {
-            Console.WriteLine("⚠️ 未找到字幕文本控件，等待窗口更新…");
+            var element = live.FindFirst(
+                TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.AutomationIdProperty, "CaptionsTextBlock")
+            );
+            return element;
         }
-        else
+        catch (Exception ex)
         {
-            Console.WriteLine("✅ 找到字幕文本控件！");
-            AttachToElement(initialElement);
+            Console.WriteLine($"⚠️ 查找 CaptionsTextBlock 出错: {ex.Message}");
+            return null;
         }
-
-        var structureHandler = new StructureChangedEventHandler((sender, e) =>
-        {
-            var updatedElement = FindCaptionElement();
-            if (updatedElement != null && !updatedElement.Equals(captionElement))
-            {
-                Console.WriteLine("🔄 检测到字幕控件变化，重新绑定。");
-                AttachToElement(updatedElement);
-            }
-        });
-
-        Automation.AddStructureChangedEventHandler(live, TreeScope.Subtree, structureHandler);
-
-        while (true) Thread.Sleep(100);
     }
 }
