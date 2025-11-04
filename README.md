@@ -140,6 +140,15 @@ Robot_opr text-to-speech or speaker pipeline can read the generated replies
 back to the patient, keeping the voice-first flow inside a single MQTT/
 HTTP-based loop.
 
+## Windows Live Captions bridge
+
+If you need to surface Windows 11 Live Captions inside the Unity experience—for
+example when running the agent on a kiosk that already uses Live Captions for
+system speech—refer to [`docs/LIVE_CAPTIONS_BRIDGE.md`](docs/LIVE_CAPTIONS_BRIDGE.md)
+for a UI Automation listener, sentence assembly logic and Unity ingestion
+examples. The guide also includes startup automation tips and transport options
+for forwarding captioned sentences into the voice agent runtime.
+
 ## Troubleshooting
 
 * **No speech detected** – Confirm the microphone permissions are granted and
