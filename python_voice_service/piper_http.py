@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import subprocess
@@ -49,7 +50,8 @@ def _run_piper_subprocess(text: str) -> bytes:
         try:
             completed = subprocess.run(
                 cmd,
-                input=text.encode("utf-8"),
+                input=f"{text}\n",
+                text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
@@ -58,7 +60,7 @@ def _run_piper_subprocess(text: str) -> bytes:
             raise HTTPException(status_code=500, detail=f"Failed to launch Piper: {exc}") from exc
 
         if completed.returncode != 0:
-            raise HTTPException(status_code=500, detail=completed.stderr.decode("utf-8", errors="ignore"))
+            raise HTTPException(status_code=500, detail=completed.stderr.strip())
         if not out_path.exists():
             raise HTTPException(status_code=500, detail="Piper did not produce output")
 
@@ -67,7 +69,7 @@ def _run_piper_subprocess(text: str) -> bytes:
 
 async def _synthesize_audio(text: str) -> tuple[bytes, int]:
     sample_rate = int(_env("PIPER_SAMPLE_RATE", "22050"))
-    audio_bytes = _run_piper_subprocess(text)
+    audio_bytes = await asyncio.to_thread(_run_piper_subprocess, text)
     return audio_bytes, sample_rate
 
 
