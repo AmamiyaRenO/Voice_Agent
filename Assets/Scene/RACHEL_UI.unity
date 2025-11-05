@@ -250,6 +250,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 6e1e806f290598b4c9b32a8f656b6257, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  disablePublishing: 1
   host: 10.0.0.1
   port: 1883
   username: 
@@ -381,6 +382,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 6e1e806f290598b4c9b32a8f656b6257, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  disablePublishing: 1
   host: 127.0.0.1
   port: 1883
   username: 
@@ -1888,7 +1890,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1489373248}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f217616079a9a74489a1ae3cd9178787, type: 3}
   m_Name: 
@@ -1915,8 +1917,10 @@ MonoBehaviour:
   - cloth
   - shut down
   - Notebook
-  - Frisbee
+  - disc golf
+  - discgolf
   - Cornhole
+  - Frisbee
   - bee
   - robot
 --- !u!114 &1489373251
@@ -1926,7 +1930,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1489373248}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 25e7af3cdcf19cc4cb008d0c0052ab6c, type: 3}
   m_Name: 
@@ -1971,11 +1975,12 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1489373248}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 6e1e806f290598b4c9b32a8f656b6257, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  disablePublishing: 1
   host: 127.0.0.1
   port: 1883
   username: 

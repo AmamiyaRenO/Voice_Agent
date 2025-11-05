@@ -165,6 +165,42 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Working directory for the Piper HTTP wrapper service.",
     )
     parser.add_argument(
+        "--intent-cmd",
+        default=os.environ.get(
+            "VOICE_AGENT_INTENT_CMD",
+            sys.executable + " " + str(Path(__file__).resolve().parents[0] / "intent_service" / "main.py"),
+        ),
+        help=(
+            "Optional command used to start the intent recognition service. "
+            "Set VOICE_AGENT_INTENT_CMD or pass --intent-cmd to enable it."
+        ),
+    )
+    parser.add_argument(
+        "--intent-dir",
+        default=os.environ.get(
+            "VOICE_AGENT_INTENT_CWD", str(Path(__file__).resolve().parents[0] / "intent_service")
+        ),
+        help="Working directory for the intent recognition service.",
+    )
+    parser.add_argument(
+        "--dialog-cmd",
+        default=os.environ.get(
+            "VOICE_AGENT_DIALOG_CMD",
+            sys.executable + " " + str(Path(__file__).resolve().parents[0] / "dialog_service" / "main.py"),
+        ),
+        help=(
+            "Optional command used to start the dialog (LLM+TTS) service. "
+            "Set VOICE_AGENT_DIALOG_CMD or pass --dialog-cmd to enable it."
+        ),
+    )
+    parser.add_argument(
+        "--dialog-dir",
+        default=os.environ.get(
+            "VOICE_AGENT_DIALOG_CWD", str(Path(__file__).resolve().parents[0] / "dialog_service")
+        ),
+        help="Working directory for the dialog (LLM+TTS) service.",
+    )
+    parser.add_argument(
         "--env-file",
         type=Path,
         help="Optional .env style file whose variables are exported before launching the services.",
@@ -194,6 +230,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.piper_http_cmd
             else None
         )
+        intent_command = (
+            parse_command(args.intent_cmd, windows=windows)
+            if args.intent_cmd
+            else None
+        )
+        dialog_command = (
+            parse_command(args.dialog_cmd, windows=windows)
+            if args.dialog_cmd
+            else None
+        )
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -201,6 +247,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     voice_dir = Path(args.voice_dir).resolve()
     orchestrator_dir = Path(args.orchestrator_dir).resolve()
     piper_http_dir = Path(args.piper_http_dir).resolve()
+    intent_dir = Path(args.intent_dir).resolve()
+    dialog_dir = Path(args.dialog_dir).resolve()
 
     if not hub_dir.exists():
         parser.error(f"Hub directory does not exist: {hub_dir}")
@@ -210,6 +258,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error(f"Orchestrator directory does not exist: {orchestrator_dir}")
     if piper_http_command is not None and not piper_http_dir.exists():
         parser.error(f"Piper HTTP directory does not exist: {piper_http_dir}")
+    if intent_command is not None and not intent_dir.exists():
+        parser.error(f"Intent service directory does not exist: {intent_dir}")
+    if dialog_command is not None and not dialog_dir.exists():
+        parser.error(f"Dialog service directory does not exist: {dialog_dir}")
 
     env = os.environ.copy()
     if args.env_file is not None:
@@ -222,6 +274,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         handles.append(ProcessHandle("orchestrator", orchestrator_command, orchestrator_dir))
     if piper_http_command is not None:
         handles.append(ProcessHandle("piper-http", piper_http_command, piper_http_dir))
+    if intent_command is not None:
+        handles.append(ProcessHandle("intent-service", intent_command, intent_dir))
+    if dialog_command is not None:
+        handles.append(ProcessHandle("dialog-service", dialog_command, dialog_dir))
 
     terminator = GracefulTerminator(handles)
     signal.signal(signal.SIGINT, terminator)

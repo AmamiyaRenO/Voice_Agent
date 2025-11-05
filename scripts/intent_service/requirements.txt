@@ -1,0 +1,4 @@
+paho-mqtt==2.0.0
+PyYAML==6.0.2
+rapidfuzz==3.9.5
+

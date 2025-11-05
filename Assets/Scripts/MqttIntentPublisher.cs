@@ -11,6 +11,9 @@ namespace RobotVoice
 {
     public class MqttIntentPublisher : MonoBehaviour
     {
+        [Header("Publishing Control")]
+        [SerializeField, Tooltip("Disable Unity-side MQTT intent publishing to avoid duplication with external pipeline")] 
+        private bool disablePublishing = true;
         [Header("MQTT Broker")]
         [SerializeField] private string host = "127.0.0.1";
         [SerializeField] private int port = 1883;
@@ -48,6 +51,10 @@ namespace RobotVoice
 
         private async void Start()
         {
+            if (disablePublishing)
+            {
+                return;
+            }
             if (autoConnectOnStart)
             {
                 await EnsureConnectedAsync();
@@ -76,6 +83,7 @@ namespace RobotVoice
 
         public async Task EnsureConnectedAsync()
         {
+            if (disablePublishing) return;
             if (client == null)
             {
                 InitialiseClient();
@@ -131,6 +139,7 @@ namespace RobotVoice
 
         public async Task PublishLaunchIntentAsync(string gameName, string rawText)
         {
+            if (disablePublishing) return;
             if (string.IsNullOrWhiteSpace(gameName))
             {
                 Debug.LogWarning("[RobotVoice] Ignoring empty game name");
@@ -143,6 +152,7 @@ namespace RobotVoice
 
         public async Task PublishExitIntentAsync(string rawText)
         {
+            if (disablePublishing) return;
             var payload = BuildExitPayload(rawText);
             await PublishAsync(payload);
         }
@@ -150,6 +160,7 @@ namespace RobotVoice
         // Raw publish helper for custom topics (e.g., robot/pi/*)
         public async Task PublishRawAsync(string topic, string payload, SimpleMqttQualityOfServiceLevel qos = SimpleMqttQualityOfServiceLevel.AtLeastOnce)
         {
+            if (disablePublishing) return;
             if (string.IsNullOrWhiteSpace(topic))
             {
                 Debug.LogWarning("[RobotVoice] Raw publish ignored: empty topic");
@@ -435,6 +446,8 @@ namespace RobotVoice
     public class MqttIntentPublisher : MonoBehaviour
     {
         [Header("MQTT disabled (define ROBOTVOICE_USE_MQTT to enable)")]
+        [SerializeField, Tooltip("Disable Unity-side intent publishing to avoid duplication")] 
+        private bool disablePublishing = true;
         [SerializeField] private string sourceLabel = "unity_vosk";
 
         public Task EnsureConnectedAsync()
@@ -444,6 +457,7 @@ namespace RobotVoice
 
         public Task PublishLaunchIntentAsync(string gameName, string rawText)
         {
+            if (disablePublishing) return Task.CompletedTask;
             if (!string.IsNullOrWhiteSpace(gameName))
             {
                 Debug.Log($"[RobotVoice] (No MQTT) LAUNCH_GAME game='{gameName}' source='{sourceLabel}' raw='{rawText}'");
@@ -453,6 +467,7 @@ namespace RobotVoice
 
         public Task PublishExitIntentAsync(string rawText)
         {
+            if (disablePublishing) return Task.CompletedTask;
             Debug.Log($"[RobotVoice] (No MQTT) BACK_HOME source='{sourceLabel}' raw='{rawText}'");
             return Task.CompletedTask;
         }

@@ -10,6 +10,17 @@ using System.Threading.Tasks;
 
 class Program
 {
+    // 简单去重：避免短时间内重复发布相同文本
+    static string lastPublished = "";
+    static DateTime lastPublishedAt = DateTime.MinValue;
+
+    // TTS 抑制：订阅 robot/tts/state 后在 speaking=true 期间停止发布
+    static volatile bool ttsSpeaking = false;
+    static DateTime ttsLastUpdateUtc = DateTime.MinValue;
+    static int ttsSuppressTailMs = 1200; // TTS 结束后再抑制一小段时间
+    static string ttsLastTextLower = ""; // 最近一次 TTS 文本（小写）
+    static int ttsEchoWindowMs = 3000; // 在此窗口内做文本级回声过滤
+
     [STAThread]
     static void Main()
     {
@@ -22,6 +33,25 @@ class Program
         else
         {
             Console.WriteLine("[MQTT] 未启用（设置 LIVE_CAPTIONS_MQTT_TOPIC 可开启发布）。");
+        }
+
+        // TTS 抑制窗口配置
+        int tail;
+        if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_TTS_SUPPRESS_MS"), out tail) && tail >= 0)
+        {
+            ttsSuppressTailMs = tail;
+        }
+        int echoMs;
+        if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_TTS_ECHO_MS"), out echoMs) && echoMs >= 0)
+        {
+            ttsEchoWindowMs = echoMs;
+        }
+
+        // 启动 TTS 状态订阅（可选）
+        if (!string.IsNullOrWhiteSpace(mqttConfig.TtsStateTopic))
+        {
+            Console.WriteLine($"[MQTT] 订阅 TTS 状态: {mqttConfig.TtsStateTopic}");
+            _ = System.Threading.Tasks.Task.Run(() => MqttTtsSubscriber.RunAsync(mqttConfig, OnTtsStateMessageInternal));
         }
 
         Console.OutputEncoding = Encoding.UTF8;
@@ -68,7 +98,9 @@ class Program
                 var src = sender as AutomationElement ?? captionsBlock;
                 if (src == null) return;
 
-                string text = src.Current.Name?.Trim() ?? "";
+                if (IsTtsActive()) return;
+                string raw = ReadCaptionText(src);
+                string text = CleanToLastLine(raw);
                 if (!string.IsNullOrEmpty(text) && text != lastText)
                 {
                     lastChange = DateTime.Now;
@@ -95,7 +127,13 @@ class Program
         {
             try
             {
-                string current = captionsBlock.Current.Name?.Trim() ?? "";
+                if (IsTtsActive())
+                {
+                    Thread.Sleep(50);
+                    continue;
+                }
+
+                string current = CleanToLastLine(ReadCaptionText(captionsBlock));
 
                 if (!string.IsNullOrEmpty(current))
                 {
@@ -158,12 +196,26 @@ class Program
     // ✅ 输出或发MQTT的统一函数
     static void SendSentence(string sentence)
     {
-        sentence = sentence.Trim();
+        sentence = CleanToLastLine(sentence);
         if (string.IsNullOrEmpty(sentence)) return;
+
+        if (IsTtsActive()) return; // 播报时严格抑制
+
+        // 若高度疑似为 TTS 回声，也不发送
+        if (IsLikelyTtsEcho(sentence))
+        {
+            return;
+        }
+
+        // 3 秒内相同文本不再发送
+        if (sentence == lastPublished && (DateTime.UtcNow - lastPublishedAt).TotalSeconds < 3)
+            return;
+        lastPublished = sentence;
+        lastPublishedAt = DateTime.UtcNow;
 
         Console.WriteLine($"🗣 完整句: {sentence}");
 
-        // ⚙️ 发布到 MQTT（JSON 负载，与 LiveCaptionsBridge 保持一致）
+        // ⚙️ 发布到 MQTT（JSON 负载）
         if (mqttConfig.Enabled)
         {
             try
@@ -214,6 +266,92 @@ class Program
         }
     }
 
+    // ✅ 读取字幕文本：优先使用 TextPattern；退化到 Name
+    static string ReadCaptionText(AutomationElement element)
+    {
+        try
+        {
+            object patternObj;
+            if (element.TryGetCurrentPattern(TextPattern.Pattern, out patternObj))
+            {
+                var tp = (TextPattern)patternObj;
+                string all = tp.DocumentRange.GetText(-1) ?? string.Empty;
+                return all.Trim();
+            }
+        }
+        catch { }
+        string name = element.Current.Name ?? string.Empty;
+        return name.Trim();
+    }
+
+    // ✅ 仅取最后一行，去掉历史行
+    static string CleanToLastLine(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+        var parts = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        for (int i = parts.Length - 1; i >= 0; i--)
+        {
+            string line = parts[i].Trim();
+            if (!string.IsNullOrEmpty(line)) return line;
+        }
+        return text.Trim();
+    }
+
+    // ✅ TTS 状态回调与抑制判定
+    static void OnTtsStateMessageInternal(bool speaking, string text)
+    {
+        ttsSpeaking = speaking;
+        ttsLastUpdateUtc = DateTime.UtcNow;
+        if (speaking)
+        {
+            // 清空缓冲，避免 TTS 期间累积的旧片段被发出
+            try { /* 局部变量在 Main 中，这里无法直接清空 */ } catch { }
+            ttsLastTextLower = (text ?? string.Empty).Trim().ToLowerInvariant();
+        }
+        else
+        {
+            // 结束后仍保留文本用于尾随抑制匹配
+            if (!string.IsNullOrEmpty(text))
+                ttsLastTextLower = text.Trim().ToLowerInvariant();
+        }
+    }
+
+    static bool IsTtsActive()
+    {
+        if (ttsSpeaking) return true;
+        if (ttsLastUpdateUtc == DateTime.MinValue) return false;
+        return (DateTime.UtcNow - ttsLastUpdateUtc).TotalMilliseconds < ttsSuppressTailMs;
+    }
+
+    static bool IsLikelyTtsEcho(string sentence)
+    {
+        if (string.IsNullOrWhiteSpace(sentence) || string.IsNullOrWhiteSpace(ttsLastTextLower)) return false;
+        if ((DateTime.UtcNow - ttsLastUpdateUtc).TotalMilliseconds > ttsEchoWindowMs) return false;
+        string s = sentence.Trim().ToLowerInvariant();
+        if (s.Length < 6 || ttsLastTextLower.Length < 6) return false;
+        if (ttsLastTextLower.Contains(s)) return true;
+        if (s.Contains(ttsLastTextLower)) return true;
+        // 简单重叠判断：若交集子串长度>=句子长度的60%
+        int common = LongestCommonSubsequenceLength(s, ttsLastTextLower);
+        if (common * 10 >= s.Length * 6) return true;
+        return false;
+    }
+
+    static int LongestCommonSubsequenceLength(string a, string b)
+    {
+        int n = a.Length, m = b.Length;
+        int[,] dp = new int[n + 1, m + 1];
+        for (int i = 1; i <= n; i++)
+        {
+            for (int j = 1; j <= m; j++)
+            {
+                if (a[i - 1] == b[j - 1]) dp[i, j] = dp[i - 1, j - 1] + 1;
+                else dp[i, j] = dp[i - 1, j] > dp[i, j - 1] ? dp[i - 1, j] : dp[i, j - 1];
+            }
+        }
+        return dp[n, m];
+    }
+
     // --- MQTT CONFIG & SIMPLE PUBLISHER ---
     static MqttConfig mqttConfig = MqttConfig.Disabled;
 
@@ -227,15 +365,17 @@ class Program
             Topic = "";
             ClientId = $"live-captions-{Environment.MachineName}";
             SourceLabel = "live_captions";
+            TtsStateTopic = "robot/tts/state";
         }
 
-        private MqttConfig(string host, int port, string topic, string clientId, string source)
+        private MqttConfig(string host, int port, string topic, string clientId, string source, string ttsStateTopic)
         {
             Host = host;
             Port = port;
             Topic = topic;
             ClientId = clientId;
             SourceLabel = source;
+            TtsStateTopic = ttsStateTopic;
             Enabled = !string.IsNullOrWhiteSpace(topic);
         }
 
@@ -245,16 +385,18 @@ class Program
         public string Topic { get; }
         public string ClientId { get; }
         public string SourceLabel { get; }
+        public string TtsStateTopic { get; }
 
         public static MqttConfig Disabled { get; } = new MqttConfig();
 
         public static MqttConfig FromEnvironment()
         {
             string host = Environment.GetEnvironmentVariable("LIVE_CAPTIONS_MQTT_HOST") ?? "127.0.0.1";
-            string topic = Environment.GetEnvironmentVariable("LIVE_CAPTIONS_MQTT_TOPIC") ?? "robot/live_captions";
+            string topic = Environment.GetEnvironmentVariable("LIVE_CAPTIONS_MQTT_TOPIC") ?? "robot/voice/text";
             string clientId = Environment.GetEnvironmentVariable("LIVE_CAPTIONS_MQTT_CLIENT_ID") ?? $"live-captions-{Environment.MachineName}";
             string source = Environment.GetEnvironmentVariable("LIVE_CAPTIONS_SOURCE_LABEL") ?? "live_captions";
-            return new MqttConfig(host, 1883, topic, clientId, source);
+            string ttsStateTopic = Environment.GetEnvironmentVariable("LIVE_CAPTIONS_TTS_STATE_TOPIC") ?? "robot/tts/state";
+            return new MqttConfig(host, 1883, topic, clientId, source, ttsStateTopic);
         }
     }
 
@@ -277,6 +419,7 @@ class Program
 
             byte[] disconnect = new byte[] { 0xE0, 0x00 };
             await stream.WriteAsync(disconnect, 0, disconnect.Length, token);
+            Console.WriteLine($"[MQTT] 已发布: {config.Topic} ({payload.Length}B)");
         }
 
         static byte[] BuildConnectPacket(MqttConfig c)
@@ -308,7 +451,10 @@ class Program
             byte[] topicBytes = Encoding.UTF8.GetBytes(topic);
             byte[] payloadBytes = Encoding.UTF8.GetBytes(payload);
             int remain = 2 + topicBytes.Length + payloadBytes.Length;
-            byte[] fixedHeader = BuildFixedHeader(0x30, remain);
+            bool retain = (Environment.GetEnvironmentVariable("LIVE_CAPTIONS_MQTT_RETAIN") ?? "0").Trim() is string r &&
+                          (r.Equals("1", StringComparison.OrdinalIgnoreCase) || r.Equals("true", StringComparison.OrdinalIgnoreCase));
+            byte header = (byte)(0x30 | (retain ? 0x01 : 0x00));
+            byte[] fixedHeader = BuildFixedHeader(header, remain);
             byte[] packet = new byte[fixedHeader.Length + remain];
             Buffer.BlockCopy(fixedHeader, 0, packet, 0, fixedHeader.Length);
             int offset = fixedHeader.Length;
@@ -340,6 +486,200 @@ class Program
             await s.ReadAsync(b, 0, 4, token);
             if (b[0] != 0x20 || b[3] != 0x00)
                 throw new IOException("MQTT broker rejected connection");
+        }
+    }
+
+    // --- Minimal MQTT subscriber for TTS state ---
+    static class MqttTtsSubscriber
+    {
+        public static async System.Threading.Tasks.Task RunAsync(MqttConfig config, System.Action<bool, string> onTtsState)
+        {
+            while (true)
+            {
+                try
+                {
+                    using var client = new System.Net.Sockets.TcpClient();
+                    await client.ConnectAsync(config.Host, config.Port);
+                    using var stream = client.GetStream();
+
+                    // CONNECT
+                    byte[] connect = BuildConnectPacketLocal(config);
+                    await stream.WriteAsync(connect, 0, connect.Length);
+                    await stream.FlushAsync();
+                    await ReadConnAckAsyncLocal(stream);
+
+                    // SUBSCRIBE to TTS state topic, packet id = 1, QoS 0
+                    byte[] subscribePacket = BuildSubscribePacket(config.TtsStateTopic, packetId: 1);
+                    await stream.WriteAsync(subscribePacket, 0, subscribePacket.Length);
+                    await stream.FlushAsync();
+
+                    // Simple read loop
+                    var buffer = new byte[8192];
+                    while (true)
+                    {
+                        int header = stream.ReadByte();
+                        if (header < 0) break;
+                        byte first = (byte)header;
+                        int remaining = ReadRemainingLength(stream);
+                        if (remaining <= 0 || remaining > buffer.Length) {
+                            // skip payload if too large
+                            SkipBytes(stream, remaining);
+                            continue;
+                        }
+                        int read = ReadExactAsync(stream, buffer, remaining);
+                        if (read != remaining) break;
+
+                        byte packetType = (byte)(first >> 4);
+                        if (packetType == 3) // PUBLISH
+                        {
+                            int idx = 0;
+                            if (remaining < 2) continue;
+                            int topicLen = (buffer[idx] << 8) | buffer[idx + 1]; idx += 2;
+                            if (topicLen < 0 || idx + topicLen > remaining) continue;
+                            string topic = System.Text.Encoding.UTF8.GetString(buffer, idx, topicLen); idx += topicLen;
+
+                            // QoS 0 assumed (no packet id)
+                            int payloadLen = remaining - idx;
+                            if (payloadLen <= 0) continue;
+                            string json = System.Text.Encoding.UTF8.GetString(buffer, idx, payloadLen);
+                            try
+                            {
+                                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                                if (doc.RootElement.TryGetProperty("speaking", out var speakingProp))
+                                {
+                                    bool speaking = speakingProp.ValueKind == System.Text.Json.JsonValueKind.True ||
+                                                    (speakingProp.ValueKind == System.Text.Json.JsonValueKind.Number && speakingProp.GetInt32() != 0);
+                                    string ttsText = null;
+                                    if (doc.RootElement.TryGetProperty("text", out var textProp) && textProp.ValueKind == System.Text.Json.JsonValueKind.String)
+                                    {
+                                        ttsText = textProp.GetString();
+                                    }
+                                    onTtsState?.Invoke(speaking, ttsText);
+                                }
+                            }
+                            catch { }
+                        }
+                        // ignore other packet types
+                    }
+                }
+                catch
+                {
+                    // backoff and retry
+                    System.Threading.Thread.Sleep(500);
+                }
+            }
+        }
+
+        static int ReadRemainingLength(System.IO.Stream s)
+        {
+            int multiplier = 1;
+            int value = 0;
+            while (true)
+            {
+                int digit = s.ReadByte();
+                if (digit < 0) return -1;
+                value += (digit & 127) * multiplier;
+                if ((digit & 128) == 0) break;
+                multiplier *= 128;
+                if (multiplier > 128*128*128) return -1;
+            }
+            return value;
+        }
+
+        static int ReadExactAsync(System.IO.Stream s, byte[] buffer, int len)
+        {
+            int total = 0;
+            while (total < len)
+            {
+                int n = s.Read(buffer, total, len - total);
+                if (n <= 0) break;
+                total += n;
+            }
+            return total;
+        }
+
+        static void SkipBytes(System.IO.Stream s, int len)
+        {
+            var tmp = new byte[1024];
+            int remaining = len;
+            while (remaining > 0)
+            {
+                int toRead = System.Math.Min(remaining, tmp.Length);
+                int n = s.Read(tmp, 0, toRead);
+                if (n <= 0) break;
+                remaining -= n;
+            }
+        }
+
+        static byte[] BuildSubscribePacket(string topic, ushort packetId)
+        {
+            byte[] topicBytes = System.Text.Encoding.UTF8.GetBytes(topic);
+            int remain = 2 + 2 + topicBytes.Length + 1; // packetId(2) + topic len(2)+topic + QoS(1)
+            var header = BuildFixedHeaderLocal(0x82, remain);
+            var packet = new byte[header.Length + remain];
+            System.Buffer.BlockCopy(header, 0, packet, 0, header.Length);
+            int offset = header.Length;
+            packet[offset++] = (byte)((packetId >> 8) & 0xFF);
+            packet[offset++] = (byte)(packetId & 0xFF);
+            packet[offset++] = (byte)((topicBytes.Length >> 8) & 0xFF);
+            packet[offset++] = (byte)(topicBytes.Length & 0xFF);
+            System.Buffer.BlockCopy(topicBytes, 0, packet, offset, topicBytes.Length);
+            offset += topicBytes.Length;
+            packet[offset++] = 0x00; // QoS 0
+            return packet;
+        }
+
+        static byte[] BuildFixedHeaderLocal(byte type, int len)
+        {
+            using var ms = new System.IO.MemoryStream();
+            ms.WriteByte(type);
+            int value = len;
+            do
+            {
+                byte encoded = (byte)(value % 128);
+                value /= 128;
+                if (value > 0) encoded |= 0x80;
+                ms.WriteByte(encoded);
+            } while (value > 0);
+            return ms.ToArray();
+        }
+
+        static byte[] BuildConnectPacketLocal(MqttConfig c)
+        {
+            byte[] clientId = System.Text.Encoding.UTF8.GetBytes(c.ClientId);
+            const int header = 10;
+            int remain = header + 2 + clientId.Length;
+            byte[] fixedHeader = BuildFixedHeaderLocal(0x10, remain);
+            byte[] packet = new byte[fixedHeader.Length + remain];
+            System.Buffer.BlockCopy(fixedHeader, 0, packet, 0, fixedHeader.Length);
+            int offset = fixedHeader.Length;
+
+            packet[offset++] = 0x00; packet[offset++] = 0x04;
+            packet[offset++] = (byte)'M'; packet[offset++] = (byte)'Q';
+            packet[offset++] = (byte)'T'; packet[offset++] = (byte)'T';
+            packet[offset++] = 0x04;      // Protocol Level 4 (3.1.1)
+            packet[offset++] = 0x02;      // Clean session
+            packet[offset++] = 0x00; packet[offset++] = 0x3C; // Keepalive 60s
+
+            packet[offset++] = (byte)((clientId.Length >> 8) & 0xFF);
+            packet[offset++] = (byte)(clientId.Length & 0xFF);
+            System.Buffer.BlockCopy(clientId, 0, packet, offset, clientId.Length);
+
+            return packet;
+        }
+
+        static async System.Threading.Tasks.Task ReadConnAckAsyncLocal(System.IO.Stream s)
+        {
+            byte[] b = new byte[4];
+            int read = 0;
+            while (read < 4)
+            {
+                int n = await s.ReadAsync(b, read, 4 - read);
+                if (n <= 0) throw new System.IO.IOException("MQTT connack read failed");
+                read += n;
+            }
+            if (b[0] != 0x20 || b[3] != 0x00)
+                throw new System.IO.IOException("MQTT broker rejected connection");
         }
     }
 }

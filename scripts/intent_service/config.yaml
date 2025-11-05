@@ -1,0 +1,43 @@
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+
+topics:
+  voice_text: robot/voice/text
+  intent: robot/intent
+  dialog_query: robot/dialog/query
+  tts_state: robot/tts/state
+
+rules:
+  require_wake_word: false
+  wake_words:
+    - "hi rachel"
+    - "hey rachel"
+    - "hello rachel"
+  fuzzy_threshold: 70   # 0-100，分数越高越严格
+  dedupe_window_sec: 1.2
+  exit_keywords:
+    - "back home"
+    - "go home"
+    - "return home"
+    - "back"
+    - "quit"
+    - "exit"
+    - "stop"
+    - "cancel"
+    - "close"
+    - "close game"
+  launch_triggers:
+    - "open "
+    - "start "
+    - "launch "
+    - "play "
+    - "begin "
+    - "load "
+
+source_label: intent_service
+
+# Optional: let intent service read Robot_opr manifest to auto-match game names/aliases
+# manifest_path: D:\unityproject\Robot_opr\config\manifest.json
+
+
