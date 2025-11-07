@@ -21,6 +21,9 @@ class Program
     static string ttsLastTextLower = ""; // 最近一次 TTS 文本（小写）
     static int ttsEchoWindowMs = 3000; // 在此窗口内做文本级回声过滤
 
+    // 语音口令门控：仅在听到 "start listening" 后才转发，"stop listening" 关闭
+    static volatile bool listeningEnabled = false; // 默认关闭，等待口令开启
+
     [STAThread]
     static void Main()
     {
@@ -207,6 +210,18 @@ class Program
             return;
         }
 
+        // 语音口令门控：先处理指令，不外发
+        if (TryHandleListeningCommand(sentence))
+        {
+            return;
+        }
+
+        // 未开启监听时，忽略普通句子
+        if (!listeningEnabled)
+        {
+            return;
+        }
+
         // 3 秒内相同文本不再发送
         if (sentence == lastPublished && (DateTime.UtcNow - lastPublishedAt).TotalSeconds < 3)
             return;
@@ -350,6 +365,35 @@ class Program
             }
         }
         return dp[n, m];
+    }
+
+    // ✅ 处理 "start listening" / "stop listening" 指令
+    static bool TryHandleListeningCommand(string sentence)
+    {
+        string norm = (sentence ?? string.Empty).Trim().ToLowerInvariant();
+        if (norm.Length == 0) return false;
+
+        // 去掉收尾标点
+        while (norm.Length > 0 && ".!?。？！".IndexOf(norm[^1]) >= 0)
+        {
+            norm = norm.Substring(0, norm.Length - 1).TrimEnd();
+        }
+
+        bool matched = false;
+        if (norm.Contains("start listening"))
+        {
+            listeningEnabled = true;
+            matched = true;
+            Console.WriteLine("[Gate] Listening enabled");
+        }
+        else if (norm.Contains("stop listening"))
+        {
+            listeningEnabled = false;
+            matched = true;
+            Console.WriteLine("[Gate] Listening disabled");
+        }
+
+        return matched;
     }
 
     // --- MQTT CONFIG & SIMPLE PUBLISHER ---

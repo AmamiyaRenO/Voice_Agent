@@ -267,6 +267,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.env_file is not None:
         apply_env_file(args.env_file, env)
 
+    # Force voice service /tts to proxy to local Piper HTTP unless explicitly changed here.
+    env["PIPER_HTTP_URL"] = "http://127.0.0.1:5005"
+    # Avoid accidental redirection to remote Piper server.
+    if "PIPER_SERVER_URL" in env:
+        env.pop("PIPER_SERVER_URL", None)
+
     hub_handle = ProcessHandle("messaging hub", hub_command, hub_dir)
     voice_handle = ProcessHandle("voice service", voice_command, voice_dir)
     handles = [hub_handle, voice_handle]
