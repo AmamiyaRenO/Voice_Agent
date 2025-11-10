@@ -6,102 +6,75 @@ using System.Globalization;
 using System.Net.Sockets;
 using System.IO;
 using System.Text.Json;
+using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Threading.Tasks;
 
 class Program
 {
-    // 简单去重：避免短时间内重复发布相同文本
+    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    private const int SW_HIDE = 0;
+
     static string lastPublished = "";
     static DateTime lastPublishedAt = DateTime.MinValue;
-
-    // TTS 抑制：订阅 robot/tts/state 后在 speaking=true 期间停止发布
     static volatile bool ttsSpeaking = false;
     static DateTime ttsLastUpdateUtc = DateTime.MinValue;
-    static int ttsSuppressTailMs = 1200; // TTS 结束后再抑制一小段时间
-    static string ttsLastTextLower = ""; // 最近一次 TTS 文本（小写）
-    static int ttsEchoWindowMs = 3000; // 在此窗口内做文本级回声过滤
-
-    // 语音口令门控：仅在听到 "start listening" 后才转发，"stop listening" 关闭
-    static volatile bool listeningEnabled = false; // 默认关闭，等待口令开启
+    static int ttsSuppressTailMs = 1200;
+    static string ttsLastTextLower = "";
+    static int ttsEchoWindowMs = 3000;
+    static volatile bool listeningEnabled = false;
+    static MqttConfig mqttConfig = MqttConfig.Disabled;
 
     [STAThread]
     static void Main()
     {
-        // MQTT 配置初始化（通过环境变量）
+        Console.OutputEncoding = Encoding.UTF8;
+
         mqttConfig = MqttConfig.FromEnvironment();
         if (mqttConfig.Enabled)
-        {
-            Console.WriteLine($"[MQTT] 将发布到 {mqttConfig.Host}:{mqttConfig.Port} topic '{mqttConfig.Topic}' as '{mqttConfig.ClientId}'.");
-        }
+            Console.WriteLine($"[MQTT] -> {mqttConfig.Host}:{mqttConfig.Port} topic '{mqttConfig.Topic}' as '{mqttConfig.ClientId}'");
         else
-        {
-            Console.WriteLine("[MQTT] 未启用（设置 LIVE_CAPTIONS_MQTT_TOPIC 可开启发布）。");
-        }
+            Console.WriteLine("[MQTT] disabled (set LIVE_CAPTIONS_MQTT_TOPIC to enable).");
 
-        // TTS 抑制窗口配置
-        int tail;
-        if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_TTS_SUPPRESS_MS"), out tail) && tail >= 0)
-        {
+        if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_TTS_SUPPRESS_MS"), out var tail) && tail >= 0)
             ttsSuppressTailMs = tail;
-        }
-        int echoMs;
-        if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_TTS_ECHO_MS"), out echoMs) && echoMs >= 0)
-        {
+        if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_TTS_ECHO_MS"), out var echoMs) && echoMs >= 0)
             ttsEchoWindowMs = echoMs;
-        }
 
-        // 启动 TTS 状态订阅（可选）
         if (!string.IsNullOrWhiteSpace(mqttConfig.TtsStateTopic))
         {
-            Console.WriteLine($"[MQTT] 订阅 TTS 状态: {mqttConfig.TtsStateTopic}");
-            _ = System.Threading.Tasks.Task.Run(() => MqttTtsSubscriber.RunAsync(mqttConfig, OnTtsStateMessageInternal));
+            Console.WriteLine($"[MQTT] subscribing TTS state: {mqttConfig.TtsStateTopic}");
+            _ = Task.Run(() => MqttTtsSubscriber.RunAsync(mqttConfig, OnTtsStateMessageInternal));
         }
 
-        Console.OutputEncoding = Encoding.UTF8;
-        Console.WriteLine("🔍 正在查找 Live Captions 窗口…");
+        Console.WriteLine("== Bootstrapping Live Captions ==");
+        var (liveWindow, captionsBlock) = BootstrapLiveCaptions();
 
-        // 1️⃣ 查找 Live Captions 主窗口
-        var root = AutomationElement.RootElement;
-        var live = root.FindFirst(TreeScope.Subtree,
-            new OrCondition(
-                new PropertyCondition(AutomationElement.NameProperty, "Live Captions", PropertyConditionFlags.IgnoreCase),
-                new PropertyCondition(AutomationElement.NameProperty, "实时字幕"),
-                new PropertyCondition(AutomationElement.NameProperty, "实时辅助字幕")
-            ));
-
-        if (live == null)
+        if (liveWindow == null)
         {
-            Console.WriteLine("❌ 未找到 Live Captions，请先按 Win + Ctrl + L 开启。");
+            Console.WriteLine("❌ Live Captions window not found. Press any key to exit.");
+            Console.ReadKey();
             return;
         }
 
-        Console.WriteLine("✅ 找到字幕窗口！");
-
-        // 2️⃣ 查找 CaptionsTextBlock 元素
-        var captionsBlock = FindCaptionsBlock(live);
         if (captionsBlock == null)
-        {
-            Console.WriteLine("⚠️ 未找到 CaptionsTextBlock 控件。请确认系统版本支持此 AutomationId。");
-            return;
-        }
-
-        Console.WriteLine("✅ 找到字幕文本控件 CaptionsTextBlock！");
-        Console.WriteLine("📡 正在监听字幕变化…");
+            Console.WriteLine("⚠️ CaptionsTextBlock not found even after enabling mic. Will retry in loop.");
+        else
+            Console.WriteLine("✅ CaptionsTextBlock ready.");
 
         string lastText = "";
         string stableSentence = "";
         DateTime lastChange = DateTime.Now;
         bool sentenceSent = false;
 
-        // 🧩 LiveRegionChanged 事件监听
         AutomationEventHandler liveRegionChanged = (sender, e) =>
         {
             try
             {
                 var src = sender as AutomationElement ?? captionsBlock;
                 if (src == null) return;
-
                 if (IsTtsActive()) return;
+
                 string raw = ReadCaptionText(src);
                 string text = CleanToLastLine(raw);
                 if (!string.IsNullOrEmpty(text) && text != lastText)
@@ -114,22 +87,43 @@ class Program
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"⚠️ 事件读取失败: {ex.Message}");
+                Console.WriteLine($"⚠️ LiveRegionChanged read failed: {ex.Message}");
             }
         };
 
-        Automation.AddAutomationEventHandler(
-            AutomationElementIdentifiers.LiveRegionChangedEvent,
-            captionsBlock,
-            TreeScope.Element,
-            liveRegionChanged
-        );
+        if (captionsBlock != null)
+        {
+            Automation.AddAutomationEventHandler(
+                AutomationElementIdentifiers.LiveRegionChangedEvent,
+                captionsBlock,
+                TreeScope.Element,
+                liveRegionChanged
+            );
+        }
 
-        // 3️⃣ 主循环 - 检测稳定文本并输出完整句
-        while (true)
+        // 参考 PowerShell 脚本：在所有顶层窗口中寻找包含 CaptionsTextBlock 的树并隐藏之
+        TryHideLiveCaptionsWindow();
+
+        Console.WriteLine("📡 Listening...");
+        for (;;)
         {
             try
             {
+                if (captionsBlock == null || !captionsBlock.Current.IsEnabled)
+                {
+                    captionsBlock = TryFindCaptionsBlockWithRetry(liveWindow, retries: 75, delayMs: 200); // ≈15s
+                    if (captionsBlock != null)
+                    {
+                        Console.WriteLine("✅ CaptionsTextBlock re-acquired.");
+                        Automation.AddAutomationEventHandler(
+                            AutomationElementIdentifiers.LiveRegionChangedEvent,
+                            captionsBlock, TreeScope.Element, liveRegionChanged);
+                        lastText = ""; stableSentence = ""; sentenceSent = false;
+                    }
+                    Thread.Sleep(200);
+                    continue;
+                }
+
                 if (IsTtsActive())
                 {
                     Thread.Sleep(50);
@@ -140,7 +134,6 @@ class Program
 
                 if (!string.IsNullOrEmpty(current))
                 {
-                    // 如果字幕变化
                     if (current != lastText)
                     {
                         lastChange = DateTime.Now;
@@ -150,7 +143,6 @@ class Program
                     }
                     else
                     {
-                        // 若 1 秒无变化且还没发，说明一句结束
                         if (!sentenceSent && (DateTime.Now - lastChange).TotalMilliseconds > 1000)
                         {
                             if (IsSentenceEnd(stableSentence))
@@ -163,32 +155,323 @@ class Program
                 }
                 else
                 {
-                    // Live Captions 清空 → 上一句结束
                     if (!sentenceSent && !string.IsNullOrEmpty(stableSentence))
                     {
                         SendSentence(stableSentence);
                         sentenceSent = true;
                     }
-
                     lastText = "";
                     stableSentence = "";
                 }
             }
             catch (ElementNotAvailableException)
             {
-                Console.WriteLine("⚠️ 控件失效，尝试重新查找…");
-                captionsBlock = FindCaptionsBlock(live);
+                captionsBlock = null;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"⚠️ 错误: {ex.Message}");
+                Console.WriteLine($"⚠️ Loop error: {ex.Message}");
             }
 
-            Thread.Sleep(150); // 每秒约7次检查
+            Thread.Sleep(120);
         }
     }
 
-    // ✅ 句尾标点检测函数
+    // ===== Bootstrap =====
+    private static (AutomationElement? live, AutomationElement? captions) BootstrapLiveCaptions()
+    {
+        try
+        {
+            EnsureLiveCaptionsProcess();
+
+            var live = WaitForLiveCaptionsWindow(timeoutMs: 8000);
+            if (live == null)
+            {
+                Console.WriteLine("❌ Live Captions top window not found.");
+                return (null, null);
+            }
+            Console.WriteLine("✅ Live Captions window located.");
+
+            // 聚焦窗口（菜单更稳定）
+            try { live.SetFocus(); } catch {}
+
+            if (!EnsureMicrophoneIncluded(live, overallTimeoutMs: 10000))
+                Console.WriteLine("⚠️ Failed to enable 'Include microphone audio' (will continue anyway).");
+            else
+                Console.WriteLine("✅ 'Include microphone audio' enabled.");
+
+            // 给字幕区域挂载更充裕的时间（对齐旧版）
+            var captions = TryFindCaptionsBlockWithRetry(live, retries: 75, delayMs: 200); // ≈15s
+            return (live, captions);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ Bootstrap error: {ex.Message}");
+            return (null, null);
+        }
+    }
+
+    private static void EnsureLiveCaptionsProcess()
+    {
+        try
+        {
+            var procs = Process.GetProcessesByName("LiveCaptions");
+            if (procs == null || procs.Length == 0)
+            {
+                var exe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "LiveCaptions.exe");
+                Console.WriteLine($"Launching: {exe}");
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = exe,
+                    UseShellExecute = true,
+                    WindowStyle = ProcessWindowStyle.Normal
+                });
+                Thread.Sleep(1500); // 由 800ms 拉长到 1500ms
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️ Start LiveCaptions.exe failed: {ex.Message}");
+        }
+    }
+
+    private static AutomationElement? WaitForLiveCaptionsWindow(int timeoutMs)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            var root = AutomationElement.RootElement;
+            var live = root.FindFirst(TreeScope.Subtree,
+                new OrCondition(
+                    new PropertyCondition(AutomationElement.ClassNameProperty, "LiveCaptionsDesktopWindow"),
+                    new OrCondition(
+                        new PropertyCondition(AutomationElement.NameProperty, "Live Captions", PropertyConditionFlags.IgnoreCase),
+                        new OrCondition(
+                            new PropertyCondition(AutomationElement.NameProperty, "实时字幕"),
+                            new PropertyCondition(AutomationElement.NameProperty, "实时辅助字幕")
+                        )
+                    )
+                ));
+            if (live != null) return live;
+            Thread.Sleep(200);
+        }
+        return null;
+    }
+
+    private static bool EnsureMicrophoneIncluded(AutomationElement live, int overallTimeoutMs)
+    {
+        // 设置按钮
+        var settingsBtn = FindByAutomationIdWithRootFallback(live, "SettingsButton", retries: 20, delayMs: 150);
+        if (settingsBtn == null) return false;
+        TryInvoke(settingsBtn);
+        Thread.Sleep(200);
+
+        // 首选项按钮（在 Root 弹层兜底）
+        var prefBtn = FindByAutomationIdWithRootFallback(live, "PreferencesButton", retries: 20, delayMs: 150);
+        if (prefBtn == null) return false;
+
+        if (!TryInvoke(prefBtn))
+        {
+            if (!TryExpand(prefBtn))
+                TryInvoke(prefBtn);
+        }
+
+        // 等子菜单出现（在 Root 兜底）
+        if (!WaitUntil(() => FindByAutomationIdWithRootFallback(live, "MicrophoneMenuFlyoutItem", 1, 0) != null,
+                       timeoutMs: 4000, pollMs: 120))
+        {
+            TryInvoke(prefBtn);
+            if (!WaitUntil(() => FindByAutomationIdWithRootFallback(live, "MicrophoneMenuFlyoutItem", 1, 0) != null,
+                           timeoutMs: 3000, pollMs: 120))
+                return false;
+        }
+
+        // 麦克风菜单项
+        var micItem = FindByAutomationIdWithRootFallback(live, "MicrophoneMenuFlyoutItem", retries: 15, delayMs: 120);
+        if (micItem == null) return false;
+
+        TryScrollIntoView(micItem);
+
+        if (!TryEnsureToggleOn(micItem))
+            TryInvoke(micItem);
+
+        var toggled = GetToggleState(micItem);
+        if (toggled.HasValue && toggled.Value != ToggleState.On)
+        {
+            TryInvoke(micItem);
+            Thread.Sleep(150);
+        }
+
+        return true;
+    }
+
+    private static AutomationElement? TryFindCaptionsBlockWithRetry(AutomationElement live, int retries, int delayMs)
+    {
+        for (int i = 0; i < retries; i++)
+        {
+            var el = FindCaptionsBlock(live);
+            if (el != null) return el;
+            Thread.Sleep(delayMs);
+        }
+        return null;
+    }
+
+    private static AutomationElement? FindCaptionsBlock(AutomationElement live)
+    {
+        try
+        {
+            return live.FindFirst(
+                TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.AutomationIdProperty, "CaptionsTextBlock")
+            );
+        }
+        catch { return null; }
+    }
+
+    private static void TryHideLiveCaptionsWindow()
+    {
+        try
+        {
+            var root = AutomationElement.RootElement;
+            if (root == null) return;
+            var tops = root.FindAll(TreeScope.Children, Condition.TrueCondition);
+            for (int i = 0; i < tops.Count; i++)
+            {
+                var top = tops[i];
+                AutomationElement caption = null;
+                try
+                {
+                    caption = top.FindFirst(
+                        TreeScope.Subtree,
+                        new PropertyCondition(AutomationElement.AutomationIdProperty, "CaptionsTextBlock")
+                    );
+                }
+                catch {}
+
+                if (caption != null)
+                {
+                    var hwnd = (IntPtr)top.Current.NativeWindowHandle;
+                    if (hwnd != IntPtr.Zero)
+                    {
+                        ShowWindow(hwnd, SW_HIDE);
+                        Console.WriteLine("🙈 Live Captions window hidden.");
+                    }
+                    return;
+                }
+            }
+            Console.WriteLine("ℹ️ Live Captions window not found via CaptionsTextBlock.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"⚠️ Hide window failed: {ex.Message}");
+        }
+    }
+
+    // ===== UIA helpers =====
+    private static AutomationElement? FindByAutomationIdWithRootFallback(AutomationElement root, string id, int retries, int delayMs)
+    {
+        var el = FindByAutomationId(root, id, retries, delayMs);
+        if (el != null) return el;
+        return FindByAutomationId(AutomationElement.RootElement, id, retries, delayMs);
+    }
+
+    private static AutomationElement? FindByAutomationId(AutomationElement root, string id, int retries, int delayMs)
+    {
+        for (int i = 0; i < retries; i++)
+        {
+            try
+            {
+                var el = root.FindFirst(
+                    TreeScope.Subtree,
+                    new PropertyCondition(AutomationElement.AutomationIdProperty, id)
+                );
+                if (el != null) return el;
+            }
+            catch {}
+            Thread.Sleep(delayMs);
+        }
+        return null;
+    }
+
+    private static void TryScrollIntoView(AutomationElement el)
+    {
+        try
+        {
+            if (el.TryGetCurrentPattern(ScrollItemPattern.Pattern, out var p))
+                ((ScrollItemPattern)p).ScrollIntoView();
+        }
+        catch {}
+    }
+
+    private static bool TryInvoke(AutomationElement el)
+    {
+        try
+        {
+            if (el.TryGetCurrentPattern(InvokePattern.Pattern, out var p))
+            {
+                ((InvokePattern)p).Invoke();
+                return true;
+            }
+        }
+        catch {}
+        return false;
+    }
+
+    private static bool TryExpand(AutomationElement el)
+    {
+        try
+        {
+            if (el.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var p))
+            {
+                var ec = (ExpandCollapsePattern)p;
+                if (ec.Current.ExpandCollapseState != ExpandCollapseState.Expanded)
+                    ec.Expand();
+                return true;
+            }
+        }
+        catch {}
+        return false;
+    }
+
+    private static bool TryEnsureToggleOn(AutomationElement el)
+    {
+        try
+        {
+            if (el.TryGetCurrentPattern(TogglePattern.Pattern, out var p))
+            {
+                var tp = (TogglePattern)p;
+                if (tp.Current.ToggleState != ToggleState.On)
+                    tp.Toggle();
+                return true;
+            }
+        }
+        catch {}
+        return false;
+    }
+
+    private static ToggleState? GetToggleState(AutomationElement el)
+    {
+        try
+        {
+            if (el.TryGetCurrentPattern(TogglePattern.Pattern, out var p))
+                return ((TogglePattern)p).Current.ToggleState;
+        }
+        catch {}
+        return null;
+    }
+
+    private static bool WaitUntil(Func<bool> predicate, int timeoutMs, int pollMs)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            if (predicate()) return true;
+            Thread.Sleep(pollMs);
+        }
+        return false;
+    }
+
+    // ===== Text & gating =====
     static bool IsSentenceEnd(string text)
     {
         if (string.IsNullOrEmpty(text)) return false;
@@ -196,41 +479,21 @@ class Program
         return ".!?。？！".Contains(last);
     }
 
-    // ✅ 输出或发MQTT的统一函数
     static void SendSentence(string sentence)
     {
         sentence = CleanToLastLine(sentence);
         if (string.IsNullOrEmpty(sentence)) return;
+        if (IsTtsActive()) return;
+        if (IsLikelyTtsEcho(sentence)) return;
+        if (TryHandleListeningCommand(sentence)) return;
+        if (!listeningEnabled) return;
 
-        if (IsTtsActive()) return; // 播报时严格抑制
-
-        // 若高度疑似为 TTS 回声，也不发送
-        if (IsLikelyTtsEcho(sentence))
-        {
-            return;
-        }
-
-        // 语音口令门控：先处理指令，不外发
-        if (TryHandleListeningCommand(sentence))
-        {
-            return;
-        }
-
-        // 未开启监听时，忽略普通句子
-        if (!listeningEnabled)
-        {
-            return;
-        }
-
-        // 3 秒内相同文本不再发送
-        if (sentence == lastPublished && (DateTime.UtcNow - lastPublishedAt).TotalSeconds < 3)
-            return;
+        if (sentence == lastPublished && (DateTime.UtcNow - lastPublishedAt).TotalSeconds < 3) return;
         lastPublished = sentence;
         lastPublishedAt = DateTime.UtcNow;
 
-        Console.WriteLine($"🗣 完整句: {sentence}");
+        Console.WriteLine($"🗣 {sentence}");
 
-        // ⚙️ 发布到 MQTT（JSON 负载）
         if (mqttConfig.Enabled)
         {
             try
@@ -243,51 +506,24 @@ class Program
                     timestamp = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
                 });
 
-                // 单次连接发布，避免常驻连接依赖
                 _ = Task.Run(async () =>
                 {
-                    try
-                    {
-                        await SimpleMqttPublisher.PublishOnceAsync(mqttConfig, payload, CancellationToken.None).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[MQTT] 发布失败: {ex.Message}");
-                    }
+                    try { await SimpleMqttPublisher.PublishOnceAsync(mqttConfig, payload, CancellationToken.None).ConfigureAwait(false); }
+                    catch (Exception ex) { Console.WriteLine($"[MQTT] publish failed: {ex.Message}"); }
                 });
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[MQTT] 构建负载失败: {ex.Message}");
+                Console.WriteLine($"[MQTT] build payload failed: {ex.Message}");
             }
         }
     }
 
-    // ✅ 查找 CaptionsTextBlock
-    static AutomationElement FindCaptionsBlock(AutomationElement live)
-    {
-        try
-        {
-            var element = live.FindFirst(
-                TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.AutomationIdProperty, "CaptionsTextBlock")
-            );
-            return element;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"⚠️ 查找 CaptionsTextBlock 出错: {ex.Message}");
-            return null;
-        }
-    }
-
-    // ✅ 读取字幕文本：优先使用 TextPattern；退化到 Name
     static string ReadCaptionText(AutomationElement element)
     {
         try
         {
-            object patternObj;
-            if (element.TryGetCurrentPattern(TextPattern.Pattern, out patternObj))
+            if (element.TryGetCurrentPattern(TextPattern.Pattern, out var patternObj))
             {
                 var tp = (TextPattern)patternObj;
                 string all = tp.DocumentRange.GetText(-1) ?? string.Empty;
@@ -299,7 +535,6 @@ class Program
         return name.Trim();
     }
 
-    // ✅ 仅取最后一行，去掉历史行
     static string CleanToLastLine(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return string.Empty;
@@ -312,23 +547,14 @@ class Program
         return text.Trim();
     }
 
-    // ✅ TTS 状态回调与抑制判定
     static void OnTtsStateMessageInternal(bool speaking, string text)
     {
         ttsSpeaking = speaking;
         ttsLastUpdateUtc = DateTime.UtcNow;
         if (speaking)
-        {
-            // 清空缓冲，避免 TTS 期间累积的旧片段被发出
-            try { /* 局部变量在 Main 中，这里无法直接清空 */ } catch { }
             ttsLastTextLower = (text ?? string.Empty).Trim().ToLowerInvariant();
-        }
-        else
-        {
-            // 结束后仍保留文本用于尾随抑制匹配
-            if (!string.IsNullOrEmpty(text))
-                ttsLastTextLower = text.Trim().ToLowerInvariant();
-        }
+        else if (!string.IsNullOrEmpty(text))
+            ttsLastTextLower = text.Trim().ToLowerInvariant();
     }
 
     static bool IsTtsActive()
@@ -346,10 +572,8 @@ class Program
         if (s.Length < 6 || ttsLastTextLower.Length < 6) return false;
         if (ttsLastTextLower.Contains(s)) return true;
         if (s.Contains(ttsLastTextLower)) return true;
-        // 简单重叠判断：若交集子串长度>=句子长度的60%
         int common = LongestCommonSubsequenceLength(s, ttsLastTextLower);
-        if (common * 10 >= s.Length * 6) return true;
-        return false;
+        return common * 10 >= s.Length * 6;
     }
 
     static int LongestCommonSubsequenceLength(string a, string b)
@@ -357,69 +581,43 @@ class Program
         int n = a.Length, m = b.Length;
         int[,] dp = new int[n + 1, m + 1];
         for (int i = 1; i <= n; i++)
-        {
-            for (int j = 1; j <= m; j++)
-            {
-                if (a[i - 1] == b[j - 1]) dp[i, j] = dp[i - 1, j - 1] + 1;
-                else dp[i, j] = dp[i - 1, j] > dp[i, j - 1] ? dp[i - 1, j] : dp[i, j - 1];
-            }
-        }
+        for (int j = 1; j <= m; j++)
+            dp[i, j] = (a[i - 1] == b[j - 1]) ? dp[i - 1, j - 1] + 1 : Math.Max(dp[i - 1, j], dp[i, j - 1]);
         return dp[n, m];
     }
 
-    // ✅ 处理 "start listening" / "stop listening" 指令
     static bool TryHandleListeningCommand(string sentence)
     {
         string norm = (sentence ?? string.Empty).Trim().ToLowerInvariant();
         if (norm.Length == 0) return false;
-
-        // 去掉收尾标点
         while (norm.Length > 0 && ".!?。？！".IndexOf(norm[^1]) >= 0)
-        {
-            norm = norm.Substring(0, norm.Length - 1).TrimEnd();
-        }
+            norm = norm[..^1].TrimEnd();
 
         bool matched = false;
         if (norm.Contains("start listening"))
         {
-            listeningEnabled = true;
-            matched = true;
-            Console.WriteLine("[Gate] Listening enabled");
+            listeningEnabled = true; matched = true; Console.WriteLine("[Gate] Listening enabled");
         }
         else if (norm.Contains("stop listening"))
         {
-            listeningEnabled = false;
-            matched = true;
-            Console.WriteLine("[Gate] Listening disabled");
+            listeningEnabled = false; matched = true; Console.WriteLine("[Gate] Listening disabled");
         }
-
         return matched;
     }
 
-    // --- MQTT CONFIG & SIMPLE PUBLISHER ---
-    static MqttConfig mqttConfig = MqttConfig.Disabled;
-
+    // ===== MQTT helpers =====
     sealed class MqttConfig
     {
         private MqttConfig()
         {
-            Enabled = false;
-            Host = "127.0.0.1";
-            Port = 1883;
-            Topic = "";
+            Enabled = false; Host = "127.0.0.1"; Port = 1883; Topic = "";
             ClientId = $"live-captions-{Environment.MachineName}";
             SourceLabel = "live_captions";
             TtsStateTopic = "robot/tts/state";
         }
-
         private MqttConfig(string host, int port, string topic, string clientId, string source, string ttsStateTopic)
         {
-            Host = host;
-            Port = port;
-            Topic = topic;
-            ClientId = clientId;
-            SourceLabel = source;
-            TtsStateTopic = ttsStateTopic;
+            Host = host; Port = port; Topic = topic; ClientId = clientId; SourceLabel = source; TtsStateTopic = ttsStateTopic;
             Enabled = !string.IsNullOrWhiteSpace(topic);
         }
 
@@ -463,7 +661,7 @@ class Program
 
             byte[] disconnect = new byte[] { 0xE0, 0x00 };
             await stream.WriteAsync(disconnect, 0, disconnect.Length, token);
-            Console.WriteLine($"[MQTT] 已发布: {config.Topic} ({payload.Length}B)");
+            Console.WriteLine($"[MQTT] published: {config.Topic} ({payload.Length}B)");
         }
 
         static byte[] BuildConnectPacket(MqttConfig c)
@@ -495,7 +693,7 @@ class Program
             byte[] topicBytes = Encoding.UTF8.GetBytes(topic);
             byte[] payloadBytes = Encoding.UTF8.GetBytes(payload);
             int remain = 2 + topicBytes.Length + payloadBytes.Length;
-            bool retain = (Environment.GetEnvironmentVariable("LIVE_CAPTIONS_MQTT_RETAIN") ?? "0").Trim() is string r &&
+            bool retain = (Environment.GetEnvironmentVariable("LIVE_CAPTIONS_MQTT_RETAIN") ?? "0") is string r &&
                           (r.Equals("1", StringComparison.OrdinalIgnoreCase) || r.Equals("true", StringComparison.OrdinalIgnoreCase));
             byte header = (byte)(0x30 | (retain ? 0x01 : 0x00));
             byte[] fixedHeader = BuildFixedHeader(header, remain);
@@ -533,31 +731,27 @@ class Program
         }
     }
 
-    // --- Minimal MQTT subscriber for TTS state ---
     static class MqttTtsSubscriber
     {
-        public static async System.Threading.Tasks.Task RunAsync(MqttConfig config, System.Action<bool, string> onTtsState)
+        public static async Task RunAsync(MqttConfig config, Action<bool, string> onTtsState)
         {
-            while (true)
+            for (;;)
             {
                 try
                 {
-                    using var client = new System.Net.Sockets.TcpClient();
+                    using var client = new TcpClient();
                     await client.ConnectAsync(config.Host, config.Port);
                     using var stream = client.GetStream();
 
-                    // CONNECT
                     byte[] connect = BuildConnectPacketLocal(config);
                     await stream.WriteAsync(connect, 0, connect.Length);
                     await stream.FlushAsync();
                     await ReadConnAckAsyncLocal(stream);
 
-                    // SUBSCRIBE to TTS state topic, packet id = 1, QoS 0
                     byte[] subscribePacket = BuildSubscribePacket(config.TtsStateTopic, packetId: 1);
                     await stream.WriteAsync(subscribePacket, 0, subscribePacket.Length);
                     await stream.FlushAsync();
 
-                    // Simple read loop
                     var buffer = new byte[8192];
                     while (true)
                     {
@@ -565,72 +759,63 @@ class Program
                         if (header < 0) break;
                         byte first = (byte)header;
                         int remaining = ReadRemainingLength(stream);
-                        if (remaining <= 0 || remaining > buffer.Length) {
-                            // skip payload if too large
+                        if (remaining <= 0 || remaining > buffer.Length)
+                        {
                             SkipBytes(stream, remaining);
                             continue;
                         }
-                        int read = ReadExactAsync(stream, buffer, remaining);
+                        int read = ReadExact(stream, buffer, remaining);
                         if (read != remaining) break;
 
                         byte packetType = (byte)(first >> 4);
-                        if (packetType == 3) // PUBLISH
+                        if (packetType == 3)
                         {
                             int idx = 0;
-                            if (remaining < 2) continue;
                             int topicLen = (buffer[idx] << 8) | buffer[idx + 1]; idx += 2;
-                            if (topicLen < 0 || idx + topicLen > remaining) continue;
-                            string topic = System.Text.Encoding.UTF8.GetString(buffer, idx, topicLen); idx += topicLen;
-
-                            // QoS 0 assumed (no packet id)
+                            string topic = Encoding.UTF8.GetString(buffer, idx, topicLen); idx += topicLen;
                             int payloadLen = remaining - idx;
-                            if (payloadLen <= 0) continue;
-                            string json = System.Text.Encoding.UTF8.GetString(buffer, idx, payloadLen);
-                            try
+                            if (payloadLen > 0)
                             {
-                                using var doc = System.Text.Json.JsonDocument.Parse(json);
-                                if (doc.RootElement.TryGetProperty("speaking", out var speakingProp))
+                                string json = Encoding.UTF8.GetString(buffer, idx, payloadLen);
+                                try
                                 {
-                                    bool speaking = speakingProp.ValueKind == System.Text.Json.JsonValueKind.True ||
-                                                    (speakingProp.ValueKind == System.Text.Json.JsonValueKind.Number && speakingProp.GetInt32() != 0);
-                                    string ttsText = null;
-                                    if (doc.RootElement.TryGetProperty("text", out var textProp) && textProp.ValueKind == System.Text.Json.JsonValueKind.String)
+                                    using var doc = JsonDocument.Parse(json);
+                                    if (doc.RootElement.TryGetProperty("speaking", out var speakingProp))
                                     {
-                                        ttsText = textProp.GetString();
+                                        bool speaking = speakingProp.ValueKind == JsonValueKind.True ||
+                                                        (speakingProp.ValueKind == JsonValueKind.Number && speakingProp.GetInt32() != 0);
+                                        string ttsText = null;
+                                        if (doc.RootElement.TryGetProperty("text", out var textProp) && textProp.ValueKind == JsonValueKind.String)
+                                            ttsText = textProp.GetString();
+                                        onTtsState?.Invoke(speaking, ttsText);
                                     }
-                                    onTtsState?.Invoke(speaking, ttsText);
                                 }
+                                catch {}
                             }
-                            catch { }
                         }
-                        // ignore other packet types
                     }
                 }
                 catch
                 {
-                    // backoff and retry
-                    System.Threading.Thread.Sleep(500);
+                    Thread.Sleep(500);
                 }
             }
         }
 
-        static int ReadRemainingLength(System.IO.Stream s)
+        static int ReadRemainingLength(Stream s)
         {
-            int multiplier = 1;
-            int value = 0;
+            int multiplier = 1, value = 0;
             while (true)
             {
-                int digit = s.ReadByte();
-                if (digit < 0) return -1;
+                int digit = s.ReadByte(); if (digit < 0) return -1;
                 value += (digit & 127) * multiplier;
                 if ((digit & 128) == 0) break;
-                multiplier *= 128;
-                if (multiplier > 128*128*128) return -1;
+                multiplier *= 128; if (multiplier > 128 * 128 * 128) return -1;
             }
             return value;
         }
 
-        static int ReadExactAsync(System.IO.Stream s, byte[] buffer, int len)
+        static int ReadExact(Stream s, byte[] buffer, int len)
         {
             int total = 0;
             while (total < len)
@@ -642,14 +827,12 @@ class Program
             return total;
         }
 
-        static void SkipBytes(System.IO.Stream s, int len)
+        static void SkipBytes(Stream s, int len)
         {
-            var tmp = new byte[1024];
-            int remaining = len;
+            var tmp = new byte[1024]; int remaining = len;
             while (remaining > 0)
             {
-                int toRead = System.Math.Min(remaining, tmp.Length);
-                int n = s.Read(tmp, 0, toRead);
+                int n = s.Read(tmp, 0, Math.Min(remaining, tmp.Length));
                 if (n <= 0) break;
                 remaining -= n;
             }
@@ -657,17 +840,17 @@ class Program
 
         static byte[] BuildSubscribePacket(string topic, ushort packetId)
         {
-            byte[] topicBytes = System.Text.Encoding.UTF8.GetBytes(topic);
-            int remain = 2 + 2 + topicBytes.Length + 1; // packetId(2) + topic len(2)+topic + QoS(1)
+            byte[] topicBytes = Encoding.UTF8.GetBytes(topic);
+            int remain = 2 + 2 + topicBytes.Length + 1;
             var header = BuildFixedHeaderLocal(0x82, remain);
             var packet = new byte[header.Length + remain];
-            System.Buffer.BlockCopy(header, 0, packet, 0, header.Length);
+            Buffer.BlockCopy(header, 0, packet, 0, header.Length);
             int offset = header.Length;
             packet[offset++] = (byte)((packetId >> 8) & 0xFF);
             packet[offset++] = (byte)(packetId & 0xFF);
             packet[offset++] = (byte)((topicBytes.Length >> 8) & 0xFF);
             packet[offset++] = (byte)(topicBytes.Length & 0xFF);
-            System.Buffer.BlockCopy(topicBytes, 0, packet, offset, topicBytes.Length);
+            Buffer.BlockCopy(topicBytes, 0, packet, offset, topicBytes.Length);
             offset += topicBytes.Length;
             packet[offset++] = 0x00; // QoS 0
             return packet;
@@ -675,55 +858,54 @@ class Program
 
         static byte[] BuildFixedHeaderLocal(byte type, int len)
         {
-            using var ms = new System.IO.MemoryStream();
+            using var ms = new MemoryStream();
             ms.WriteByte(type);
-            int value = len;
             do
             {
-                byte encoded = (byte)(value % 128);
-                value /= 128;
-                if (value > 0) encoded |= 0x80;
+                byte encoded = (byte)(len % 128);
+                len /= 128;
+                if (len > 0) encoded |= 0x80;
                 ms.WriteByte(encoded);
-            } while (value > 0);
+            } while (len > 0);
             return ms.ToArray();
         }
 
         static byte[] BuildConnectPacketLocal(MqttConfig c)
         {
-            byte[] clientId = System.Text.Encoding.UTF8.GetBytes(c.ClientId);
+            byte[] clientId = Encoding.UTF8.GetBytes(c.ClientId);
             const int header = 10;
             int remain = header + 2 + clientId.Length;
             byte[] fixedHeader = BuildFixedHeaderLocal(0x10, remain);
             byte[] packet = new byte[fixedHeader.Length + remain];
-            System.Buffer.BlockCopy(fixedHeader, 0, packet, 0, fixedHeader.Length);
+            Buffer.BlockCopy(fixedHeader, 0, packet, 0, fixedHeader.Length);
             int offset = fixedHeader.Length;
 
             packet[offset++] = 0x00; packet[offset++] = 0x04;
             packet[offset++] = (byte)'M'; packet[offset++] = (byte)'Q';
             packet[offset++] = (byte)'T'; packet[offset++] = (byte)'T';
-            packet[offset++] = 0x04;      // Protocol Level 4 (3.1.1)
-            packet[offset++] = 0x02;      // Clean session
-            packet[offset++] = 0x00; packet[offset++] = 0x3C; // Keepalive 60s
+            packet[offset++] = 0x04;
+            packet[offset++] = 0x02;
+            packet[offset++] = 0x00; packet[offset++] = 0x3C;
 
             packet[offset++] = (byte)((clientId.Length >> 8) & 0xFF);
             packet[offset++] = (byte)(clientId.Length & 0xFF);
-            System.Buffer.BlockCopy(clientId, 0, packet, offset, clientId.Length);
+            Buffer.BlockCopy(clientId, 0, packet, offset, clientId.Length);
 
             return packet;
         }
 
-        static async System.Threading.Tasks.Task ReadConnAckAsyncLocal(System.IO.Stream s)
+        static async Task ReadConnAckAsyncLocal(Stream s)
         {
             byte[] b = new byte[4];
             int read = 0;
             while (read < 4)
             {
                 int n = await s.ReadAsync(b, read, 4 - read);
-                if (n <= 0) throw new System.IO.IOException("MQTT connack read failed");
+                if (n <= 0) throw new IOException("MQTT connack read failed");
                 read += n;
             }
             if (b[0] != 0x20 || b[3] != 0x00)
-                throw new System.IO.IOException("MQTT broker rejected connection");
+                throw new IOException("MQTT broker rejected connection");
         }
     }
 }
