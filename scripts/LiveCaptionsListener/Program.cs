@@ -23,6 +23,11 @@ class Program
     static string ttsLastTextLower = "";
     static int ttsEchoWindowMs = 3000;
     static volatile bool listeningEnabled = false;
+    static volatile bool noiseModeActive = false;
+    static volatile bool noiseModeCapturing = false;
+    static readonly StringBuilder noiseModeBuffer = new();
+    const string NoiseModeStartKeyword = "rachel";
+    const string NoiseModeEndKeyword = "over";
     static MqttConfig mqttConfig = MqttConfig.Disabled;
 
     [STAThread]
@@ -486,8 +491,18 @@ class Program
         if (IsTtsActive()) return;
         if (IsLikelyTtsEcho(sentence)) return;
         if (TryHandleListeningCommand(sentence)) return;
+        if (HandleNoiseModeSentence(sentence)) return;
         if (!listeningEnabled) return;
 
+        PublishSentence(sentence);
+    }
+
+    static void PublishSentence(string sentence)
+    {
+        sentence = CleanToLastLine(sentence);
+        if (string.IsNullOrEmpty(sentence)) return;
+        if (IsTtsActive()) return;
+        if (IsLikelyTtsEcho(sentence)) return;
         if (sentence == lastPublished && (DateTime.UtcNow - lastPublishedAt).TotalSeconds < 3) return;
         lastPublished = sentence;
         lastPublishedAt = DateTime.UtcNow;
@@ -597,12 +612,141 @@ class Program
         if (norm.Contains("start listening"))
         {
             listeningEnabled = true; matched = true; Console.WriteLine("[Gate] Listening enabled");
+            ResetNoiseModeState();
         }
         else if (norm.Contains("stop listening"))
         {
             listeningEnabled = false; matched = true; Console.WriteLine("[Gate] Listening disabled");
+            ResetNoiseModeState();
+        }
+        else if (norm.Contains("start noise mode"))
+        {
+            listeningEnabled = true;
+            noiseModeActive = true;
+            noiseModeCapturing = false;
+            noiseModeBuffer.Clear();
+            matched = true;
+            Console.WriteLine($"[Gate] Noise mode enabled (trigger '{NoiseModeStartKeyword}' … '{NoiseModeEndKeyword}')");
+        }
+        else if (norm.Contains("stop noise mode"))
+        {
+            matched = true;
+            Console.WriteLine("[Gate] Noise mode disabled");
+            ResetNoiseModeState();
+            listeningEnabled = false;
         }
         return matched;
+    }
+
+    static bool HandleNoiseModeSentence(string sentence)
+    {
+        if (!noiseModeActive) return false;
+
+        string remaining = sentence ?? string.Empty;
+
+        while (true)
+        {
+            if (!noiseModeCapturing)
+            {
+                int startIdx = IndexOfKeyword(remaining, NoiseModeStartKeyword);
+                if (startIdx < 0)
+                {
+                    return true; // ignore until start keyword appears
+                }
+
+                noiseModeCapturing = true;
+                noiseModeBuffer.Clear();
+
+                int afterStart = startIdx + NoiseModeStartKeyword.Length;
+                if (afterStart >= remaining.Length)
+                {
+                    remaining = string.Empty;
+                }
+                else
+                {
+                    remaining = TrimLeadingDelimiters(remaining[afterStart..]);
+                }
+                continue;
+            }
+
+            int endIdx = IndexOfKeyword(remaining, NoiseModeEndKeyword);
+            if (endIdx >= 0)
+            {
+                string toAdd = remaining[..endIdx];
+                AppendNoiseBuffer(toAdd);
+
+                string final = noiseModeBuffer.ToString().Trim();
+                noiseModeBuffer.Clear();
+                noiseModeCapturing = false;
+
+                if (!string.IsNullOrEmpty(final))
+                    PublishSentence(final);
+
+                int afterEnd = endIdx + NoiseModeEndKeyword.Length;
+                if (afterEnd >= remaining.Length)
+                {
+                    remaining = string.Empty;
+                }
+                else
+                {
+                    remaining = TrimLeadingDelimiters(remaining[afterEnd..]);
+                }
+
+                if (string.IsNullOrEmpty(remaining))
+                    return true;
+
+                // There might be additional commands in the remainder (e.g., another start keyword)
+                continue;
+            }
+
+            AppendNoiseBuffer(remaining);
+            return true;
+        }
+    }
+
+    static void AppendNoiseBuffer(string text)
+    {
+        string trimmed = (text ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(trimmed)) return;
+        if (noiseModeBuffer.Length > 0)
+            noiseModeBuffer.Append(' ');
+        noiseModeBuffer.Append(trimmed);
+    }
+
+    static int IndexOfKeyword(string source, string keyword)
+    {
+        if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(keyword)) return -1;
+        int searchStart = 0;
+        while (true)
+        {
+            int idx = source.IndexOf(keyword, searchStart, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return -1;
+
+            bool beforeOk = idx == 0 || !char.IsLetterOrDigit(source[idx - 1]);
+            int afterPos = idx + keyword.Length;
+            bool afterOk = afterPos >= source.Length || !char.IsLetterOrDigit(source[afterPos]);
+
+            if (beforeOk && afterOk)
+                return idx;
+
+            searchStart = idx + keyword.Length;
+        }
+    }
+
+    static string TrimLeadingDelimiters(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+        int i = 0;
+        while (i < text.Length && (char.IsWhiteSpace(text[i]) || ",.;:!?\"'()[]{}".IndexOf(text[i]) >= 0))
+            i++;
+        return text[i..];
+    }
+
+    static void ResetNoiseModeState()
+    {
+        noiseModeActive = false;
+        noiseModeCapturing = false;
+        noiseModeBuffer.Clear();
     }
 
     // ===== MQTT helpers =====
