@@ -45,8 +45,9 @@ seen in the project demos.
 * **Python transcription fallback** – Stream microphone audio to the
   `python_voice_service` FastAPI application if you prefer Faster-Whisper over
   the bundled Vosk models.
-* **One-command local tooling** – `scripts/start_local_services.py` can boot
-  the MQTT hub, Python voice service and an optional orchestrator together.
+* **One-command local tooling** – `helper.bat` (Windows) and
+  `scripts/start_local_services.py` can boot the MQTT hub, Python voice service
+  and optional orchestrators together.
 * **Robot_opr ready** – Intent payloads mirror the schema expected by the
   Robot_opr orchestration layer, enabling voice controlled exercise launch and
   shutdown without additional glue code.
@@ -62,7 +63,7 @@ ProjectSettings/       # Unity project configuration
 
 ## Requirements
 
-* **Unity** 2020.3.48f1 or newer.
+* **Unity** 2022.3.56f1c1 (matches `ProjectSettings/ProjectVersion.txt`).
 * Microphone access on the target platform.
 * (Optional) Python 3.10+ if you want to use the Faster-Whisper service.
 * A running MQTT broker (Robot_opr ships a message hub suitable for local
@@ -111,16 +112,18 @@ ProjectSettings/       # Unity project configuration
    `PythonServiceUrl` to `http://127.0.0.1:8000/transcribe`.
 
 5. **Launch the full local stack (optional)**
-   Use the helper script if you frequently start the hub and voice model
-   together:
-   ```bash
-   python scripts/start_local_services.py \
-       --hub-cmd "<command to start Robot_opr hub>" \
-       --orchestrator-cmd "<command to start Robot_opr orchestrator>"
-   ```
-   The script watches the processes, forwards Ctrl+C and stops the remaining
-   services if one exits. You can also supply `--env-file` to preload
-   environment variables.
+   * Windows users can double-click `helper.bat` to start the MQTT hub,
+     Live Captions bridge and Unity voice client together.
+   * For cross-platform setups or when you want to customise the command list,
+     use the Python helper:
+     ```bash
+     python scripts/start_local_services.py \
+         --hub-cmd "<command to start Robot_opr hub>" \
+         --orchestrator-cmd "<command to start Robot_opr orchestrator>"
+     ```
+     The script watches the processes, forwards Ctrl+C and stops the remaining
+     services if one exits. You can also supply `--env-file` to preload
+     environment variables.
 
 ## Working with Robot_opr
 
