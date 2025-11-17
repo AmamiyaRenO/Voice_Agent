@@ -52,6 +52,8 @@ def _run_piper_subprocess(text: str) -> bytes:
                 cmd,
                 input=f"{text}\n",
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
@@ -67,9 +69,14 @@ def _run_piper_subprocess(text: str) -> bytes:
         return out_path.read_bytes()
 
 
+# Gate synthesis concurrency to avoid spawning multiple heavy Piper processes simultaneously.
+_SYNTH_SEM = asyncio.Semaphore(max(1, int(os.getenv("PIPER_MAX_CONCURRENCY", "1") or "1")))
+
+
 async def _synthesize_audio(text: str) -> tuple[bytes, int]:
     sample_rate = int(_env("PIPER_SAMPLE_RATE", "22050"))
-    audio_bytes = await asyncio.to_thread(_run_piper_subprocess, text)
+    async with _SYNTH_SEM:
+        audio_bytes = await asyncio.to_thread(_run_piper_subprocess, text)
     return audio_bytes, sample_rate
 
 

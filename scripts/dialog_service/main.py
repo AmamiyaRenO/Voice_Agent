@@ -116,6 +116,15 @@ class DialogService:
                 pass
             finally:
                 self._publish_tts_state(False, corr_id)
+        except httpx.HTTPStatusError as exc:
+            # 打印服务器返回的错误正文，便于快速定位 500 的真实原因
+            body = ""
+            try:
+                body = exc.response.text if exc.response is not None else ""
+            except Exception:
+                body = ""
+            preview = body[:400].replace("\n", "\\n")
+            print(f"[dialog] TTS failed: {exc} | body={preview}")
         except Exception as exc:
             print(f"[dialog] TTS failed: {exc}")
 
