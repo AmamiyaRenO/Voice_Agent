@@ -110,3 +110,7 @@ python_voice_service/.pytest_cache/
 
 /[Pp]ackages/manifest.json
 /[Pp]ackages/packages-lock.json
+
+# Mediapipe
+Assets/StreamingAssets/mediapipe
+Packages/com.github.homuler.mediapipe/Runtime/Plugins/Android/mediapipe_android.aar
