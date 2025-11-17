@@ -1,6 +1,10 @@
 # Voice Agent for Robot OPR
 ## Python Speech Service (Faster-Whisper) Environment Variables
 
+> The Windows Live Captions bridge is the default speech-to-text pipeline. The
+> following settings only apply when you enable the optional Faster-Whisper
+> fallback described later in this document.
+
 - WHISPER_MODEL_PATH (default `large-v3`), optional values include `medium.en`, `small.en`, etc.
 - WHISPER_COMPUTE_TYPE (default `int8_float16`; use `float16` if sufficient GPU memory is available)
 - WAKE_WORD (default `rachel`)
@@ -25,7 +29,11 @@ This repository contains the Unity client that powers the spoken interface
 for the [Robot_opr](https://github.com/AmamiyaRenO/Robot_opr) rehabilitation
 robot. It wraps the [Vosk](https://alphacephei.com/vosk/) offline speech
 recogniser, forwards recognised intents to the robot control stack over MQTT
-and can optionally delegate transcription to a Python service that runs the
+and can listen to multiple transcription sources. The current production
+workflow captures Windows 11 Live Captions output via
+[`scripts/LiveCaptionsListener`](scripts/LiveCaptionsListener) and feeds those
+sentences into the Unity scene. You can still delegate transcription to the
+bundled Vosk models or to the optional Python service that runs the
 [Faster-Whisper](https://github.com/guillaumekln/faster-whisper) model. The
 Unity scenes included here were used to drive the coach-style voice assistant
 seen in the project demos.
@@ -42,12 +50,16 @@ seen in the project demos.
   define is enabled, the agent publishes launch/exit messages to the
   `robot/intent` topic using a lightweight client that ships with the project,
   so no external DLLs are required.
+* **Windows Live Captions bridge** – A lightweight UI Automation listener
+  harvests Windows 11 Live Captions output and forwards the sentences straight
+  into Unity so you can reuse the OS-level speech recogniser without custom
+  ASR.
 * **Python transcription fallback** – Stream microphone audio to the
-  `python_voice_service` FastAPI application if you prefer Faster-Whisper over
-  the bundled Vosk models.
+  `python_voice_service` FastAPI application if you prefer Faster-Whisper or
+  need an offline alternative to Live Captions/Vosk.
 * **One-command local tooling** – `helper.bat` (Windows) and
-  `scripts/start_local_services.py` can boot the MQTT hub, Python voice service
-  and optional orchestrators together.
+  `scripts/start_local_services.py` can boot the MQTT hub, Live Captions
+  listener, Python voice service and optional orchestrators together.
 * **Robot_opr ready** – Intent payloads mirror the schema expected by the
   Robot_opr orchestration layer, enabling voice controlled exercise launch and
   shutdown without additional glue code.
@@ -99,7 +111,22 @@ ProjectSettings/       # Unity project configuration
      hub. The default topic (`robot/intent`) and payload schema matches the
      Robot_opr subscriber expectations.
 
-4. **(Optional) Run the Python voice service**
+4. **Capture speech via Windows Live Captions**
+   * Live Captions is available on Windows 11 (press `Win + Ctrl + L`). Enable
+     the **Include microphone audio** option and keep the floating window on
+     top of Unity.
+   * Build or use the provided
+     [`scripts/LiveCaptionsListener`](scripts/LiveCaptionsListener) project and
+     run `EnableLcMic.exe`/`LiveCaptionsListener.exe` to mirror the reference
+     setup. The listener subscribes to the Live Captions UI Automation tree and
+     prints completed sentences with the `[Sentence]` prefix.
+   * Forward each sentence into Unity (e.g. through a pipe, MQTT topic or the
+     helper batch file) so `VoskSpeechToText`/`VoiceGameLauncher` can treat the
+     transcript as if it came from a traditional recogniser. See
+     [`docs/LIVE_CAPTIONS_BRIDGE.md`](docs/LIVE_CAPTIONS_BRIDGE.md) for detailed
+     wiring instructions.
+
+5. **(Optional) Run the Python voice service fallback**
    ```bash
    cd Voice_Agent/python_voice_service
    python -m venv .venv
@@ -111,9 +138,10 @@ ProjectSettings/       # Unity project configuration
    Toggle **Use Python Service** on the `VoskSpeechToText` component and point
    `PythonServiceUrl` to `http://127.0.0.1:8000/transcribe`.
 
-5. **Launch the full local stack (optional)**
+6. **Launch the full local stack (optional)**
    * Windows users can double-click `helper.bat` to start the MQTT hub,
-     Live Captions bridge and Unity voice client together.
+     Live Captions bridge, Faster-Whisper fallback and Unity voice client
+     together.
    * For cross-platform setups or when you want to customise the command list,
      use the Python helper:
      ```bash
