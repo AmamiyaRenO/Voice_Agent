@@ -419,6 +419,26 @@ namespace RobotVoice
             }
         }
 
+        public void TriggerWakeWordForTester()
+        {
+            awaitingFirstCommand = true;
+            HandleWakeWordOnlyDetected();
+        }
+
+        public void TriggerLaunchForTester(string gameName)
+        {
+            var trimmed = string.IsNullOrWhiteSpace(gameName) ? string.Empty : gameName.Trim();
+            var resolved = string.IsNullOrWhiteSpace(trimmed)
+                ? string.Empty
+                : (runtimeConfig != null ? runtimeConfig.ResolveGameName(trimmed) : trimmed);
+            PublishLaunch(resolved, string.IsNullOrWhiteSpace(trimmed) ? "tester_panel" : $"tester_panel:{trimmed}");
+        }
+
+        public void TriggerExitForTester(string reason = "tester_panel")
+        {
+            PublishExit(string.IsNullOrWhiteSpace(reason) ? "tester_panel" : reason.Trim());
+        }
+
         private bool IsOnCooldown()
         {
             // 唤醒后的第一条命令不受冷却限制
