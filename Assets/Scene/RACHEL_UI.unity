@@ -1861,6 +1861,7 @@ GameObject:
   - component: {fileID: 1489373251}
   - component: {fileID: 1489373250}
   - component: {fileID: 1489373249}
+  - component: {fileID: 1489373254}
   m_Layer: 0
   m_Name: GameObject
   m_TagString: Untagged
@@ -2008,6 +2009,28 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1489373254
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1489373248}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8f365b47d8a68b046bf310a88b5b0a1a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  piHub: {fileID: 143412778}
+  voiceLauncher: {fileID: 1489373251}
+  voiceServiceUrl: http://127.0.0.1:8000/tts
+  defaultVoiceCode: en_US
+  availableVoices:
+  - zh_CN
+  - en_US
+  - es_ES
+  httpPort: 8787
+  autoStart: 1
 --- !u!1 &1502453964
 GameObject:
   m_ObjectHideFlags: 0

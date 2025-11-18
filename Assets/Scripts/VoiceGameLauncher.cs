@@ -439,6 +439,26 @@ namespace RobotVoice
             PublishExit(string.IsNullOrWhiteSpace(reason) ? "tester_panel" : reason.Trim());
         }
 
+		public void TriggerSpeakForTester(string text)
+		{
+			var trimmed = string.IsNullOrWhiteSpace(text) ? string.Empty : text.Trim();
+			if (string.IsNullOrWhiteSpace(trimmed))
+			{
+				return;
+			}
+
+			// 在播放前触发呼吸灯效果，提示“正在说话”
+			if (piHub != null)
+			{
+				_ = piHub.SendLedBreathAsync();
+			}
+
+			if (!string.IsNullOrWhiteSpace(piperSpeakUrl))
+			{
+				StartCoroutine(PlayTtsFromPiper(trimmed));
+			}
+		}
+
         private bool IsOnCooldown()
         {
             // 唤醒后的第一条命令不受冷却限制
