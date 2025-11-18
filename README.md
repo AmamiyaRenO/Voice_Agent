@@ -43,6 +43,9 @@ seen in the project demos.
 * **Unity-first voice experience** – Prefab components (`VoskSpeechToText`,
   `VoiceGameLauncher`, `VoiceGameWiring`) take care of microphone capture,
   wake-word detection and intent routing.
+* **Wi-Fi test panel** – `UserTestControlPanel` exposes an in-editor HTTP UI so
+  therapists can trigger expressions, lighting and the wake flow from a phone
+  connected to the same network.
 * **Focus-aware webcam hand-off** – MediaPipe runners stop their `WebCamTexture`
   feeds when the agent is backgrounded, allowing another Unity project to claim
   the camera while the voice agent keeps control of the microphone.
@@ -152,6 +155,31 @@ ProjectSettings/       # Unity project configuration
      The script watches the processes, forwards Ctrl+C and stops the remaining
      services if one exits. You can also supply `--env-file` to preload
      environment variables.
+
+## Remote user test panel
+
+The Unity scene now ships with an embedded HTTP server that exposes a browser
+panel tailored for therapist / patient trials.
+
+1. Add the `UserTestControlPanel` component (found under `Assets/Scripts`) to a
+   convenient GameObject – for example the one that already holds
+   `VoiceGameLauncher`.
+2. Assign the existing `PiMessageHub` and `VoiceGameLauncher` references in the
+   inspector. The default TCP port is **8787**; change it if the machine has a
+   conflicting service.
+3. Enter Play Mode (or build the scene). The console will print
+   `http://<host-ip>:8787/` after the listener starts. Devices on the same Wi-Fi
+   can open that address to reach the panel.
+4. Use the controls to drive five facial presets (happy/neutral/angry/sad/
+   surprised), adjust LED color/brightness/period, open/close the flower servo,
+   pick a TTS voice, enter text for the robot to speak, or trigger game launch
+   / exit intents. The “Start Wake Flow” button still performs the wake-word
+   choreography without requiring speech. Every action goes through
+   `PiMessageHub` / `VoiceGameLauncher` so the robot reacts immediately.
+
+If you prefer to start/stop the listener manually, untick **Auto Start** on the
+component and call `StartServer`/`StopServer` from the inspector’s context menu
+or another script.
 
 ## Working with Robot_opr
 

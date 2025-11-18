@@ -33,6 +33,15 @@ public class PiMessageHub : MonoBehaviour
         await PublishRawAsync(faceTopic, payload);
     }
 
+        public async Task SendFacePresetAsync(string presetName, float durationSeconds)
+        {
+                var trimmed = string.IsNullOrWhiteSpace(presetName) ? "idle" : presetName.Trim();
+                var seconds = durationSeconds > 0f
+                        ? durationSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        : defaultFaceSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                await SendFaceAsync(trimmed + ":" + seconds);
+        }
+
 	public async Task SendFaceHappyAsync()
 	{
 		await SendFaceAsync($"happy:{defaultFaceSeconds}");
@@ -110,17 +119,35 @@ public class PiMessageHub : MonoBehaviour
 		await PublishRawAsync(servoTopic, payload);
 	}
 
-    public async Task SendLedBreathAsync(string hexColor = "#00BFFF")
+    public async Task SendLedBreathAsync(string hexColor = "#00BFFF", float brightness = 1f, float periodSeconds = 1.5f)
     {
-		// 适配 ledScript.py: breathe:#RRGGBB[:duration[:brightness[:period]]]
-		var duration = defaultLedBreathSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
-		var value = "breathe:" + Escape(hexColor) + ":" + duration + ":1.0:1.5"; // brightness=1.0, period=1.5s
-		var json = "{" +
-				   "\"action\":\"led\"," +
-				   "\"value\":\"" + Escape(value) + "\"" +
-				   "}";
-		await PublishRawAsync(ledTopic, json);
+                // 适配 ledScript.py: breathe:#RRGGBB[:duration[:brightness[:period]]]
+                var duration = defaultLedBreathSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var color = string.IsNullOrWhiteSpace(hexColor) ? "#00BFFF" : hexColor;
+                var clampedBrightness = Mathf.Clamp01(brightness <= 0f ? 1f : brightness);
+                var period = periodSeconds > 0f
+                        ? periodSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        : "1.5";
+                var value = "breathe:" + Escape(color) + ":" + duration + ":" + clampedBrightness.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + period;
+                var json = "{" +
+                                   "\"action\":\"led\"," +
+                                   "\"value\":\"" + Escape(value) + "\"" +
+                                   "}";
+                await PublishRawAsync(ledTopic, json);
     }
+
+        public async Task SendLedSolidAsync(string hexColor, float brightness = 1f)
+        {
+                var color = string.IsNullOrWhiteSpace(hexColor) ? "#FFFFFF" : hexColor.Trim();
+                var duration = defaultLedOnSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var clampedBrightness = Mathf.Clamp01(brightness <= 0f ? 1f : brightness);
+                var value = "on:" + Escape(color) + ":" + duration + ":" + clampedBrightness.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var json = "{" +
+                                   "\"action\":\"led\"," +
+                                   "\"value\":\"" + Escape(value) + "\"" +
+                                   "}";
+                await PublishRawAsync(ledTopic, json);
+        }
 
 	public async Task SendLedRandomAsync()
 	{

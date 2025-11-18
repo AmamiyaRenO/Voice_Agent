@@ -1,0 +1,891 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using UnityEngine;
+using PiHub = global::PiMessageHub;
+
+namespace RobotVoice
+{
+    public sealed class UserTestControlPanel : MonoBehaviour
+    {
+        [Header("Dependencies")]
+        [SerializeField] private PiHub piHub;
+        [SerializeField] private VoiceGameLauncher voiceLauncher;
+
+        [Header("Voice Service")]
+        [SerializeField, Tooltip("HTTP endpoint for the Python voice service /tts route")]
+        private string voiceServiceUrl = "http://127.0.0.1:8000/tts";
+        [SerializeField, Tooltip("Default voice code passed to the TTS endpoint")]
+        private string defaultVoiceCode = "zh_CN";
+        [SerializeField, Tooltip("Additional voice codes shown in the dropdown")]
+        private string[] availableVoices = new[] { "zh_CN", "en_US", "es_ES" };
+
+        [Header("Server")]
+        [SerializeField, Tooltip("TCP port for the built-in HTTP control panel")]
+        private int httpPort = 8787;
+        [SerializeField, Tooltip("Automatically start the listener when the scene loads")]
+        private bool autoStart = true;
+
+        private HttpListener listener;
+        private CancellationTokenSource shutdownToken;
+        private Task listenLoopTask;
+        private string activeVoiceCode;
+        private static readonly HttpClient SharedHttpClient = new HttpClient();
+        private const float DefaultFaceSeconds = 3f;
+
+        private void Awake()
+        {
+            activeVoiceCode = DetermineInitialVoiceCode();
+            if (autoStart)
+            {
+                StartServer();
+            }
+        }
+
+        private void OnDestroy()
+        {
+            StopServer();
+        }
+
+        public void StartServer()
+        {
+            if (listener != null)
+            {
+                return;
+            }
+
+            if (!HttpListener.IsSupported)
+            {
+                Debug.LogError("[UserTestPanel] HttpListener is not supported on this platform.");
+                return;
+            }
+
+            var port = Mathf.Clamp(httpPort, 1024, 65535);
+            var prefix = $"http://*:{port}/";
+            try
+            {
+                listener = new HttpListener();
+                listener.Prefixes.Add(prefix);
+                listener.Start();
+                shutdownToken = new CancellationTokenSource();
+                listenLoopTask = Task.Run(() => AcceptLoopAsync(shutdownToken.Token));
+                Debug.Log($"[UserTestPanel] Listening on {prefix}. Clients on the same Wi-Fi can visit http://<host-ip>:{port}/");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[UserTestPanel] Failed to start listener on {prefix}: {ex.Message}");
+                StopServer();
+            }
+        }
+
+        public void StopServer()
+        {
+            try
+            {
+                shutdownToken?.Cancel();
+            }
+            catch (Exception)
+            {
+            }
+
+            if (listener != null)
+            {
+                try
+                {
+                    listener.Close();
+                }
+                catch (Exception)
+                {
+                }
+                listener = null;
+            }
+
+            if (listenLoopTask != null)
+            {
+                try
+                {
+                    listenLoopTask.Wait(1000);
+                }
+                catch (Exception)
+                {
+                }
+                listenLoopTask = null;
+            }
+
+            shutdownToken?.Dispose();
+            shutdownToken = null;
+        }
+
+        private async Task AcceptLoopAsync(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested && listener != null)
+            {
+                HttpListenerContext ctx = null;
+                try
+                {
+                    ctx = await listener.GetContextAsync().ConfigureAwait(false);
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+                catch (HttpListenerException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[UserTestPanel] Listener error: {ex.Message}");
+                }
+
+                if (ctx != null)
+                {
+                    _ = Task.Run(() => HandleRequestAsync(ctx));
+                }
+            }
+        }
+
+        private async Task HandleRequestAsync(HttpListenerContext context)
+        {
+            try
+            {
+                AddCorsHeaders(context.Response);
+                if (context.Request.HttpMethod == "OPTIONS")
+                {
+                    context.Response.StatusCode = 204;
+                    context.Response.Close();
+                    return;
+                }
+
+                var path = context.Request.Url?.AbsolutePath ?? "/";
+                switch (path)
+                {
+                    case "/":
+                    case "/index.html":
+                        await RespondWithHtmlAsync(context.Response).ConfigureAwait(false);
+                        return;
+                    case "/healthz":
+                        await WriteJsonAsync(context.Response, 200, "ok", "panel alive").ConfigureAwait(false);
+                        return;
+                    case "/api/face":
+                        await HandleFaceAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/flower":
+                        await HandleFlowerAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/led":
+                        await HandleLedAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/voice":
+                        await HandleVoiceAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/voice/options":
+                        await HandleVoiceOptionsAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/speak":
+                        await HandleSpeakAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/game":
+                        await HandleGameAsync(context).ConfigureAwait(false);
+                        return;
+                    default:
+                        context.Response.StatusCode = 404;
+                        await WriteJsonAsync(context.Response, 404, "error", "not found").ConfigureAwait(false);
+                        return;
+                }
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    await WriteJsonAsync(context.Response, 500, "error", ex.Message).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
+
+        [Serializable]
+        private struct FaceRequest
+        {
+            public string mode;
+            public float seconds;
+            public float duration;
+            public float fade;
+            public string value;
+        }
+
+        [Serializable]
+        private struct FlowerRequest
+        {
+            public string action;
+        }
+
+        [Serializable]
+        private struct LedRequest
+        {
+            public string mode;
+            public string color;
+            public float brightness;
+            public float period;
+        }
+
+        [Serializable]
+        private struct VoiceRequest
+        {
+            public string action;
+            public string voice;
+            public string value;
+        }
+
+        [Serializable]
+        private struct SpeakRequest
+        {
+            public string text;
+            public string voice;
+            public float speed;
+            public float volume;
+        }
+
+        [Serializable]
+        private struct GameRequest
+        {
+            public string action;
+            public string name;
+        }
+
+        private async Task HandleFaceAsync(HttpListenerContext context)
+        {
+            var request = ParseJsonBody<FaceRequest>(context.Request);
+            var mode = (request.mode ?? string.Empty).Trim().ToLowerInvariant();
+            var duration = request.seconds > 0f ? request.seconds : request.duration;
+            if (duration <= 0f)
+            {
+                duration = DefaultFaceSeconds;
+            }
+            if (piHub == null)
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "PiMessageHub not assigned").ConfigureAwait(false);
+                return;
+            }
+
+            switch (mode)
+            {
+                case "happy":
+                    await piHub.SendFacePresetAsync("happy", duration).ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", "face set to happy").ConfigureAwait(false);
+                    return;
+                case "neutral":
+                    await piHub.SendFacePresetAsync("neutral", duration).ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", "face set to neutral").ConfigureAwait(false);
+                    return;
+                case "angry":
+                    await piHub.SendFacePresetAsync("angry", duration).ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", "face set to angry").ConfigureAwait(false);
+                    return;
+                case "sad":
+                    await piHub.SendFacePresetAsync("sad", duration).ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", "face set to sad").ConfigureAwait(false);
+                    return;
+                case "surprised":
+                    await piHub.SendFacePresetAsync("surprised", duration).ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", "face set to surprised").ConfigureAwait(false);
+                    return;
+                case "idle":
+                    await piHub.SendFaceIdleAsync().ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", "face set to idle").ConfigureAwait(false);
+                    return;
+                case "custom":
+                    var value = string.IsNullOrWhiteSpace(request.value) ? "idle" : request.value.Trim();
+                    var payload = duration > 0f ? $"{value}:{duration.ToString(CultureInfo.InvariantCulture)}" : value;
+                    await piHub.SendFaceAsync(payload).ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", $"face command {value}").ConfigureAwait(false);
+                    return;
+                default:
+                    await WriteJsonAsync(context.Response, 400, "error", "unknown face mode").ConfigureAwait(false);
+                    return;
+            }
+        }
+
+        private async Task HandleFlowerAsync(HttpListenerContext context)
+        {
+            var request = ParseJsonBody<FlowerRequest>(context.Request);
+            var action = (request.action ?? string.Empty).Trim().ToLowerInvariant();
+            if (piHub == null)
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "PiMessageHub not assigned").ConfigureAwait(false);
+                return;
+            }
+
+            switch (action)
+            {
+                case "open":
+                    await piHub.OpenFlowerAsync().ConfigureAwait(false);
+                    break;
+                case "close":
+                    await piHub.CloseFlowerAsync().ConfigureAwait(false);
+                    break;
+                case "open_hold":
+                    await piHub.OpenFlowerHoldAsync().ConfigureAwait(false);
+                    break;
+                case "close_hold":
+                    await piHub.CloseFlowerHoldAsync().ConfigureAwait(false);
+                    break;
+                case "center":
+                    await piHub.CenterFlowerHoldAsync().ConfigureAwait(false);
+                    break;
+                case "stop":
+                    await piHub.StopFlowerAsync().ConfigureAwait(false);
+                    break;
+                case "open_slow":
+                    await piHub.OpenFlowerSlowAsync().ConfigureAwait(false);
+                    break;
+                case "close_slow":
+                    await piHub.CloseFlowerSlowAsync().ConfigureAwait(false);
+                    break;
+                default:
+                    await WriteJsonAsync(context.Response, 400, "error", "unknown flower action").ConfigureAwait(false);
+                    return;
+            }
+
+            await WriteJsonAsync(context.Response, 200, "ok", $"flower action {action}").ConfigureAwait(false);
+        }
+
+        private async Task HandleLedAsync(HttpListenerContext context)
+        {
+            var request = ParseJsonBody<LedRequest>(context.Request);
+            var mode = (request.mode ?? string.Empty).Trim().ToLowerInvariant();
+            var brightness = request.brightness > 0f ? Mathf.Clamp01(request.brightness) : 1f;
+            var period = request.period > 0f ? request.period : 1.5f;
+            if (piHub == null)
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "PiMessageHub not assigned").ConfigureAwait(false);
+                return;
+            }
+
+            switch (mode)
+            {
+                case "breathe":
+                    var color = string.IsNullOrWhiteSpace(request.color) ? "#00BFFF" : NormalizeHex(request.color);
+                    if (!IsHexColor(color))
+                    {
+                        await WriteJsonAsync(context.Response, 400, "error", "invalid color").ConfigureAwait(false);
+                        return;
+                    }
+                    await piHub.SendLedBreathAsync(color, brightness, period).ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", $"led breathe {color}").ConfigureAwait(false);
+                    return;
+                case "solid":
+                    var solidColor = string.IsNullOrWhiteSpace(request.color) ? "#FFFFFF" : NormalizeHex(request.color);
+                    if (!IsHexColor(solidColor))
+                    {
+                        await WriteJsonAsync(context.Response, 400, "error", "invalid color").ConfigureAwait(false);
+                        return;
+                    }
+                    await piHub.SendLedSolidAsync(solidColor, brightness).ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", $"led solid {solidColor}").ConfigureAwait(false);
+                    return;
+                case "random":
+                    await piHub.SendLedRandomAsync().ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", "led random").ConfigureAwait(false);
+                    return;
+                case "off":
+                    await piHub.SendLedOffAsync().ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", "led off").ConfigureAwait(false);
+                    return;
+                default:
+                    await WriteJsonAsync(context.Response, 400, "error", "unknown led mode").ConfigureAwait(false);
+                    return;
+            }
+        }
+
+        private async Task HandleVoiceAsync(HttpListenerContext context)
+        {
+            var request = ParseJsonBody<VoiceRequest>(context.Request);
+            var action = (request.action ?? string.Empty).Trim().ToLowerInvariant();
+
+            switch (action)
+            {
+                case "wake":
+                    if (voiceLauncher == null)
+                    {
+                        await WriteJsonAsync(context.Response, 503, "error", "VoiceGameLauncher not assigned").ConfigureAwait(false);
+                        return;
+                    }
+                    voiceLauncher.TriggerWakeWordForTester();
+                    await WriteJsonAsync(context.Response, 200, "ok", "wake flow started").ConfigureAwait(false);
+                    return;
+                case "set":
+                case "set_voice":
+                    var newVoice = string.IsNullOrWhiteSpace(request.voice) ? request.value : request.voice;
+                    newVoice = (newVoice ?? string.Empty).Trim();
+                    if (string.IsNullOrEmpty(newVoice))
+                    {
+                        await WriteJsonAsync(context.Response, 400, "error", "voice code required").ConfigureAwait(false);
+                        return;
+                    }
+                    activeVoiceCode = newVoice;
+                    await WriteJsonAsync(context.Response, 200, "ok", $"voice set to {activeVoiceCode}").ConfigureAwait(false);
+                    return;
+                default:
+                    await WriteJsonAsync(context.Response, 400, "error", "unknown voice action").ConfigureAwait(false);
+                    return;
+            }
+        }
+
+        private async Task HandleSpeakAsync(HttpListenerContext context)
+        {
+            var request = ParseJsonBody<SpeakRequest>(context.Request);
+            var text = (request.text ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(text))
+            {
+                await WriteJsonAsync(context.Response, 400, "error", "text required").ConfigureAwait(false);
+                return;
+            }
+
+            var url = (voiceServiceUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "voice service URL not configured").ConfigureAwait(false);
+                return;
+            }
+
+            var voice = string.IsNullOrWhiteSpace(request.voice) ? activeVoiceCode : request.voice.Trim();
+            if (string.IsNullOrEmpty(voice))
+            {
+                voice = DetermineInitialVoiceCode();
+                activeVoiceCode = voice;
+            }
+
+            var speed = request.speed > 0f ? request.speed : 1f;
+            var volume = request.volume > 0f ? request.volume : 1f;
+
+            try
+            {
+                var payload = BuildSpeakPayload(text, voice, speed, volume);
+                using (var content = new StringContent(payload, Encoding.UTF8, "application/json"))
+                {
+                    var response = await SharedHttpClient.PostAsync(url, content).ConfigureAwait(false);
+                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        await WriteJsonAsync(context.Response, (int)response.StatusCode, "error", $"voice service error: {body}").ConfigureAwait(false);
+                        return;
+                    }
+                }
+
+                await WriteJsonAsync(context.Response, 200, "ok", $"speaking with {voice}").ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                await WriteJsonAsync(context.Response, 500, "error", $"voice request failed: {ex.Message}").ConfigureAwait(false);
+            }
+        }
+
+        private async Task HandleGameAsync(HttpListenerContext context)
+        {
+            var request = ParseJsonBody<GameRequest>(context.Request);
+            var action = (request.action ?? string.Empty).Trim().ToLowerInvariant();
+            if (voiceLauncher == null)
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "VoiceGameLauncher not assigned").ConfigureAwait(false);
+                return;
+            }
+
+            switch (action)
+            {
+                case "launch":
+                case "open":
+                    var gameName = (request.name ?? string.Empty).Trim();
+                    if (string.IsNullOrEmpty(gameName))
+                    {
+                        await WriteJsonAsync(context.Response, 400, "error", "game name required").ConfigureAwait(false);
+                        return;
+                    }
+                    voiceLauncher.TriggerLaunchForTester(gameName);
+                    await WriteJsonAsync(context.Response, 200, "ok", $"launching {gameName}").ConfigureAwait(false);
+                    return;
+                case "exit":
+                case "close":
+                    voiceLauncher.TriggerExitForTester();
+                    await WriteJsonAsync(context.Response, 200, "ok", "exit intent sent").ConfigureAwait(false);
+                    return;
+                default:
+                    await WriteJsonAsync(context.Response, 400, "error", "unknown game action").ConfigureAwait(false);
+                    return;
+            }
+        }
+
+        private async Task HandleVoiceOptionsAsync(HttpListenerContext context)
+        {
+            var list = EnumerateVoiceOptions().ToArray();
+            var builder = new StringBuilder();
+            builder.Append("{\"voices\":[");
+            for (int i = 0; i < list.Length; i++)
+            {
+                if (i > 0)
+                {
+                    builder.Append(',');
+                }
+                builder.Append('\"').Append(EscapeJson(list[i])).Append('\"');
+            }
+            builder.Append("],\"current\":\"").Append(EscapeJson(activeVoiceCode ?? DetermineInitialVoiceCode())).Append("\"}");
+            var payload = Encoding.UTF8.GetBytes(builder.ToString());
+            context.Response.StatusCode = 200;
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength64 = payload.Length;
+            await context.Response.OutputStream.WriteAsync(payload, 0, payload.Length).ConfigureAwait(false);
+            context.Response.Close();
+        }
+
+        private string DetermineInitialVoiceCode()
+        {
+            if (!string.IsNullOrWhiteSpace(defaultVoiceCode))
+            {
+                return defaultVoiceCode.Trim();
+            }
+
+            var candidate = availableVoices?.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+            return string.IsNullOrWhiteSpace(candidate) ? "zh_CN" : candidate.Trim();
+        }
+
+        private IEnumerable<string> EnumerateVoiceOptions()
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(defaultVoiceCode))
+            {
+                var trimmed = defaultVoiceCode.Trim();
+                if (seen.Add(trimmed))
+                {
+                    yield return trimmed;
+                }
+            }
+
+            if (availableVoices != null)
+            {
+                foreach (var voice in availableVoices)
+                {
+                    var trimmed = (voice ?? string.Empty).Trim();
+                    if (string.IsNullOrEmpty(trimmed))
+                    {
+                        continue;
+                    }
+                    if (seen.Add(trimmed))
+                    {
+                        yield return trimmed;
+                    }
+                }
+            }
+
+            if (seen.Count == 0)
+            {
+                yield return "zh_CN";
+            }
+        }
+
+        private static string BuildSpeakPayload(string text, string voice, float speed, float volume)
+        {
+            var sb = new StringBuilder();
+            sb.Append("{\"text\":\"").Append(EscapeJson(text)).Append("\"");
+            if (!string.IsNullOrEmpty(voice))
+            {
+                sb.Append(",\"voice\":\"").Append(EscapeJson(voice)).Append("\"");
+            }
+            sb.Append(",\"speed\":").Append(speed.ToString(CultureInfo.InvariantCulture));
+            sb.Append(",\"volume\":").Append(volume.ToString(CultureInfo.InvariantCulture));
+            sb.Append('}');
+            return sb.ToString();
+        }
+
+        private static T ParseJsonBody<T>(HttpListenerRequest request) where T : new()
+        {
+            try
+            {
+                using (var reader = new StreamReader(request.InputStream, request.ContentEncoding ?? Encoding.UTF8))
+                {
+                    var json = reader.ReadToEnd();
+                    if (string.IsNullOrWhiteSpace(json))
+                    {
+                        return new T();
+                    }
+
+                    return JsonUtility.FromJson<T>(json);
+                }
+            }
+            catch (Exception)
+            {
+                return new T();
+            }
+        }
+
+        private static async Task WriteJsonAsync(HttpListenerResponse response, int statusCode, string status, string message)
+        {
+            var payload = $"{{\"status\":\"{status}\",\"message\":\"{EscapeJson(message)}\"}}";
+            var buffer = Encoding.UTF8.GetBytes(payload);
+            response.StatusCode = statusCode;
+            response.ContentType = "application/json";
+            response.ContentLength64 = buffer.Length;
+            await response.OutputStream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            response.Close();
+        }
+
+        private static string EscapeJson(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+
+            return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        }
+
+        private static async Task RespondWithHtmlAsync(HttpListenerResponse response)
+        {
+            var html = BuildPanelHtml();
+            var buffer = Encoding.UTF8.GetBytes(html);
+            response.StatusCode = 200;
+            response.ContentType = "text/html; charset=utf-8";
+            response.ContentLength64 = buffer.Length;
+            await response.OutputStream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            response.Close();
+        }
+
+
+        private static string BuildPanelHtml()
+        {
+            var sb = new StringBuilder(4096);
+            sb.AppendLine(@"<!DOCTYPE html>");
+            sb.AppendLine(@"<html lang=""en"">");
+            sb.AppendLine(@"<head>");
+            sb.AppendLine(@"<meta charset=""utf-8"">");
+            sb.AppendLine(@"<title>Robot User Test Panel</title>");
+            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
+            sb.AppendLine(@"<style>");
+            sb.AppendLine(@"body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 1.5rem; background: #0f1117; color: #f4f4f4; line-height: 1.45; }");
+            sb.AppendLine(@"h1 { font-size: 1.6rem; margin-top: 0; }");
+            sb.AppendLine(@"section { margin-bottom: 1.75rem; padding: 1rem; border-radius: 12px; background: rgba(255,255,255,0.05); }");
+            sb.AppendLine(@"section h2 { margin-top: 0; font-size: 1.05rem; letter-spacing: 0.02em; text-transform: uppercase; opacity: 0.8; }");
+            sb.AppendLine(@"button { cursor: pointer; border: none; border-radius: 8px; padding: 0.65rem 1rem; margin: 0.35rem 0.35rem 0 0; background: #7c5dfa; color: #fff; font-size: 0.95rem; font-weight: 600; box-shadow: 0 4px 20px rgba(0,0,0,0.25); transition: transform 0.1s ease, box-shadow 0.1s ease; }");
+            sb.AppendLine(@"button:hover { transform: translateY(-1px); box-shadow: 0 6px 25px rgba(0,0,0,0.35); }");
+            sb.AppendLine(@"button:active { transform: translateY(0); box-shadow: 0 2px 12px rgba(0,0,0,0.25); }");
+            sb.AppendLine(@".controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.65rem; }");
+            sb.AppendLine(@"label { margin-right: 0.25rem; font-size: 0.85rem; opacity: 0.85; }");
+            sb.AppendLine(@"input[type=number], input[type=text], select { min-width: 4rem; padding: 0.4rem 0.6rem; border-radius: 6px; border: none; background: rgba(255,255,255,0.08); color: #f4f4f4; }");
+            sb.AppendLine(@"input[type=color] { width: 3rem; height: 2rem; border: none; border-radius: 6px; padding: 0; background: transparent; }");
+            sb.AppendLine(@"textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0.4rem; border-radius: 8px; border: none; background: rgba(255,255,255,0.08); color: #f4f4f4; font-size: 0.95rem; resize: vertical; }");
+            sb.AppendLine(@"#status { margin-top: 1rem; font-size: 0.95rem; opacity: 0.9; }");
+            sb.AppendLine(@"</style>");
+            sb.AppendLine(@"</head>");
+            sb.AppendLine(@"<body>");
+            sb.AppendLine(@"<h1>Robot User Test Panel</h1>");
+            sb.AppendLine(@"<p>Connect to the same Wi-Fi network as the host running Unity and open this page from any browser.</p>");
+            sb.AppendLine(@"<section>");
+            sb.AppendLine(@"<h2>Expressions</h2>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<label for=""faceSeconds"">Duration (s)</label>");
+            sb.AppendLine(@"<input id=""faceSeconds"" type=""number"" min=""0"" step=""0.5"" value=""3"">");
+            sb.AppendLine(@"<input id=""faceCustom"" type=""text"" placeholder=""custom preset name"">");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<button onclick=""facePreset('happy')"">Happy</button>");
+            sb.AppendLine(@"<button onclick=""facePreset('neutral')"">Neutral</button>");
+            sb.AppendLine(@"<button onclick=""facePreset('angry')"">Angry</button>");
+            sb.AppendLine(@"<button onclick=""facePreset('sad')"">Sad</button>");
+            sb.AppendLine(@"<button onclick=""facePreset('surprised')"">Surprised</button>");
+            sb.AppendLine(@"<button onclick=""facePreset('idle')"">Idle</button>");
+            sb.AppendLine(@"<button onclick=""customFace()"">Send Custom</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</section>");
+            sb.AppendLine(@"<section>");
+            sb.AppendLine(@"<h2>LED Lighting</h2>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<input id=""ledColor"" type=""color"" value=""#00bfff"">");
+            sb.AppendLine(@"<label for=""ledBrightness"">Brightness</label>");
+            sb.AppendLine(@"<input id=""ledBrightness"" type=""number"" min=""0.1"" max=""1"" step=""0.1"" value=""0.8"">");
+            sb.AppendLine(@"<label for=""ledPeriod"">Period</label>");
+            sb.AppendLine(@"<input id=""ledPeriod"" type=""number"" min=""0.5"" step=""0.1"" value=""2"">");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<button onclick=""ledBreathe()"">Breathe</button>");
+            sb.AppendLine(@"<button onclick=""ledSolid()"">Solid</button>");
+            sb.AppendLine(@"<button onclick=""send('/api/led',{mode:'random'})"">Random</button>");
+            sb.AppendLine(@"<button onclick=""send('/api/led',{mode:'off'})"">Off</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</section>");
+            sb.AppendLine(@"<section>");
+            sb.AppendLine(@"<h2>Flower Servo</h2>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'open'})"">Open</button>");
+            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'close'})"">Close</button>");
+            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'open_hold'})"">Hold Open</button>");
+            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'close_hold'})"">Hold Close</button>");
+            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'center'})"">Center</button>");
+            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'stop'})"">Stop</button>");
+            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'open_slow'})"">Slow Open</button>");
+            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'close_slow'})"">Slow Close</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</section>");
+            sb.AppendLine(@"<section>");
+            sb.AppendLine(@"<h2>Voice &amp; TTS</h2>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<label for=""voiceSelect"">Voice</label>");
+            sb.AppendLine(@"<select id=""voiceSelect"" onchange=""setVoice(this.value)""></select>");
+            sb.AppendLine(@"<button onclick=""send('/api/voice',{action:'wake'})"">Start Wake Flow</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:stretch;"">");
+            sb.AppendLine(@"<textarea id=""speakText"" placeholder=""Type the phrase you want the robot to say""></textarea>");
+            sb.AppendLine(@"<div class=""controls"" style=""width:100%;"">");
+            sb.AppendLine(@"<label for=""voiceSpeed"">Speed</label>");
+            sb.AppendLine(@"<input id=""voiceSpeed"" type=""number"" min=""0.5"" max=""2"" step=""0.1"" value=""1"">");
+            sb.AppendLine(@"<label for=""voiceVolume"">Volume</label>");
+            sb.AppendLine(@"<input id=""voiceVolume"" type=""number"" min=""0.2"" max=""1.5"" step=""0.1"" value=""1"">");
+            sb.AppendLine(@"<button onclick=""speakNow()"">Speak</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</section>");
+            sb.AppendLine(@"<section>");
+            sb.AppendLine(@"<h2>Game Control</h2>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<input id=""gameName"" type=""text"" placeholder=""Game ID (e.g. cornhole)"">");
+            sb.AppendLine(@"<button onclick=""launchGame()"">Launch</button>");
+            sb.AppendLine(@"<button onclick=""exitGame()"">Exit</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</section>");
+            sb.AppendLine(@"<div id=""status"">Ready.</div>");
+            sb.AppendLine(@"<script>");
+            sb.AppendLine(@"const statusEl = document.getElementById('status');");
+            sb.AppendLine(@"const voiceSelect = document.getElementById('voiceSelect');");
+            sb.AppendLine(@"async function send(endpoint, payload){");
+            sb.AppendLine(@"  statusEl.textContent = 'Sending ' + endpoint + ' ...';");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});");
+            sb.AppendLine(@"    const data = await resp.json();");
+            sb.AppendLine(@"    statusEl.textContent = data.status + ': ' + data.message;");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function parseSeconds(){");
+            sb.AppendLine(@"  const seconds = parseFloat(document.getElementById('faceSeconds').value);");
+            sb.AppendLine(@"  return isNaN(seconds) ? 3 : seconds;");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function facePreset(name){");
+            sb.AppendLine(@"  send('/api/face',{mode:name,seconds:parseSeconds()});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function customFace(){");
+            sb.AppendLine(@"  const value = document.getElementById('faceCustom').value||'happy';");
+            sb.AppendLine(@"  send('/api/face',{mode:'custom',value:value,seconds:parseSeconds()});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function ledBreathe(){");
+            sb.AppendLine(@"  const color = document.getElementById('ledColor').value;");
+            sb.AppendLine(@"  const brightness = parseFloat(document.getElementById('ledBrightness').value)||0.8;");
+            sb.AppendLine(@"  const period = parseFloat(document.getElementById('ledPeriod').value)||2;");
+            sb.AppendLine(@"  send('/api/led',{mode:'breathe',color:color,brightness:brightness,period:period});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function ledSolid(){");
+            sb.AppendLine(@"  const color = document.getElementById('ledColor').value;");
+            sb.AppendLine(@"  const brightness = parseFloat(document.getElementById('ledBrightness').value)||0.8;");
+            sb.AppendLine(@"  send('/api/led',{mode:'solid',color:color,brightness:brightness});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function setVoice(value){");
+            sb.AppendLine(@"  if(!value) return;");
+            sb.AppendLine(@"  send('/api/voice',{action:'set',voice:value});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function speakNow(){");
+            sb.AppendLine(@"  const text = document.getElementById('speakText').value;");
+            sb.AppendLine(@"  if(!text.trim()){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: enter text to speak';");
+            sb.AppendLine(@"    return;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  const speed = parseFloat(document.getElementById('voiceSpeed').value)||1;");
+            sb.AppendLine(@"  const volume = parseFloat(document.getElementById('voiceVolume').value)||1;");
+            sb.AppendLine(@"  send('/api/speak',{text:text,voice:voiceSelect.value,speed:speed,volume:volume});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function launchGame(){");
+            sb.AppendLine(@"  const name = document.getElementById('gameName').value||'';");
+            sb.AppendLine(@"  send('/api/game',{action:'launch',name:name});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function exitGame(){");
+            sb.AppendLine(@"  send('/api/game',{action:'exit'});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function loadVoiceOptions(){");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/voice/options');");
+            sb.AppendLine(@"    if(!resp.ok){ return; }");
+            sb.AppendLine(@"    const data = await resp.json();");
+            sb.AppendLine(@"    const voices = Array.isArray(data.voices) ? data.voices : [];");
+            sb.AppendLine(@"    voiceSelect.innerHTML = voices.map(v => `<option value=""${v}"">${v}</option>`).join('');");
+            sb.AppendLine(@"    const current = typeof data.current === 'string' ? data.current : '';");
+            sb.AppendLine(@"    if(current && voices.includes(current)){");
+            sb.AppendLine(@"      voiceSelect.value = current;");
+            sb.AppendLine(@"    } else if(voices.length){");
+            sb.AppendLine(@"      voiceSelect.value = voices[0];");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"  } catch(err) {");
+            sb.AppendLine(@"    console.warn('voice options failed', err);");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"loadVoiceOptions();");
+            sb.AppendLine(@"</script>");
+            sb.AppendLine(@"</body>");
+            sb.AppendLine(@"</html>");
+            return sb.ToString();
+        }
+
+        private static void AddCorsHeaders(HttpListenerResponse response)
+        {
+            response.Headers["Access-Control-Allow-Origin"] = "*";
+            response.Headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS";
+            response.Headers["Access-Control-Allow-Headers"] = "Content-Type";
+        }
+
+        private static bool IsHexColor(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length != 7 || value[0] != '#')
+            {
+                return false;
+            }
+
+            for (int i = 1; i < value.Length; i++)
+            {
+                var c = value[i];
+                var isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!isHex)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static string NormalizeHex(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "#000000";
+            }
+
+            value = value.Trim();
+            if (value.Length == 7 && value[0] == '#')
+            {
+                return value.ToUpperInvariant();
+            }
+
+            if (value.Length == 6)
+            {
+                return "#" + value.ToUpperInvariant();
+            }
+
+            return value;
+        }
+    }
+}
