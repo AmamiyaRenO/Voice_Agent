@@ -261,7 +261,7 @@ MonoBehaviour:
   tlsTargetHost: 
   allowUntrustedCertificates: 0
   autoConnectOnStart: 1
-  sourceLabel: unity_vosk
+  sourceLabel: unity_voice
   duplicatePublishCooldownSeconds: 0.5
 --- !u!4 &143412780
 Transform:
@@ -393,7 +393,7 @@ MonoBehaviour:
   tlsTargetHost: 
   allowUntrustedCertificates: 0
   autoConnectOnStart: 1
-  sourceLabel: unity_vosk
+  sourceLabel: unity_voice
   duplicatePublishCooldownSeconds: 0.5
 --- !u!4 &265265949
 Transform:
@@ -1896,7 +1896,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: f217616079a9a74489a1ae3cd9178787, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  ModelPath: vosk-model-en-us-0.22.zip
   UsePythonService: 1
   PythonServiceUrl: http://127.0.0.1:8000/transcribe
   PythonServiceLanguage: 
@@ -1992,7 +1991,7 @@ MonoBehaviour:
   tlsTargetHost: 
   allowUntrustedCertificates: 0
   autoConnectOnStart: 1
-  sourceLabel: unity_vosk
+  sourceLabel: unity_voice
   duplicatePublishCooldownSeconds: 0.5
 --- !u!4 &1489373253
 Transform:

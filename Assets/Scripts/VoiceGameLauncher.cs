@@ -199,12 +199,6 @@ namespace RobotVoice
 
         private void ApplySpeechKeyPhrases()
         {
-            var speech = GetComponent<VoskSpeechToText>();
-            if (speech == null)
-            {
-                return;
-            }
-
             var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var aggregated = new List<string>();
 
@@ -262,9 +256,6 @@ namespace RobotVoice
                 }
             }
 
-            TryAddRange(speech.KeyPhrases);
-
-            speech.KeyPhrases = aggregated;
             RebuildKeywordPhrases(aggregated);
         }
 

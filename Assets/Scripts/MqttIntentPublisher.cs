@@ -27,7 +27,7 @@ namespace RobotVoice
         [SerializeField] private bool allowUntrustedCertificates;
         [Header("MQTT Options")]
         [SerializeField] private bool autoConnectOnStart = true;
-        [SerializeField] private string sourceLabel = "unity_vosk";
+        [SerializeField] private string sourceLabel = "unity_voice";
         [Header("Flood Protection")]
         [SerializeField, Tooltip("Minimum seconds between publishing identical payloads to the intent topic"), Min(0f)]
         private float duplicatePublishCooldownSeconds = 0.5f;
@@ -448,7 +448,7 @@ namespace RobotVoice
         [Header("MQTT disabled (define ROBOTVOICE_USE_MQTT to enable)")]
         [SerializeField, Tooltip("Disable Unity-side intent publishing to avoid duplication")] 
         private bool disablePublishing = true;
-        [SerializeField] private string sourceLabel = "unity_vosk";
+        [SerializeField] private string sourceLabel = "unity_voice";
 
         public Task EnsureConnectedAsync()
         {

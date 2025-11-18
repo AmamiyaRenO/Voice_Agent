@@ -27,13 +27,12 @@ python python_voice_service/main.py
 
 This repository contains the Unity client that powers the spoken interface
 for the [Robot_opr](https://github.com/AmamiyaRenO/Robot_opr) rehabilitation
-robot. It wraps the [Vosk](https://alphacephei.com/vosk/) offline speech
-recogniser, forwards recognised intents to the robot control stack over MQTT
+robot. It forwards recognised intents to the robot control stack over MQTT
 and can listen to multiple transcription sources. The current production
 workflow captures Windows 11 Live Captions output via
 [`scripts/LiveCaptionsListener`](scripts/LiveCaptionsListener) and feeds those
-sentences into the Unity scene. You can still delegate transcription to the
-bundled Vosk models or to the optional Python service that runs the
+sentences into the Unity scene. You can also delegate transcription to the
+optional Python service that runs the
 [Faster-Whisper](https://github.com/guillaumekln/faster-whisper) model. The
 Unity scenes included here were used to drive the coach-style voice assistant
 seen in the project demos.
@@ -58,8 +57,8 @@ seen in the project demos.
   into Unity so you can reuse the OS-level speech recogniser without custom
   ASR.
 * **Python transcription fallback** – Stream microphone audio to the
-  `python_voice_service` FastAPI application if you prefer Faster-Whisper or
-  need an offline alternative to Live Captions/Vosk.
+`python_voice_service` FastAPI application if you prefer Faster-Whisper or
+need an offline alternative to Live Captions.
 * **One-command local tooling** – `helper.bat` (Windows) and
   `scripts/start_local_services.py` can boot the MQTT hub, Live Captions
   listener, Python voice service and optional orchestrators together.
@@ -97,9 +96,6 @@ ProjectSettings/       # Unity project configuration
 2. **Open the Unity project**
    * Launch Unity Hub and add the `Voice_Agent` folder as a project.
    * Load the provided scene and locate the `VoskSpeechToText` component.
-   * Place a zipped Vosk model inside `Assets/StreamingAssets/` and set the
-     `ModelPath` field to its filename (the archive will be extracted on first
-     run).
    * If you plan to publish intents, enable the `ROBOTVOICE_USE_MQTT` scripting
      define (Project Settings → Player → Scripting Define Symbols).
    * Assign the `wakeWordPromptClip` on `VoiceGameLauncher` to `Assets/Voice/help.mp3`

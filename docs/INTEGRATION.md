@@ -357,7 +357,7 @@ The Agent typically publishes launch/exit intents and an external orchestrator r
 - Launch example:
 
 ```json
-{"type":"LAUNCH_GAME","game_name":"cornhole","source":"unity_vosk"}
+{"type":"LAUNCH_GAME","game_name":"cornhole","source":"unity_voice"}
 ```
 
 - Exit example:

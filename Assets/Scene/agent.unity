@@ -442,7 +442,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: f217616079a9a74489a1ae3cd9178787, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  ModelPath: vosk-model-en-us-0.22.zip
+  # ModelPath removed
   UsePythonService: 1
   PythonServiceUrl: http://127.0.0.1:8000/transcribe
   PythonServiceLanguage: 
@@ -525,7 +525,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 6e1e806f290598b4c9b32a8f656b6257, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  sourceLabel: unity_vosk
+  sourceLabel: unity_voice
 --- !u!4 &1307454271
 Transform:
   m_ObjectHideFlags: 0
