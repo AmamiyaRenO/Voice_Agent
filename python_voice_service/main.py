@@ -976,65 +976,7 @@ async def respond(payload: RespondRequest) -> RespondResponse:
     return RespondResponse(text=reply, generation_seconds=generation_seconds)
 
 
-# --- Compatibility TTS endpoint -------------------------------------------------
-# Some clients call POST /tts expecting a TTS service. Provide a thin proxy to the
-# Piper HTTP wrapper so existing integrations keep working without changes.
 
-
-class TtsRequest(BaseModel):
-    text: str = Field(..., min_length=1)
-
-
-@app.post("/tts")
-async def tts(payload: TtsRequest) -> JSONResponse:
-    start_time = time.perf_counter()
-    url = f"{_piper_http_base_url()}/speak"
-    try:
-        client = _AsyncHttpClient.get()
-        resp = await client.post(url, json={"text": payload.text})
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=resp.text.strip())
-
-    # Proxy Piper's JSON (audio_wav_base64 + sample_rate) and include timing info
-    synthesis_seconds = round(time.perf_counter() - start_time, 4)
-    data = resp.json()
-    data["synthesis_seconds"] = synthesis_seconds
-    logger.info("TTS synthesis finished in %.3fs", synthesis_seconds)
-
-    return JSONResponse(data)
-
-
-from fastapi.responses import Response  # existing import above includes JSONResponse only
-
-
-@app.get("/tts")
-async def tts_get(text: str) -> Response:
-    start_time = time.perf_counter()
-    text = (text or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Empty text")
-
-    url = f"{_piper_http_base_url()}/speak"
-    try:
-        client = _AsyncHttpClient.get()
-        resp = await client.get(url, params={"text": text})
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to contact Piper at {url}: {exc}") from exc
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=resp.text.strip())
-
-    synthesis_seconds = round(time.perf_counter() - start_time, 4)
-    logger.info("TTS synthesis finished in %.3fs", synthesis_seconds)
-
-    return Response(
-        content=resp.content,
-        media_type="audio/wav",
-        headers={"X-Synthesis-Seconds": f"{synthesis_seconds:.4f}"},
-    )
 
 
 if __name__ == "__main__":

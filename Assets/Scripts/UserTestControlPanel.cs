@@ -20,8 +20,8 @@ namespace RobotVoice
         [SerializeField] private VoiceGameLauncher voiceLauncher;
 
         [Header("Voice Service")]
-        [SerializeField, Tooltip("HTTP endpoint for the Python voice service /tts route")]
-        private string voiceServiceUrl = "http://127.0.0.1:8000/tts";
+        [SerializeField, Tooltip("HTTP endpoint for the Piper HTTP /speak route")]
+        private string voiceServiceUrl = "http://127.0.0.1:5005/speak";
         [SerializeField, Tooltip("Default voice code passed to the TTS endpoint")]
         private string defaultVoiceCode = "zh_CN";
         [SerializeField, Tooltip("Additional voice codes shown in the dropdown")]

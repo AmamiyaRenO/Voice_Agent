@@ -11,8 +11,8 @@ Everything is language-agnostic with minimal dependencies.
 
 ### 1) Network & Services
 
-- TTS HTTP service: `http://<HOST>:8000`
-  - Endpoint used below: `POST /tts`
+- TTS HTTP service: `http://<HOST>:5005`
+  - Endpoint used below: `GET /speak?text=...`（或 `POST /speak` 带 JSON `{ "text": "..." }`）
   - Replace `<HOST>` with the Agent PC IP (e.g., `10.0.0.1` or `127.0.0.1`).
 
 - MQTT Broker: `<HOST>:1883`
@@ -30,9 +30,7 @@ Assumptions:
 1) Speak a line of text (TTS):
 
 ```bash
-curl -X POST "http://10.0.0.1:8000/tts" \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Hello, world!","voice":"zh_CN","play":true}'
+curl -X GET "http://10.0.0.1:5005/speak?text=Hello%2C%20world%21" --output out.wav
 ```
 
 2) Show a face expression on the Pi display via MQTT:
@@ -80,7 +78,7 @@ Payload:
 ### 3) HTTP API – TTS
 
 - Endpoint
-  - `POST http://<HOST>:8000/tts`
+  - `GET http://<HOST>:5005/speak?text=...`
 
 - Request (JSON)
   - `text` (string, required): text to speak
@@ -201,13 +199,9 @@ using System.Threading.Tasks;
 
 public static class RobotTtsClient {
   // baseUrl example: "http://10.0.0.1:8000"
-  public static async Task SayAsync(string baseUrl, string text, string voice = "zh_CN", float speed = 1f, float volume = 1f, bool play = true) {
-    var url = $"{baseUrl.TrimEnd('/')}/tts";
-    var payload = $"{{\"text\":\"{Escape(text)}\",\"voice\":\"{voice}\",\"speed\":{speed},\"volume\":{volume},\"play\":{play.ToString().ToLower()} }}";
-    using var req = new UnityWebRequest(url, UnityWebRequest.kHttpVerbPOST);
-    req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(payload));
-    req.downloadHandler = new DownloadHandlerBuffer();
-    req.SetRequestHeader("Content-Type", "application/json");
+  public static async Task SayAsync(string baseUrl, string text) {
+    var url = $"{baseUrl.TrimEnd('/')}/speak?text={UnityWebRequest.EscapeURL(text)}";
+    using var req = UnityWebRequestMultimedia.GetAudioClip(url, AudioType.WAV);
     var op = req.SendWebRequest();
     while (!op.isDone) await Task.Yield();
     if (req.result != UnityWebRequest.Result.Success) {
@@ -299,11 +293,8 @@ import paho.mqtt.publish as publish
 HOST = "10.0.0.1"
 
 # TTS
-requests.post(f"http://{HOST}:8000/tts", json={
-    "text": "Hello from Python!",
-    "voice": "zh_CN",
-    "play": True,
-})
+r = requests.get(f"http://{HOST}:5005/speak", params={"text": "Hello from Python!"})
+open("out.wav", "wb").write(r.content)
 
 # Pi Face
 publish.single("robot/pi/face/cmd", json.dumps({
@@ -325,11 +316,8 @@ publish.single("robot/pi/servo/cmd", json.dumps({
 
 ```javascript
 // TTS
-await fetch("http://10.0.0.1:8000/tts", {
-  method: "POST",
-  headers: {"Content-Type": "application/json"},
-  body: JSON.stringify({ text: "Hello from Node!", voice: "zh_CN", play: true }),
-});
+const r = await fetch("http://10.0.0.1:5005/speak?text=Hello%20from%20Node%21");
+const buf = await r.arrayBuffer(); // WAV bytes
 
 // MQTT
 import mqtt from "mqtt";
@@ -400,7 +388,7 @@ Security notes:
 
 - This document (`docs/INTEGRATION.md`).
 - A Postman/Insomnia collection (optional) with:
-  - `POST /tts`
+  - `GET /speak?text=...`
   - MQTT examples for face/servo/led
 - Optionally, a small single-file SDK per language that wraps the examples above.
 

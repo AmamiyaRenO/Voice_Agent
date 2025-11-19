@@ -28,8 +28,10 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 1883
     topics: Topics = field(default_factory=Topics)
-    voice_api_url: str = "http://127.0.0.1:8000"
-    tts_endpoint: str = "/tts"  # POST {text}
+    # Split base URLs: respond via python voice service (8000), TTS via Piper HTTP (5005)
+    respond_api_url: str = "http://127.0.0.1:8000"
+    tts_api_url: str = "http://127.0.0.1:5005"
+    tts_endpoint: str = "/speak"  # GET ?text=...
     respond_endpoint: str = "/respond"  # POST {text}
     speak_audio: bool = True
     source_label: str = "dialog_service"
@@ -43,7 +45,9 @@ def load_config() -> Config:
         dialog_query=os.environ.get("DIALOG_QUERY_TOPIC", cfg.topics.dialog_query),
         dialog_answer=os.environ.get("DIALOG_ANSWER_TOPIC", cfg.topics.dialog_answer),
     )
-    cfg.voice_api_url = os.environ.get("VOICE_API_URL", cfg.voice_api_url).rstrip("/")
+    # Backward compatibility: VOICE_API_URL used to serve both; now prefer RESPOND_API_URL and TTS_API_URL/PIPER_HTTP_URL
+    cfg.respond_api_url = os.environ.get("RESPOND_API_URL", os.environ.get("VOICE_API_URL", cfg.respond_api_url)).rstrip("/")
+    cfg.tts_api_url = os.environ.get("TTS_API_URL", os.environ.get("PIPER_HTTP_URL", cfg.tts_api_url)).rstrip("/")
     cfg.speak_audio = os.environ.get("DIALOG_SPEAK_AUDIO", "1").lower() in {"1", "true", "yes", "on"}
     cfg.source_label = os.environ.get("DIALOG_SOURCE_LABEL", cfg.source_label)
     return cfg
@@ -99,20 +103,15 @@ class DialogService:
 
     def _tts_and_play(self, text: str, corr_id: Optional[str]) -> None:
         try:
-            url = f"{self.cfg.voice_api_url}{self.cfg.tts_endpoint}"
-            resp = self.http.post(url, json={"text": text})
+            url = f"{self.cfg.tts_api_url}{self.cfg.tts_endpoint}"
+            # Piper HTTP 支持 GET /speak?text=... 直接返回 WAV
+            resp = self.http.get(url, params={"text": text})
             resp.raise_for_status()
-            data = resp.json()
-            audio_b64 = data.get("audio_wav_base64")
-            if not isinstance(audio_b64, str) or not audio_b64:
-                print("[dialog] TTS response missing audio data")
-                return
-            wav_bytes = base64.b64decode(audio_b64)
+            wav_bytes = resp.content
             try:
                 self._publish_tts_state(True, corr_id, text)
                 winsound.PlaySound(wav_bytes, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
             except Exception:
-                # 忽略播放错误，避免影响主流程
                 pass
             finally:
                 self._publish_tts_state(False, corr_id)
@@ -141,7 +140,7 @@ class DialogService:
         corr_id = payload.get("corr_id")
 
         try:
-            url = f"{self.cfg.voice_api_url}{self.cfg.respond_endpoint}"
+            url = f"{self.cfg.respond_api_url}{self.cfg.respond_endpoint}"
             resp = self.http.post(url, json={"text": text})
             resp.raise_for_status()
             data = resp.json()

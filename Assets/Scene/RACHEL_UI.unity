@@ -2022,7 +2022,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   piHub: {fileID: 143412778}
   voiceLauncher: {fileID: 1489373251}
-  voiceServiceUrl: http://127.0.0.1:8000/tts
+  voiceServiceUrl: http://127.0.0.1:5005/speak
   defaultVoiceCode: en_US
   availableVoices:
   - zh_CN

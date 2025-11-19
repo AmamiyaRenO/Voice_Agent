@@ -1,4 +1,11 @@
 # Voice Agent for Robot OPR
+
+## Primary Speech Pipeline (Windows Live Captions)
+
+本项目的默认/主语音识别路径为 Windows 11 实时字幕（Live Captions）。由 `scripts/LiveCaptionsListener/Program.cs` 持续监听系统 Live Captions 的识别结果，并将句子推送进 Unity 进行后续意图解析与发布，无需本地模型下载，低延迟、稳定可靠，适合作为生产默认方案。
+
+当需要完全离线或更换识别后端时，可启用可选的 `python_voice_service`（Faster-Whisper）作为备用方案。
+
 ## Python Speech Service (Faster-Whisper) Environment Variables
 
 > The Windows Live Captions bridge is the default speech-to-text pipeline. The
