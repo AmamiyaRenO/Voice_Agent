@@ -1015,7 +1015,7 @@ namespace RobotVoice
             sb.AppendLine(@"function renderLog(entries){");
             sb.AppendLine(@"  if(!logContainer) return;");
             sb.AppendLine(@"  if(!Array.isArray(entries) || !entries.length){");
-            sb.AppendLine(@"    logContainer.innerHTML = '<div class=\"log-empty\">Conversations will appear here once the agent speaks.</div>';");
+            sb.AppendLine("    logContainer.innerHTML = '<div class=\"log-empty\">Conversations will appear here once the agent speaks.</div>';");
             sb.AppendLine(@"    return;");
             sb.AppendLine(@"  }");
             sb.AppendLine(@"  const nearBottom = (logContainer.scrollTop + logContainer.clientHeight) >= (logContainer.scrollHeight - 20);");
@@ -1025,7 +1025,7 @@ namespace RobotVoice
             sb.AppendLine(@"    const speaker = escapeHtml(entry.speaker || speakerFromRole(role));");
             sb.AppendLine(@"    const text = escapeHtml(entry.message || '');");
             sb.AppendLine(@"    const timestamp = formatLogTime(entry.timestamp);");
-            sb.AppendLine(@"    return `<div class=\"log-entry\"><div class=\"log-icon\" style=\"background:${style.bg};color:${style.color};\">${style.icon}</div><div class=\"log-body\"><div class=\"log-meta\"><span class=\"log-speaker\">${speaker}</span><span>•</span><span>${timestamp}</span></div><div class=\"log-message\">${text}</div></div></div>`;");
+            sb.AppendLine("    return `<div class=\"log-entry\"><div class=\"log-icon\" style=\"background:${style.bg};color:${style.color};\">${style.icon}</div><div class=\"log-body\"><div class=\"log-meta\"><span class=\"log-speaker\">${speaker}</span><span>•</span><span>${timestamp}</span></div><div class=\"log-message\">${text}</div></div></div>`;");
             sb.AppendLine(@"  }).join('');");
             sb.AppendLine(@"  logContainer.innerHTML = html;");
             sb.AppendLine(@"  if(nearBottom){");

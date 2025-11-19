@@ -42,12 +42,7 @@ namespace RobotVoice
         [SerializeField] private GameObject wakeListeningIndicatorRoot;
         [SerializeField] private Image wakeListeningProgressImage;
         [SerializeField] private Text wakeListeningCountdownText;
-        [Header("Coach Agent")]
-        [SerializeField] private string coachRespondUrl = "http://127.0.0.1:8000/respond";
-        [SerializeField] private float coachResponseTimeoutSeconds = 10f;
-        [SerializeField] private GameObject coachResponsePanel;
-        [SerializeField] private Text coachResponseText;
-        [SerializeField] [Min(0f)] private float coachResponseDisplaySeconds = 6f;
+        // Coach replies are handled by external dialog_service; Unity no longer fetches /respond or renders coach UI.
         [Header("TTS (Piper)")]
         [SerializeField] private string piperSpeakUrl = "http://127.0.0.1:5005/speak";
         [SerializeField, Tooltip("Prompt text sent to LLM when wake word is detected. Keep it short.")]
@@ -58,8 +53,6 @@ namespace RobotVoice
         private VoiceIntentConfig runtimeConfig;
         private readonly List<KeywordPhrase> keywordPhrases = new List<KeywordPhrase>();
         private bool awaitingFirstCommand;
-        private Coroutine coachSpeechCoroutine;
-        private Coroutine coachResponseVisibilityCoroutine;
         // removed expiry timestamp: awaitingFirstCommand controls lifecycle
         private Coroutine wakeListeningIndicatorCoroutine;
         private string lastDeliveredTranscript = string.Empty;
@@ -112,7 +105,6 @@ namespace RobotVoice
             ApplyFullscreenMode();
             runtimeConfig = BuildRuntimeConfig();
             ApplySpeechKeyPhrases();
-            ResetCoachResponseDisplay();
         }
 
         private void Start()
@@ -122,17 +114,6 @@ namespace RobotVoice
 
         private void OnDestroy()
         {
-            if (coachSpeechCoroutine != null)
-            {
-                StopCoroutine(coachSpeechCoroutine);
-                coachSpeechCoroutine = null;
-            }
-            if (coachResponseVisibilityCoroutine != null)
-            {
-                StopCoroutine(coachResponseVisibilityCoroutine);
-                coachResponseVisibilityCoroutine = null;
-            }
-            ResetCoachResponseDisplay();
             StopWakeWordListeningIndicator();
             // Piper 统一出声，无需 Windows TTS 释放
         }
@@ -407,7 +388,7 @@ namespace RobotVoice
 
                 ConversationLog.AddEntry(ConversationRole.User, textForCoach);
                 ClearWakeWordWindow();
-                RequestCoachSpeech(textForCoach, string.Empty);
+                // Coach reply handled by external dialog_service
             }
         }
 
@@ -439,7 +420,7 @@ namespace RobotVoice
                 return;
             }
 
-            ConversationLog.AddEntry(ConversationRole.Wizard, trimmed, "Wizard Override");
+            // 不再记录 Wizard 覆盖到日志，避免干扰对话流展示
 
             // 在播放前触发呼吸灯效果，提示“正在说话”
             if (piHub != null)
@@ -502,8 +483,7 @@ namespace RobotVoice
                 ? "I'm listening."
                 : wakeAcknowledgeUserText.Trim();
 
-            // 显示 + 播放 TTS（若可用）
-            ShowCoachResponseOnScreen(ack);
+            // 仅播放 TTS（若可用），不再显示 Coach UI
             if (!string.IsNullOrWhiteSpace(piperSpeakUrl))
             {
                 yield return PlayTtsFromPiper(ack);
@@ -672,7 +652,7 @@ namespace RobotVoice
             ClearWakeWordWindow();
             lastIntentTime = Time.realtimeSinceStartup;
             _ = publisher.PublishLaunchIntentAsync(gameName, rawText);
-            RequestCoachSpeech(rawText, gameName);
+            // Coach reply handled by external dialog_service
         }
 
         private void PublishExit(string rawText)
@@ -686,230 +666,38 @@ namespace RobotVoice
                 ConversationLog.AddEntry(ConversationRole.User, rawText);
             }
             _ = publisher.PublishExitIntentAsync(rawText);
-            RequestCoachSpeech(rawText, string.Empty);
+            // Coach reply handled by external dialog_service
         }
 
         private void PresentWakeWordPrompt() { }
 
         private void PlayWakeWordPromptClip() { }
 
-        private void RequestCoachSpeech(string recognisedText, string fallbackGameName)
+        // Unity-side coach reply logic removed; dialog_service is the sole responder.
+
+        // Utility: minimal JSON escaper for inline payload building
+        private static string EscapeJson(string value)
         {
-            var trimmedRecognised = string.IsNullOrWhiteSpace(recognisedText)
-                ? string.Empty
-                : recognisedText.Trim();
-
-            if (string.IsNullOrWhiteSpace(trimmedRecognised))
-            {
-                trimmedRecognised = string.IsNullOrWhiteSpace(fallbackGameName)
-                    ? string.Empty
-                    : fallbackGameName.Trim();
-            }
-
-            if (string.IsNullOrWhiteSpace(trimmedRecognised))
-            {
-                return;
-            }
-
-            if (coachSpeechCoroutine != null)
-            {
-                StopCoroutine(coachSpeechCoroutine);
-                coachSpeechCoroutine = null;
-            }
-
-            coachSpeechCoroutine = StartCoroutine(GenerateAndSpeakCoachReply(trimmedRecognised));
-        }
-
-		private IEnumerator GenerateAndSpeakCoachReply(string recognisedText)
-        {
-            try
-            {
-                var targetUrl = string.IsNullOrWhiteSpace(coachRespondUrl)
-                    ? string.Empty
-                    : coachRespondUrl.Trim();
-
-                if (string.IsNullOrWhiteSpace(targetUrl))
-                {
-                    yield break;
-                }
-
-                var payload = new CoachRespondPayload
-                {
-                    text = recognisedText
-                };
-
-                var json = JsonUtility.ToJson(payload);
-
-                using (var request = new UnityWebRequest(targetUrl, UnityWebRequest.kHttpVerbPOST))
-                {
-                    var bodyRaw = Encoding.UTF8.GetBytes(json);
-                    request.uploadHandler = new UploadHandlerRaw(bodyRaw);
-                    request.downloadHandler = new DownloadHandlerBuffer();
-                    request.SetRequestHeader("Content-Type", "application/json");
-                    request.timeout = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(1f, coachResponseTimeoutSeconds)), 1, 600);
-
-                    yield return request.SendWebRequest();
-
-                    if (request.result == UnityWebRequest.Result.Success)
-                    {
-                        var reply = ExtractCoachReply(request.downloadHandler?.text);
-                        if (!string.IsNullOrWhiteSpace(reply))
-                        {
-                            var finalReply = reply.Trim();
-								ShowCoachResponseOnScreen(finalReply);
-								Debug.Log($"[RobotVoice] Coach: {finalReply}");
-								if (!string.IsNullOrWhiteSpace(piperSpeakUrl))
-								{
-									// 在 LLM 的 TTS 播放前触发呼吸灯
-									if (piHub != null)
-									{
-										_ = piHub.SendLedBreathAsync();
-									}
-									StartCoroutine(PlayTtsFromPiper(finalReply));
-								}
-                        }
-                        else
-                        {
-                            ResetCoachResponseDisplay();
-                            if (logDebugMessages)
-                            {
-                                Debug.LogWarning("[RobotVoice] Coach reply was empty");
-                            }
-                        }
-                    }
-                    else
-                    {
-                        ResetCoachResponseDisplay();
-                        if (logDebugMessages)
-                        {
-                            var error = string.IsNullOrWhiteSpace(request.error)
-                                ? $"HTTP {(int)request.responseCode}"
-                                : request.error;
-                            Debug.LogWarning($"[RobotVoice] Failed to fetch coach reply: {error}");
-                        }
-                    }
-                }
-            }
-            finally
-            {
-                coachSpeechCoroutine = null;
-            }
-        }
-
-        private string ExtractCoachReply(string json)
-        {
-            if (string.IsNullOrWhiteSpace(json))
+            if (string.IsNullOrEmpty(value))
             {
                 return string.Empty;
             }
 
-            try
+            var sb = new StringBuilder(value.Length + 16);
+            for (int i = 0; i < value.Length; i++)
             {
-                var node = JSONNode.Parse(json);
-                return node?["text"]?.Value ?? string.Empty;
-            }
-            catch (Exception ex)
-            {
-                if (logDebugMessages)
+                var ch = value[i];
+                switch (ch)
                 {
-                    Debug.LogWarning($"[RobotVoice] Failed to parse coach reply: {ex.Message}");
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\"': sb.Append("\\\""); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default: sb.Append(ch); break;
                 }
             }
-
-            return string.Empty;
-        }
-
-        private void ShowCoachResponseOnScreen(string message)
-        {
-            if (coachResponseText == null && coachResponsePanel == null)
-            {
-                return;
-            }
-
-            if (coachResponseVisibilityCoroutine != null)
-            {
-                StopCoroutine(coachResponseVisibilityCoroutine);
-                coachResponseVisibilityCoroutine = null;
-            }
-
-            var trimmedMessage = string.IsNullOrWhiteSpace(message) ? string.Empty : message.Trim();
-
-            if (!string.IsNullOrEmpty(trimmedMessage))
-            {
-                ConversationLog.AddEntry(ConversationRole.Coach, trimmedMessage);
-            }
-
-            if (coachResponseText != null)
-            {
-                coachResponseText.text = trimmedMessage;
-            }
-
-            var root = coachResponsePanel != null
-                ? coachResponsePanel
-                : coachResponseText != null
-                    ? coachResponseText.gameObject
-                    : null;
-
-            if (root != null)
-            {
-                root.SetActive(!string.IsNullOrEmpty(trimmedMessage));
-            }
-
-            if (!string.IsNullOrEmpty(trimmedMessage) && coachResponseDisplaySeconds > 0f)
-            {
-                coachResponseVisibilityCoroutine = StartCoroutine(HideCoachResponseAfterDelay(coachResponseDisplaySeconds));
-            }
-        }
-
-        private IEnumerator HideCoachResponseAfterDelay(float delaySeconds)
-        {
-            if (delaySeconds > 0f)
-            {
-                yield return new WaitForSeconds(delaySeconds);
-            }
-
-            if (coachResponseText != null)
-            {
-                coachResponseText.text = string.Empty;
-            }
-
-            var root = coachResponsePanel != null
-                ? coachResponsePanel
-                : coachResponseText != null
-                    ? coachResponseText.gameObject
-                    : null;
-
-            if (root != null)
-            {
-                root.SetActive(false);
-            }
-
-            coachResponseVisibilityCoroutine = null;
-        }
-
-        private void ResetCoachResponseDisplay()
-        {
-            if (coachResponseVisibilityCoroutine != null)
-            {
-                StopCoroutine(coachResponseVisibilityCoroutine);
-                coachResponseVisibilityCoroutine = null;
-            }
-
-            if (coachResponseText != null)
-            {
-                coachResponseText.text = string.Empty;
-            }
-
-            var root = coachResponsePanel != null
-                ? coachResponsePanel
-                : coachResponseText != null
-                    ? coachResponseText.gameObject
-                    : null;
-
-            if (root != null)
-            {
-                root.SetActive(false);
-            }
+            return sb.ToString();
         }
 
 
@@ -990,6 +778,13 @@ namespace RobotVoice
                 yield break;
             }
 
+            // 通知外部监听者（如 LiveCaptionsListener）进入 TTS 播放，便于抑制回声
+            if (publisher != null)
+            {
+                var payload = "{\"speaking\":true,\"text\":\"" + EscapeJson(text) + "\"}";
+                _ = publisher.PublishRawAsync("robot/tts/state", payload);
+            }
+
             // 改用 GET 直取 WAV，避免 POST 卡住
             var separator = url.Contains("?") ? "&" : "?";
             var query = new List<string> { "text=" + UnityWebRequest.EscapeURL(text) };
@@ -1046,6 +841,13 @@ namespace RobotVoice
             if (speechToText != null)
             {
                 speechToText.SendMessage("SetPlaybackMute", false, SendMessageOptions.DontRequireReceiver);
+            }
+
+            // 通知外部监听者 TTS 结束
+            if (publisher != null)
+            {
+                var payloadEnd = "{\"speaking\":false}";
+                _ = publisher.PublishRawAsync("robot/tts/state", payloadEnd);
             }
         }
 
