@@ -44,11 +44,11 @@ namespace RobotVoice
         private string activeTtsModel;
         private static readonly HttpClient SharedHttpClient = new HttpClient();
         private const float DefaultFaceSeconds = 3f;
-                private SynchronizationContext mainThreadContext;
+        private SynchronizationContext mainThreadContext;
 
         private void Awake()
         {
-                        mainThreadContext = SynchronizationContext.Current;
+            mainThreadContext = SynchronizationContext.Current;
             activeVoiceCode = DetermineInitialVoiceCode();
             activeTtsModel = DetermineInitialTtsModel();
             if (autoStart)
@@ -473,43 +473,59 @@ namespace RobotVoice
                 return;
             }
 
-			// 优先让 Unity 侧直接播放（经由 VoiceGameLauncher → Piper /speak）
-			if (voiceLauncher != null)
-			{
-				PostToMainThread(() => voiceLauncher.TriggerSpeakForTester(text));
-				await WriteJsonAsync(context.Response, 200, "ok", "playing locally").ConfigureAwait(false);
-				return;
-			}
+            var requestedVoice = string.IsNullOrWhiteSpace(request.voice) ? activeVoiceCode : request.voice.Trim();
+            if (string.IsNullOrWhiteSpace(requestedVoice))
+            {
+                requestedVoice = DetermineInitialVoiceCode();
+            }
 
-			// 回退：如果未绑定 VoiceGameLauncher，则仍向语音服务发送请求（但不会在本机播放）
-			var url = (voiceServiceUrl ?? string.Empty).Trim();
-			if (string.IsNullOrWhiteSpace(url))
-			{
-				await WriteJsonAsync(context.Response, 503, "error", "voice service URL not configured").ConfigureAwait(false);
-				return;
-			}
+            var requestedModel = string.IsNullOrWhiteSpace(request.model) ? activeTtsModel : request.model.Trim();
+            if (string.IsNullOrWhiteSpace(requestedModel))
+            {
+                requestedModel = DetermineInitialTtsModel();
+            }
 
-			try
-			{
-                                var requestedModel = string.IsNullOrWhiteSpace(request.model) ? activeTtsModel : request.model.Trim();
-                                var payload = BuildSpeakPayload(text, activeVoiceCode, requestedModel, 1f, 1f);
-				using (var content = new StringContent(payload, Encoding.UTF8, "application/json"))
-				{
-					var response = await SharedHttpClient.PostAsync(url, content).ConfigureAwait(false);
-					var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-					if (!response.IsSuccessStatusCode)
-					{
-						await WriteJsonAsync(context.Response, (int)response.StatusCode, "error", $"voice service error: {body}").ConfigureAwait(false);
-						return;
-					}
-				}
+            var requestedSpeed = request.speed > 0f ? request.speed : 1f;
+            var requestedVolume = request.volume > 0f ? request.volume : 1f;
 
-				await WriteJsonAsync(context.Response, 200, "ok", "synthesis complete (no local playback)").ConfigureAwait(false);
-			}
-			catch (Exception ex)
-			{
-				await WriteJsonAsync(context.Response, 500, "error", $"voice request failed: {ex.Message}").ConfigureAwait(false);
-			}
+            // 优先让 Unity 侧直接播放（经由 VoiceGameLauncher → Piper /speak）
+            if (voiceLauncher != null)
+            {
+                var voiceToSend = requestedVoice;
+                var modelToSend = requestedModel;
+                PostToMainThread(() => voiceLauncher.TriggerSpeakForTester(text, voiceToSend, modelToSend));
+                await WriteJsonAsync(context.Response, 200, "ok", "playing locally").ConfigureAwait(false);
+                return;
+            }
+
+            // 回退：如果未绑定 VoiceGameLauncher，则仍向语音服务发送请求（但不会在本机播放）
+            var url = (voiceServiceUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "voice service URL not configured").ConfigureAwait(false);
+                return;
+            }
+
+            try
+            {
+                var payload = BuildSpeakPayload(text, requestedVoice, requestedModel, requestedSpeed, requestedVolume);
+                using (var content = new StringContent(payload, Encoding.UTF8, "application/json"))
+                {
+                    var response = await SharedHttpClient.PostAsync(url, content).ConfigureAwait(false);
+                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        await WriteJsonAsync(context.Response, (int)response.StatusCode, "error", $"voice service error: {body}").ConfigureAwait(false);
+                        return;
+                    }
+                }
+
+                await WriteJsonAsync(context.Response, 200, "ok", "synthesis complete (no local playback)").ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                await WriteJsonAsync(context.Response, 500, "error", $"voice request failed: {ex.Message}").ConfigureAwait(false);
+            }
         }
 
         private async Task HandleGameAsync(HttpListenerContext context)
@@ -546,19 +562,19 @@ namespace RobotVoice
             }
         }
 
-		private void PostToMainThread(Action action)
-		{
-			if (action == null) return;
-			var ctx = mainThreadContext;
-			if (ctx != null && SynchronizationContext.Current != ctx)
-			{
-				ctx.Post(_ => action(), null);
-			}
-			else
-			{
-				action();
-			}
-		}
+        private void PostToMainThread(Action action)
+        {
+            if (action == null) return;
+            var ctx = mainThreadContext;
+            if (ctx != null && SynchronizationContext.Current != ctx)
+            {
+                ctx.Post(_ => action(), null);
+            }
+            else
+            {
+                action();
+            }
+        }
 
         private async Task HandleVoiceOptionsAsync(HttpListenerContext context)
         {

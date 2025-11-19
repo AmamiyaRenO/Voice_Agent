@@ -430,25 +430,25 @@ namespace RobotVoice
             PublishExit(string.IsNullOrWhiteSpace(reason) ? "tester_panel" : reason.Trim());
         }
 
-		public void TriggerSpeakForTester(string text)
-		{
-			var trimmed = string.IsNullOrWhiteSpace(text) ? string.Empty : text.Trim();
-			if (string.IsNullOrWhiteSpace(trimmed))
-			{
-				return;
-			}
+        public void TriggerSpeakForTester(string text, string voiceCode = null, string modelPath = null)
+        {
+            var trimmed = string.IsNullOrWhiteSpace(text) ? string.Empty : text.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return;
+            }
 
-			// 在播放前触发呼吸灯效果，提示“正在说话”
-			if (piHub != null)
-			{
-				_ = piHub.SendLedBreathAsync();
-			}
+            // 在播放前触发呼吸灯效果，提示“正在说话”
+            if (piHub != null)
+            {
+                _ = piHub.SendLedBreathAsync();
+            }
 
-			if (!string.IsNullOrWhiteSpace(piperSpeakUrl))
-			{
-				StartCoroutine(PlayTtsFromPiper(trimmed));
-			}
-		}
+            if (!string.IsNullOrWhiteSpace(piperSpeakUrl))
+            {
+                StartCoroutine(PlayTtsFromPiper(trimmed, voiceCode, modelPath));
+            }
+        }
 
         private bool IsOnCooldown()
         {
@@ -958,7 +958,7 @@ namespace RobotVoice
         }
 #endif
 
-        private IEnumerator PlayTtsFromPiper(string text)
+        private IEnumerator PlayTtsFromPiper(string text, string voiceCode = null, string modelOverride = null)
         {
             if (string.IsNullOrWhiteSpace(text))
             {
@@ -972,7 +972,17 @@ namespace RobotVoice
             }
 
             // 改用 GET 直取 WAV，避免 POST 卡住
-            var fullUrl = url + (url.Contains("?") ? "&" : "?") + "text=" + UnityWebRequest.EscapeURL(text);
+            var separator = url.Contains("?") ? "&" : "?";
+            var query = new List<string> { "text=" + UnityWebRequest.EscapeURL(text) };
+            if (!string.IsNullOrWhiteSpace(voiceCode))
+            {
+                query.Add("voice=" + UnityWebRequest.EscapeURL(voiceCode));
+            }
+            if (!string.IsNullOrWhiteSpace(modelOverride))
+            {
+                query.Add("model=" + UnityWebRequest.EscapeURL(modelOverride));
+            }
+            var fullUrl = url + separator + string.Join("&", query);
 
             // 告知采集端静音，避免自我回录
             if (speechToText != null)
