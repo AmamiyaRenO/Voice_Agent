@@ -405,6 +405,7 @@ namespace RobotVoice
                     return;
                 }
 
+                ConversationLog.AddEntry(ConversationRole.User, textForCoach);
                 ClearWakeWordWindow();
                 RequestCoachSpeech(textForCoach, string.Empty);
             }
@@ -437,6 +438,8 @@ namespace RobotVoice
             {
                 return;
             }
+
+            ConversationLog.AddEntry(ConversationRole.Wizard, trimmed, "Wizard Override");
 
             // 在播放前触发呼吸灯效果，提示“正在说话”
             if (piHub != null)
@@ -642,7 +645,7 @@ namespace RobotVoice
             return false;
         }
 
-		private void PublishLaunch(string gameName, string rawText)
+        private void PublishLaunch(string gameName, string rawText)
         {
             if (string.IsNullOrWhiteSpace(gameName))
             {
@@ -653,10 +656,16 @@ namespace RobotVoice
                 return;
             }
 
-			// 启动游戏时在屏幕上显示笑脸
-			if (piHub != null)
-			{
-				_ = piHub.SendFaceHappyAsync();
+            if (!string.IsNullOrWhiteSpace(rawText) &&
+                !rawText.StartsWith("tester_panel", StringComparison.OrdinalIgnoreCase))
+            {
+                ConversationLog.AddEntry(ConversationRole.User, rawText);
+            }
+
+                        // 启动游戏时在屏幕上显示笑脸
+                        if (piHub != null)
+                        {
+                                _ = piHub.SendFaceHappyAsync();
 			}
 
             awaitingFirstCommand = false;
@@ -671,6 +680,11 @@ namespace RobotVoice
             awaitingFirstCommand = false;
             ClearWakeWordWindow();
             lastIntentTime = Time.realtimeSinceStartup;
+            if (!string.IsNullOrWhiteSpace(rawText) &&
+                !rawText.StartsWith("tester_panel", StringComparison.OrdinalIgnoreCase))
+            {
+                ConversationLog.AddEntry(ConversationRole.User, rawText);
+            }
             _ = publisher.PublishExitIntentAsync(rawText);
             RequestCoachSpeech(rawText, string.Empty);
         }
@@ -819,6 +833,11 @@ namespace RobotVoice
             }
 
             var trimmedMessage = string.IsNullOrWhiteSpace(message) ? string.Empty : message.Trim();
+
+            if (!string.IsNullOrEmpty(trimmedMessage))
+            {
+                ConversationLog.AddEntry(ConversationRole.Coach, trimmedMessage);
+            }
 
             if (coachResponseText != null)
             {
