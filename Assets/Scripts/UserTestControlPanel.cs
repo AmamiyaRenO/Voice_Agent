@@ -23,9 +23,13 @@ namespace RobotVoice
         [SerializeField, Tooltip("HTTP endpoint for the Piper HTTP /speak route")]
         private string voiceServiceUrl = "http://127.0.0.1:5005/speak";
         [SerializeField, Tooltip("Default voice code passed to the TTS endpoint")]
-        private string defaultVoiceCode = "zh_CN";
+        private string defaultVoiceCode = "en_US";
         [SerializeField, Tooltip("Additional voice codes shown in the dropdown")]
-        private string[] availableVoices = new[] { "zh_CN", "en_US", "es_ES" };
+        private string[] availableVoices = new[] { "en_US" };
+        [SerializeField, Tooltip("Default Piper/Coqui model identifier exposed in the tester UI")]
+        private string defaultTtsModel = "piper-zh";
+        [SerializeField, Tooltip("Additional model identifiers shown in the dropdown")]
+        private string[] availableTtsModels = new[] { "piper-zh", "piper-en" };
 
         [Header("Server")]
         [SerializeField, Tooltip("TCP port for the built-in HTTP control panel")]
@@ -37,14 +41,16 @@ namespace RobotVoice
         private CancellationTokenSource shutdownToken;
         private Task listenLoopTask;
         private string activeVoiceCode;
+        private string activeTtsModel;
         private static readonly HttpClient SharedHttpClient = new HttpClient();
         private const float DefaultFaceSeconds = 3f;
-		private SynchronizationContext mainThreadContext;
+                private SynchronizationContext mainThreadContext;
 
         private void Awake()
         {
-			mainThreadContext = SynchronizationContext.Current;
+                        mainThreadContext = SynchronizationContext.Current;
             activeVoiceCode = DetermineInitialVoiceCode();
+            activeTtsModel = DetermineInitialTtsModel();
             if (autoStart)
             {
                 StartServer();
@@ -246,6 +252,7 @@ namespace RobotVoice
             public string action;
             public string voice;
             public string value;
+            public string model;
         }
 
         [Serializable]
@@ -253,6 +260,7 @@ namespace RobotVoice
         {
             public string text;
             public string voice;
+            public string model;
             public float speed;
             public float volume;
         }
@@ -437,6 +445,18 @@ namespace RobotVoice
                     activeVoiceCode = newVoice;
                     await WriteJsonAsync(context.Response, 200, "ok", $"voice set to {activeVoiceCode}").ConfigureAwait(false);
                     return;
+                case "set_model":
+                case "model":
+                    var newModel = string.IsNullOrWhiteSpace(request.model) ? request.value : request.model;
+                    newModel = (newModel ?? string.Empty).Trim();
+                    if (string.IsNullOrEmpty(newModel))
+                    {
+                        await WriteJsonAsync(context.Response, 400, "error", "model identifier required").ConfigureAwait(false);
+                        return;
+                    }
+                    activeTtsModel = newModel;
+                    await WriteJsonAsync(context.Response, 200, "ok", $"tts model set to {activeTtsModel}").ConfigureAwait(false);
+                    return;
                 default:
                     await WriteJsonAsync(context.Response, 400, "error", "unknown voice action").ConfigureAwait(false);
                     return;
@@ -471,7 +491,8 @@ namespace RobotVoice
 
 			try
 			{
-				var payload = BuildSpeakPayload(text, activeVoiceCode, 1f, 1f);
+                                var requestedModel = string.IsNullOrWhiteSpace(request.model) ? activeTtsModel : request.model.Trim();
+                                var payload = BuildSpeakPayload(text, activeVoiceCode, requestedModel, 1f, 1f);
 				using (var content = new StringContent(payload, Encoding.UTF8, "application/json"))
 				{
 					var response = await SharedHttpClient.PostAsync(url, content).ConfigureAwait(false);
@@ -542,6 +563,7 @@ namespace RobotVoice
         private async Task HandleVoiceOptionsAsync(HttpListenerContext context)
         {
             var list = EnumerateVoiceOptions().ToArray();
+            var models = EnumerateTtsModelOptions().ToArray();
             var builder = new StringBuilder();
             builder.Append("{\"voices\":[");
             for (int i = 0; i < list.Length; i++)
@@ -552,7 +574,17 @@ namespace RobotVoice
                 }
                 builder.Append('\"').Append(EscapeJson(list[i])).Append('\"');
             }
-            builder.Append("],\"current\":\"").Append(EscapeJson(activeVoiceCode ?? DetermineInitialVoiceCode())).Append("\"}");
+            builder.Append("],\"current\":\"").Append(EscapeJson(activeVoiceCode ?? DetermineInitialVoiceCode()));
+            builder.Append("\",\"models\":[");
+            for (int i = 0; i < models.Length; i++)
+            {
+                if (i > 0)
+                {
+                    builder.Append(',');
+                }
+                builder.Append('\"').Append(EscapeJson(models[i])).Append('\"');
+            }
+            builder.Append("],\"modelCurrent\":\"").Append(EscapeJson(activeTtsModel ?? DetermineInitialTtsModel())).Append("\"}");
             var payload = Encoding.UTF8.GetBytes(builder.ToString());
             context.Response.StatusCode = 200;
             context.Response.ContentType = "application/json";
@@ -569,7 +601,18 @@ namespace RobotVoice
             }
 
             var candidate = availableVoices?.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
-            return string.IsNullOrWhiteSpace(candidate) ? "zh_CN" : candidate.Trim();
+            return string.IsNullOrWhiteSpace(candidate) ? "en_US" : candidate.Trim();
+        }
+
+        private string DetermineInitialTtsModel()
+        {
+            if (!string.IsNullOrWhiteSpace(defaultTtsModel))
+            {
+                return defaultTtsModel.Trim();
+            }
+
+            var candidate = availableTtsModels?.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m));
+            return string.IsNullOrWhiteSpace(candidate) ? "piper-zh" : candidate.Trim();
         }
 
         private IEnumerable<string> EnumerateVoiceOptions()
@@ -602,17 +645,55 @@ namespace RobotVoice
 
             if (seen.Count == 0)
             {
-                yield return "zh_CN";
+                yield return "en_US";
             }
         }
 
-        private static string BuildSpeakPayload(string text, string voice, float speed, float volume)
+        private IEnumerable<string> EnumerateTtsModelOptions()
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(defaultTtsModel))
+            {
+                var trimmed = defaultTtsModel.Trim();
+                if (seen.Add(trimmed))
+                {
+                    yield return trimmed;
+                }
+            }
+
+            if (availableTtsModels != null)
+            {
+                foreach (var model in availableTtsModels)
+                {
+                    var trimmed = (model ?? string.Empty).Trim();
+                    if (string.IsNullOrEmpty(trimmed))
+                    {
+                        continue;
+                    }
+                    if (seen.Add(trimmed))
+                    {
+                        yield return trimmed;
+                    }
+                }
+            }
+
+            if (seen.Count == 0)
+            {
+                yield return "piper-zh";
+            }
+        }
+
+        private static string BuildSpeakPayload(string text, string voice, string model, float speed, float volume)
         {
             var sb = new StringBuilder();
             sb.Append("{\"text\":\"").Append(EscapeJson(text)).Append("\"");
             if (!string.IsNullOrEmpty(voice))
             {
                 sb.Append(",\"voice\":\"").Append(EscapeJson(voice)).Append("\"");
+            }
+            if (!string.IsNullOrEmpty(model))
+            {
+                sb.Append(",\"model\":\"").Append(EscapeJson(model)).Append("\"");
             }
             sb.Append(",\"speed\":").Append(speed.ToString(CultureInfo.InvariantCulture));
             sb.Append(",\"volume\":").Append(volume.ToString(CultureInfo.InvariantCulture));
@@ -753,6 +834,8 @@ namespace RobotVoice
             sb.AppendLine(@"<div class=""controls"">");
             sb.AppendLine(@"<label for=""voiceSelect"">Voice</label>");
             sb.AppendLine(@"<select id=""voiceSelect"" onchange=""setVoice(this.value)""></select>");
+            sb.AppendLine(@"<label for=""ttsModelSelect"">TTS Model</label>");
+            sb.AppendLine(@"<select id=""ttsModelSelect"" onchange=""setTtsModel(this.value)""></select>");
             sb.AppendLine(@"<button onclick=""send('/api/voice',{action:'wake'})"">Start Wake Flow</button>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:stretch;"">");
@@ -778,6 +861,7 @@ namespace RobotVoice
             sb.AppendLine(@"<script>");
             sb.AppendLine(@"const statusEl = document.getElementById('status');");
             sb.AppendLine(@"const voiceSelect = document.getElementById('voiceSelect');");
+            sb.AppendLine(@"const modelSelect = document.getElementById('ttsModelSelect');");
             sb.AppendLine(@"async function send(endpoint, payload){");
             sb.AppendLine(@"  statusEl.textContent = 'Sending ' + endpoint + ' ...';");
             sb.AppendLine(@"  try {");
@@ -814,6 +898,10 @@ namespace RobotVoice
             sb.AppendLine(@"  if(!value) return;");
             sb.AppendLine(@"  send('/api/voice',{action:'set',voice:value});");
             sb.AppendLine(@"}");
+            sb.AppendLine(@"function setTtsModel(value){");
+            sb.AppendLine(@"  if(!value) return;");
+            sb.AppendLine(@"  send('/api/voice',{action:'set_model',model:value});");
+            sb.AppendLine(@"}");
             sb.AppendLine(@"function speakNow(){");
             sb.AppendLine(@"  const text = document.getElementById('speakText').value;");
             sb.AppendLine(@"  if(!text.trim()){");
@@ -822,7 +910,8 @@ namespace RobotVoice
             sb.AppendLine(@"  }");
             sb.AppendLine(@"  const speed = parseFloat(document.getElementById('voiceSpeed').value)||1;");
             sb.AppendLine(@"  const volume = parseFloat(document.getElementById('voiceVolume').value)||1;");
-            sb.AppendLine(@"  send('/api/speak',{text:text,voice:voiceSelect.value,speed:speed,volume:volume});");
+            sb.AppendLine(@"  const model = modelSelect ? modelSelect.value : '';");
+            sb.AppendLine(@"  send('/api/speak',{text:text,voice:voiceSelect.value,model:model,speed:speed,volume:volume});");
             sb.AppendLine(@"}");
             sb.AppendLine(@"function launchGame(){");
             sb.AppendLine(@"  const name = document.getElementById('gameName').value||'';");
@@ -843,6 +932,16 @@ namespace RobotVoice
             sb.AppendLine(@"      voiceSelect.value = current;");
             sb.AppendLine(@"    } else if(voices.length){");
             sb.AppendLine(@"      voiceSelect.value = voices[0];");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    const models = Array.isArray(data.models) ? data.models : [];");
+            sb.AppendLine(@"    if(modelSelect){");
+            sb.AppendLine(@"      modelSelect.innerHTML = models.map(v => `<option value=""${v}"">${v}</option>`).join('');");
+            sb.AppendLine(@"      const modelCurrent = typeof data.modelCurrent === 'string' ? data.modelCurrent : '';");
+            sb.AppendLine(@"      if(modelCurrent && models.includes(modelCurrent)){");
+            sb.AppendLine(@"        modelSelect.value = modelCurrent;");
+            sb.AppendLine(@"      } else if(models.length){");
+            sb.AppendLine(@"        modelSelect.value = models[0];");
+            sb.AppendLine(@"      }");
             sb.AppendLine(@"    }");
             sb.AppendLine(@"  } catch(err) {");
             sb.AppendLine(@"    console.warn('voice options failed', err);");
