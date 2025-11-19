@@ -201,6 +201,9 @@ namespace RobotVoice
                     case "/api/voice/options":
                         await HandleVoiceOptionsAsync(context).ConfigureAwait(false);
                         return;
+                    case "/api/logs":
+                        await HandleLogsAsync(context).ConfigureAwait(false);
+                        return;
                     case "/api/speak":
                         await HandleSpeakAsync(context).ConfigureAwait(false);
                         return;
@@ -502,6 +505,8 @@ namespace RobotVoice
                 return;
             }
 
+            ConversationLog.AddEntry(ConversationRole.Wizard, text, "Wizard Override");
+
             // 回退：如果未绑定 VoiceGameLauncher，则仍向语音服务发送请求（但不会在本机播放）
             var url = (voiceServiceUrl ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(url))
@@ -605,6 +610,55 @@ namespace RobotVoice
                 builder.Append('\"').Append(EscapeJson(models[i])).Append('\"');
             }
             builder.Append("],\"modelCurrent\":\"").Append(EscapeJson(activeTtsModel ?? DetermineInitialTtsModel())).Append("\"}");
+            var payload = Encoding.UTF8.GetBytes(builder.ToString());
+            context.Response.StatusCode = 200;
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength64 = payload.Length;
+            await context.Response.OutputStream.WriteAsync(payload, 0, payload.Length).ConfigureAwait(false);
+            context.Response.Close();
+        }
+
+        private async Task HandleLogsAsync(HttpListenerContext context)
+        {
+            var entries = ConversationLog.GetSnapshot();
+            var builder = new StringBuilder(entries.Length * 128);
+            builder.Append("{\"entries\":[");
+            for (int i = 0; i < entries.Length; i++)
+            {
+                if (i > 0)
+                {
+                    builder.Append(',');
+                }
+
+                var entry = entries[i];
+                builder.Append("{\"timestamp\":\"")
+                    .Append(entry.TimestampUtc.ToString("o", CultureInfo.InvariantCulture))
+                    .Append("\",\"role\":\"")
+                    .Append(entry.Role.ToString().ToLowerInvariant())
+                    .Append("\",\"speaker\":\"")
+                    .Append(EscapeJson(entry.Speaker ?? string.Empty))
+                    .Append("\",\"message\":\"")
+                    .Append(EscapeJson(entry.Message ?? string.Empty))
+                    .Append("\"");
+
+                if (!string.IsNullOrEmpty(entry.Metadata))
+                {
+                    builder.Append(",\"metadata\":\"")
+                        .Append(EscapeJson(entry.Metadata))
+                        .Append("\"");
+                }
+
+                if (!string.IsNullOrEmpty(entry.Source))
+                {
+                    builder.Append(",\"source\":\"")
+                        .Append(EscapeJson(entry.Source))
+                        .Append("\"");
+                }
+
+                builder.Append('}');
+            }
+
+            builder.Append("]}");
             var payload = Encoding.UTF8.GetBytes(builder.ToString());
             context.Response.StatusCode = 200;
             context.Response.ContentType = "application/json";
@@ -819,11 +873,36 @@ namespace RobotVoice
             sb.AppendLine(@"input[type=color] { width: 3rem; height: 2rem; border: none; border-radius: 6px; padding: 0; background: transparent; }");
             sb.AppendLine(@"textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0.4rem; border-radius: 8px; border: none; background: rgba(255,255,255,0.08); color: #f4f4f4; font-size: 0.95rem; resize: vertical; }");
             sb.AppendLine(@"#status { margin-top: 1rem; font-size: 0.95rem; opacity: 0.9; }");
+            sb.AppendLine(@".transcript-card { margin-bottom: 1.75rem; padding: 1.25rem; border-radius: 16px; background: linear-gradient(135deg, rgba(124,93,250,0.25), rgba(15,17,23,0.95)); border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 24px 60px rgba(0,0,0,0.45); }");
+            sb.AppendLine(@".transcript-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }");
+            sb.AppendLine(@".transcript-header h2 { margin: 0; font-size: 1.2rem; }");
+            sb.AppendLine(@".transcript-subtitle { font-size: 0.9rem; opacity: 0.8; margin-top: 0.25rem; }");
+            sb.AppendLine(@".ghost-btn { background: transparent; border: 1px solid rgba(255,255,255,0.35); color: #f4f4f4; padding: 0.45rem 1rem; border-radius: 999px; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; box-shadow: none; }");
+            sb.AppendLine(@".ghost-btn:hover { border-color: rgba(255,255,255,0.7); }");
+            sb.AppendLine(@".log-list { max-height: 360px; overflow-y: auto; margin-top: 1rem; padding-right: 0.25rem; }");
+            sb.AppendLine(@".log-entry { display: flex; gap: 0.75rem; padding: 0.65rem 0; border-bottom: 1px solid rgba(255,255,255,0.07); }");
+            sb.AppendLine(@".log-entry:last-child { border-bottom: none; }");
+            sb.AppendLine(@".log-icon { width: 42px; height: 42px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; font-weight: 600; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }");
+            sb.AppendLine(@".log-body { flex: 1; }");
+            sb.AppendLine(@".log-meta { font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.7; display: flex; gap: 0.35rem; align-items: center; }");
+            sb.AppendLine(@".log-speaker { font-weight: 600; letter-spacing: 0.08em; }");
+            sb.AppendLine(@".log-message { margin-top: 0.2rem; font-size: 0.95rem; color: #f8fafc; }");
+            sb.AppendLine(@".log-empty { padding: 1.2rem 0; font-size: 0.9rem; opacity: 0.6; text-align: center; }");
             sb.AppendLine(@"</style>");
             sb.AppendLine(@"</head>");
             sb.AppendLine(@"<body>");
             sb.AppendLine(@"<h1>Robot User Test Panel</h1>");
             sb.AppendLine(@"<p>Connect to the same Wi-Fi network as the host running Unity and open this page from any browser.</p>");
+            sb.AppendLine(@"<div class=""transcript-card"">");
+            sb.AppendLine(@"<div class=""transcript-header"">");
+            sb.AppendLine(@"<div>");
+            sb.AppendLine(@"<h2>Live Transcript</h2>");
+            sb.AppendLine(@"<p class=""transcript-subtitle"">Monitor patient speech, wizard overrides, and agent coaching responses.</p>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<button class=""ghost-btn"" onclick=""refreshLog()"">Refresh</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div id=""transcriptLog"" class=""log-list""></div>");
+            sb.AppendLine(@"</div>");
             sb.AppendLine(@"<section>");
             sb.AppendLine(@"<h2>Expressions</h2>");
             sb.AppendLine(@"<div class=""controls"">");
@@ -903,6 +982,68 @@ namespace RobotVoice
             sb.AppendLine(@"const statusEl = document.getElementById('status');");
             sb.AppendLine(@"const voiceSelect = document.getElementById('voiceSelect');");
             sb.AppendLine(@"const modelSelect = document.getElementById('ttsModelSelect');");
+            sb.AppendLine(@"const logContainer = document.getElementById('transcriptLog');");
+            sb.AppendLine(@"const logRoleStyles = {");
+            sb.AppendLine(@"  user:{icon:'🧍',bg:'rgba(59,130,246,0.18)',color:'#60a5fa'},");
+            sb.AppendLine(@"  coach:{icon:'🤖',bg:'rgba(251,146,60,0.18)',color:'#fb923c'},");
+            sb.AppendLine(@"  wizard:{icon:'🪄',bg:'rgba(168,85,247,0.18)',color:'#c084fc'},");
+            sb.AppendLine(@"  system:{icon:'ℹ️',bg:'rgba(156,163,175,0.2)',color:'#d1d5db'}");
+            sb.AppendLine(@"};");
+            sb.AppendLine(@"function speakerFromRole(role){");
+            sb.AppendLine(@"  switch(role){");
+            sb.AppendLine(@"    case 'coach': return 'RACHEL';");
+            sb.AppendLine(@"    case 'wizard': return 'Wizard Override';");
+            sb.AppendLine(@"    case 'system': return 'System';");
+            sb.AppendLine(@"    default: return 'User';");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function escapeHtml(str){");
+            sb.AppendLine(@"  if(!str) return '';");
+            sb.AppendLine(@"  return String(str)");
+            sb.AppendLine(@"    .replace(/&/g,""&amp;"")");
+            sb.AppendLine(@"    .replace(/</g,""&lt;"")");
+            sb.AppendLine(@"    .replace(/>/g,""&gt;"")");
+            sb.AppendLine(@"    .replace(/""/g,""&quot;"")");
+            sb.AppendLine(@"    .replace(/'/g,""&#39;"");");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function formatLogTime(value){");
+            sb.AppendLine(@"  if(!value) return '';");
+            sb.AppendLine(@"  const date = new Date(value);");
+            sb.AppendLine(@"  if(isNaN(date.getTime())) return '';");
+            sb.AppendLine(@"  return date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function renderLog(entries){");
+            sb.AppendLine(@"  if(!logContainer) return;");
+            sb.AppendLine(@"  if(!Array.isArray(entries) || !entries.length){");
+            sb.AppendLine(@"    logContainer.innerHTML = '<div class=\"log-empty\">Conversations will appear here once the agent speaks.</div>';");
+            sb.AppendLine(@"    return;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  const nearBottom = (logContainer.scrollTop + logContainer.clientHeight) >= (logContainer.scrollHeight - 20);");
+            sb.AppendLine(@"  const html = entries.map(entry => {");
+            sb.AppendLine(@"    const role = typeof entry.role === 'string' ? entry.role.toLowerCase() : 'user';");
+            sb.AppendLine(@"    const style = logRoleStyles[role] || logRoleStyles.user;");
+            sb.AppendLine(@"    const speaker = escapeHtml(entry.speaker || speakerFromRole(role));");
+            sb.AppendLine(@"    const text = escapeHtml(entry.message || '');");
+            sb.AppendLine(@"    const timestamp = formatLogTime(entry.timestamp);");
+            sb.AppendLine(@"    return `<div class=\"log-entry\"><div class=\"log-icon\" style=\"background:${style.bg};color:${style.color};\">${style.icon}</div><div class=\"log-body\"><div class=\"log-meta\"><span class=\"log-speaker\">${speaker}</span><span>•</span><span>${timestamp}</span></div><div class=\"log-message\">${text}</div></div></div>`;");
+            sb.AppendLine(@"  }).join('');");
+            sb.AppendLine(@"  logContainer.innerHTML = html;");
+            sb.AppendLine(@"  if(nearBottom){");
+            sb.AppendLine(@"    logContainer.scrollTop = logContainer.scrollHeight;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function refreshLog(){");
+            sb.AppendLine(@"  if(!logContainer) return;");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/logs');");
+            sb.AppendLine(@"    if(!resp.ok) return;");
+            sb.AppendLine(@"    const data = await resp.json();");
+            sb.AppendLine(@"    const entries = Array.isArray(data.entries) ? data.entries : [];");
+            sb.AppendLine(@"    renderLog(entries);");
+            sb.AppendLine(@"  } catch(err) {");
+            sb.AppendLine(@"    console.warn('log fetch failed', err);");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
             sb.AppendLine(@"async function send(endpoint, payload){");
             sb.AppendLine(@"  statusEl.textContent = 'Sending ' + endpoint + ' ...';");
             sb.AppendLine(@"  try {");
@@ -988,6 +1129,9 @@ namespace RobotVoice
             sb.AppendLine(@"    console.warn('voice options failed', err);");
             sb.AppendLine(@"  }");
             sb.AppendLine(@"}");
+            sb.AppendLine(@"if(logContainer){ renderLog([]); }");
+            sb.AppendLine(@"refreshLog();");
+            sb.AppendLine(@"setInterval(refreshLog, 4000);");
             sb.AppendLine(@"loadVoiceOptions();");
             sb.AppendLine(@"</script>");
             sb.AppendLine(@"</body>");
