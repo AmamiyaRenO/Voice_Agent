@@ -175,10 +175,19 @@ panel tailored for therapist / patient trials.
    can open that address to reach the panel.
 4. Use the controls to drive five facial presets (happy/neutral/angry/sad/
    surprised), adjust LED color/brightness/period, open/close the flower servo,
-   pick a TTS voice, enter text for the robot to speak, or trigger game launch
-   / exit intents. The “Start Wake Flow” button still performs the wake-word
-   choreography without requiring speech. Every action goes through
+   pick a TTS voice, switch between installed Piper/Coqui models, enter text
+   for the robot to speak, or trigger game launch / exit intents. The “Start
+   Wake Flow” button still performs the wake-word choreography without
+   requiring speech. Every action goes through
    `PiMessageHub` / `VoiceGameLauncher` so the robot reacts immediately.
+   For Piper, set the **Default TTS Model** and **Available TTS Models** fields
+   on `UserTestControlPanel` to the absolute `.onnx` files on disk (for example
+   `D:\piper\models\en_US-hfc_female-medium.onnx`). The panel relays the
+   selected path to `python_voice_service/piper_http.py`, which now accepts a
+   `model` parameter on both `GET /speak` and `POST /speak`, automatically
+   switches Piper to that file, and attempts to load the matching
+   `.onnx.json` config. This makes the dropdown truly change the active TTS
+   checkpoint without restarting the Python process.
 
 If you prefer to start/stop the listener manually, untick **Auto Start** on the
 component and call `StartServer`/`StopServer` from the inspector’s context menu
