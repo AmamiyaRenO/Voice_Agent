@@ -175,9 +175,10 @@ panel tailored for therapist / patient trials.
    can open that address to reach the panel.
 4. Use the controls to drive five facial presets (happy/neutral/angry/sad/
    surprised), adjust LED color/brightness/period, open/close the flower servo,
-   pick a TTS voice, enter text for the robot to speak, or trigger game launch
-   / exit intents. The “Start Wake Flow” button still performs the wake-word
-   choreography without requiring speech. Every action goes through
+   pick a TTS voice, switch between installed Piper/Coqui models, enter text
+   for the robot to speak, or trigger game launch / exit intents. The “Start
+   Wake Flow” button still performs the wake-word choreography without
+   requiring speech. Every action goes through
    `PiMessageHub` / `VoiceGameLauncher` so the robot reacts immediately.
 
 If you prefer to start/stop the listener manually, untick **Auto Start** on the
