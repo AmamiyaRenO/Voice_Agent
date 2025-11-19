@@ -30,6 +30,10 @@ namespace RobotVoice
         private string defaultTtsModel = "piper-zh";
         [SerializeField, Tooltip("Additional model identifiers shown in the dropdown")]
         private string[] availableTtsModels = new[] { "piper-zh", "piper-en" };
+		[SerializeField, Tooltip("Directory to scan for Piper .onnx models to populate the dropdown")]
+		private string modelsDirectory = @"D:\piper\models";
+		[SerializeField, Tooltip("Whether to recursively include subdirectories when scanning modelsDirectory")]
+		private bool scanModelsRecursively = true;
 
         [Header("Server")]
         [SerializeField, Tooltip("TCP port for the built-in HTTP control panel")]
@@ -622,6 +626,17 @@ namespace RobotVoice
 
         private string DetermineInitialTtsModel()
         {
+            // Prefer scanned models from filesystem
+            try
+            {
+                var firstScanned = EnumerateTtsModelOptions().FirstOrDefault(m => !string.IsNullOrWhiteSpace(m));
+                if (!string.IsNullOrWhiteSpace(firstScanned))
+                {
+                    return firstScanned;
+                }
+            }
+            catch (Exception) { }
+
             if (!string.IsNullOrWhiteSpace(defaultTtsModel))
             {
                 return defaultTtsModel.Trim();
@@ -668,30 +683,40 @@ namespace RobotVoice
         private IEnumerable<string> EnumerateTtsModelOptions()
         {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (!string.IsNullOrWhiteSpace(defaultTtsModel))
-            {
-                var trimmed = defaultTtsModel.Trim();
-                if (seen.Add(trimmed))
-                {
-                    yield return trimmed;
-                }
-            }
 
-            if (availableTtsModels != null)
-            {
-                foreach (var model in availableTtsModels)
-                {
-                    var trimmed = (model ?? string.Empty).Trim();
-                    if (string.IsNullOrEmpty(trimmed))
-                    {
-                        continue;
-                    }
-                    if (seen.Add(trimmed))
-                    {
-                        yield return trimmed;
-                    }
-                }
-            }
+            // Scan models from filesystem (gather first, then yield outside try/catch)
+			List<string> scanned = null;
+			try
+			{
+				var dir = (modelsDirectory ?? string.Empty).Trim();
+				if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir))
+				{
+					var option = scanModelsRecursively ? System.IO.SearchOption.AllDirectories : System.IO.SearchOption.TopDirectoryOnly;
+					scanned = System.IO.Directory.EnumerateFiles(dir, "*.onnx", option).ToList();
+				}
+			}
+			catch (Exception ex)
+			{
+				Debug.LogWarning($"[UserTestPanel] Model scan failed: {ex.Message}");
+			}
+
+			if (scanned != null)
+			{
+				foreach (var path in scanned)
+				{
+					string full = path;
+					if (string.IsNullOrWhiteSpace(full))
+					{
+						continue;
+					}
+					// Normalize to absolute path
+					try { full = System.IO.Path.GetFullPath(full); } catch {}
+					if (seen.Add(full))
+					{
+						yield return full;
+					}
+				}
+			}
 
             if (seen.Count == 0)
             {
