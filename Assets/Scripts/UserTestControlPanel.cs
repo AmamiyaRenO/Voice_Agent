@@ -201,6 +201,9 @@ namespace RobotVoice
                     case "/api/voice/options":
                         await HandleVoiceOptionsAsync(context).ConfigureAwait(false);
                         return;
+                    case "/api/camera":
+                        await HandleCameraAsync(context).ConfigureAwait(false);
+                        return;
                     case "/api/logs":
                         await HandleLogsAsync(context).ConfigureAwait(false);
                         return;
@@ -277,6 +280,30 @@ namespace RobotVoice
         {
             public string action;
             public string name;
+        }
+
+        private async Task HandleCameraAsync(HttpListenerContext context)
+        {
+            if (!string.Equals(context.Request.HttpMethod, "GET", StringComparison.OrdinalIgnoreCase))
+            {
+                context.Response.StatusCode = 405;
+                await WriteJsonAsync(context.Response, 405, "error", "camera endpoint only supports GET").ConfigureAwait(false);
+                return;
+            }
+
+            try
+            {
+                var pngBytes = await CaptureCameraPngAsync().ConfigureAwait(false);
+                context.Response.StatusCode = 200;
+                context.Response.ContentType = "image/png";
+                context.Response.ContentLength64 = pngBytes.LongLength;
+                await context.Response.OutputStream.WriteAsync(pngBytes, 0, pngBytes.Length).ConfigureAwait(false);
+                context.Response.Close();
+            }
+            catch (Exception ex)
+            {
+                await WriteJsonAsync(context.Response, 500, "error", $"camera capture failed: {ex.Message}").ConfigureAwait(false);
+            }
         }
 
         private async Task HandleFaceAsync(HttpListenerContext context)
@@ -585,6 +612,66 @@ namespace RobotVoice
             }
         }
 
+        private Task<T> RunOnMainThreadAsync<T>(Func<T> func)
+        {
+            if (func == null)
+            {
+                throw new ArgumentNullException(nameof(func));
+            }
+
+            var tcs = new TaskCompletionSource<T>();
+            var ctx = mainThreadContext;
+            if (ctx != null && SynchronizationContext.Current != ctx)
+            {
+                ctx.Post(_ =>
+                {
+                    try
+                    {
+                        tcs.TrySetResult(func());
+                    }
+                    catch (Exception ex)
+                    {
+                        tcs.TrySetException(ex);
+                    }
+                }, null);
+            }
+            else
+            {
+                try
+                {
+                    tcs.TrySetResult(func());
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            }
+
+            return tcs.Task;
+        }
+
+        private Task<byte[]> CaptureCameraPngAsync()
+        {
+            return RunOnMainThreadAsync(() =>
+            {
+                var texture = ScreenCapture.CaptureScreenshotAsTexture();
+                if (texture == null)
+                {
+                    throw new InvalidOperationException("screenshot capture returned null");
+                }
+
+                try
+                {
+                    var png = texture.EncodeToPNG();
+                    return png ?? Array.Empty<byte>();
+                }
+                finally
+                {
+                    Destroy(texture);
+                }
+            });
+        }
+
         private async Task HandleVoiceOptionsAsync(HttpListenerContext context)
         {
             var list = EnumerateVoiceOptions().ToArray();
@@ -888,6 +975,8 @@ namespace RobotVoice
             sb.AppendLine(@".log-speaker { font-weight: 600; letter-spacing: 0.08em; }");
             sb.AppendLine(@".log-message { margin-top: 0.2rem; font-size: 0.95rem; color: #f8fafc; }");
             sb.AppendLine(@".log-empty { padding: 1.2rem 0; font-size: 0.9rem; opacity: 0.6; text-align: center; }");
+            sb.AppendLine(@".camera-frame { width: 100%; max-width: 720px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); box-shadow: 0 16px 40px rgba(0,0,0,0.45); }");
+            sb.AppendLine(@".camera-bar { display: flex; gap: 0.65rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.75rem; }");
             sb.AppendLine(@"</style>");
             sb.AppendLine(@"</head>");
             sb.AppendLine(@"<body>");
@@ -903,6 +992,17 @@ namespace RobotVoice
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"<div id=""transcriptLog"" class=""log-list""></div>");
             sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<section>");
+            sb.AppendLine(@"<h2>Camera Cast</h2>");
+            sb.AppendLine(@"<div class=""camera-bar"">");
+            sb.AppendLine(@"<button onclick=""refreshCamera()"">Refresh Frame</button>");
+            sb.AppendLine(@"<label><input id=""cameraAuto"" type=""checkbox"" onchange=""toggleCameraAuto(this.checked)""> Auto-refresh</label>");
+            sb.AppendLine(@"<label for=""cameraInterval"">Interval (s)</label>");
+            sb.AppendLine(@"<input id=""cameraInterval"" type=""number"" min=""1"" step=""0.5"" value=""3"">");
+            sb.AppendLine(@"<div id=""cameraStatus"" style=""opacity:0.8""></div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<img id=""cameraFeed"" class=""camera-frame"" alt=""Camera feed will appear here"">");
+            sb.AppendLine(@"</section>");
             sb.AppendLine(@"<section>");
             sb.AppendLine(@"<h2>Expressions</h2>");
             sb.AppendLine(@"<div class=""controls"">");
@@ -1102,6 +1202,32 @@ namespace RobotVoice
             sb.AppendLine(@"function exitGame(){");
             sb.AppendLine(@"  send('/api/game',{action:'exit'});");
             sb.AppendLine(@"}");
+            sb.AppendLine(@"let cameraTimer = null;");
+            sb.AppendLine(@"const cameraImage = document.getElementById('cameraFeed');");
+            sb.AppendLine(@"const cameraStatus = document.getElementById('cameraStatus');");
+            sb.AppendLine(@"function clearCameraTimer(){ if(cameraTimer){ clearInterval(cameraTimer); cameraTimer = null; } }");
+            sb.AppendLine(@"function toggleCameraAuto(enabled){");
+            sb.AppendLine(@"  clearCameraTimer();");
+            sb.AppendLine(@"  if(enabled){");
+            sb.AppendLine(@"    const seconds = Math.max(1, parseFloat(document.getElementById('cameraInterval').value)||3);");
+            sb.AppendLine(@"    cameraTimer = setInterval(refreshCamera, seconds * 1000);");
+            sb.AppendLine(@"    refreshCamera();");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function refreshCamera(){");
+            sb.AppendLine(@"  if(!cameraImage || !cameraStatus){ return; }");
+            sb.AppendLine(@"  cameraStatus.textContent = 'Updating camera...';");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/camera');");
+            sb.AppendLine(@"    if(!resp.ok){ throw new Error('HTTP '+resp.status); }");
+            sb.AppendLine(@"    const blob = await resp.blob();");
+            sb.AppendLine(@"    const url = URL.createObjectURL(blob);");
+            sb.AppendLine(@"    cameraImage.src = url;");
+            sb.AppendLine(@"    cameraStatus.textContent = 'Updated at ' + new Date().toLocaleTimeString();");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    cameraStatus.textContent = 'Camera error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
             sb.AppendLine(@"async function loadVoiceOptions(){");
             sb.AppendLine(@"  try {");
             sb.AppendLine(@"    const resp = await fetch('/api/voice/options');");
@@ -1133,6 +1259,7 @@ namespace RobotVoice
             sb.AppendLine(@"refreshLog();");
             sb.AppendLine(@"setInterval(refreshLog, 4000);");
             sb.AppendLine(@"loadVoiceOptions();");
+            sb.AppendLine(@"refreshCamera();");
             sb.AppendLine(@"</script>");
             sb.AppendLine(@"</body>");
             sb.AppendLine(@"</html>");
