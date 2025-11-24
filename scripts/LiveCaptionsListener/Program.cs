@@ -22,7 +22,7 @@ class Program
     static int ttsSuppressTailMs = 1200;
     static string ttsLastTextLower = "";
     static int ttsEchoWindowMs = 3000;
-    static volatile bool listeningEnabled = false;
+    static volatile bool listeningEnabled = true;
     static MqttConfig mqttConfig = MqttConfig.Disabled;
 
     [STAThread]

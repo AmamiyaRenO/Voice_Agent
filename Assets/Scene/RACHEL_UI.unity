@@ -250,7 +250,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 6e1e806f290598b4c9b32a8f656b6257, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  disablePublishing: 1
+  disablePublishing: 0
   host: 10.0.0.1
   port: 1883
   username: 
@@ -1939,7 +1939,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   publisher: {fileID: 1489373252}
   speechToText: {fileID: 0}
-  piHub: {fileID: 0}
+  piHub: {fileID: 143412778}
   intentConfigJson: {fileID: 4900000, guid: f886a37adc9721949b230d5dec74c8fc, type: 3}
   wakeWord: rachel
   requireWakeWord: 0

@@ -43,6 +43,12 @@ namespace RobotVoice
         private string lastPublishedPayload = string.Empty;
         private float lastPublishRealtime;
 
+        // --- Runtime status (for debugging/Editor display) ---
+        public bool IsConnected => client != null && client.IsConnected;
+        public bool DisablePublishing => disablePublishing;
+        public string Host => host;
+        public int Port => port;
+
         private void Awake()
         {
             mainThreadContext = SynchronizationContext.Current;
@@ -449,6 +455,12 @@ namespace RobotVoice
         [SerializeField, Tooltip("Disable Unity-side intent publishing to avoid duplication")] 
         private bool disablePublishing = true;
         [SerializeField] private string sourceLabel = "unity_voice";
+
+        // Keep API parity for Editor/debugging
+        public bool IsConnected => false;
+        public bool DisablePublishing => disablePublishing;
+        public string Host => "disabled";
+        public int Port => 0;
 
         public Task EnsureConnectedAsync()
         {

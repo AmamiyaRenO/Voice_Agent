@@ -53,11 +53,36 @@ namespace RobotVoice
         private void Awake()
         {
             mainThreadContext = SynchronizationContext.Current;
+            ApplyModelsDirectoryEnvironmentOverride();
             activeVoiceCode = DetermineInitialVoiceCode();
             activeTtsModel = DetermineInitialTtsModel();
             if (autoStart)
             {
                 StartServer();
+            }
+        }
+
+        private void ApplyModelsDirectoryEnvironmentOverride()
+        {
+            try
+            {
+                // 优先取环境变量覆盖：VOICE_MODELS_DIR 或 PIPER_MODELS_DIR
+                var keys = new[] { "VOICE_MODELS_DIR", "PIPER_MODELS_DIR" };
+                foreach (var key in keys)
+                {
+                    var value = System.Environment.GetEnvironmentVariable(key);
+                    if (!string.IsNullOrWhiteSpace(value))
+                    {
+                        var expanded = System.Environment.ExpandEnvironmentVariables(value.Trim());
+                        modelsDirectory = expanded;
+                        Debug.Log($"[UserTestPanel] modelsDirectory overridden by %{key}% = {expanded}");
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[UserTestPanel] modelsDirectory env override failed: {ex.Message}");
             }
         }
 
@@ -296,6 +321,10 @@ namespace RobotVoice
 
             switch (mode)
             {
+                case "excited":
+                    await piHub.SendFacePresetAsync("excited", duration).ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", "face set to excited").ConfigureAwait(false);
+                    return;
                 case "happy":
                     await piHub.SendFacePresetAsync("happy", duration).ConfigureAwait(false);
                     await WriteJsonAsync(context.Response, 200, "ok", "face set to happy").ConfigureAwait(false);
@@ -304,17 +333,13 @@ namespace RobotVoice
                     await piHub.SendFacePresetAsync("neutral", duration).ConfigureAwait(false);
                     await WriteJsonAsync(context.Response, 200, "ok", "face set to neutral").ConfigureAwait(false);
                     return;
-                case "angry":
-                    await piHub.SendFacePresetAsync("angry", duration).ConfigureAwait(false);
-                    await WriteJsonAsync(context.Response, 200, "ok", "face set to angry").ConfigureAwait(false);
-                    return;
                 case "sad":
                     await piHub.SendFacePresetAsync("sad", duration).ConfigureAwait(false);
                     await WriteJsonAsync(context.Response, 200, "ok", "face set to sad").ConfigureAwait(false);
                     return;
-                case "surprised":
-                    await piHub.SendFacePresetAsync("surprised", duration).ConfigureAwait(false);
-                    await WriteJsonAsync(context.Response, 200, "ok", "face set to surprised").ConfigureAwait(false);
+                case "verysad": // verySad → lower-cased
+                    await piHub.SendFacePresetAsync("verySad", duration).ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", "face set to verySad").ConfigureAwait(false);
                     return;
                 case "idle":
                     await piHub.SendFaceIdleAsync().ConfigureAwait(false);
@@ -911,12 +936,11 @@ namespace RobotVoice
             sb.AppendLine(@"<input id=""faceCustom"" type=""text"" placeholder=""custom preset name"">");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<button onclick=""facePreset('excited')"">Excited</button>");
             sb.AppendLine(@"<button onclick=""facePreset('happy')"">Happy</button>");
             sb.AppendLine(@"<button onclick=""facePreset('neutral')"">Neutral</button>");
-            sb.AppendLine(@"<button onclick=""facePreset('angry')"">Angry</button>");
             sb.AppendLine(@"<button onclick=""facePreset('sad')"">Sad</button>");
-            sb.AppendLine(@"<button onclick=""facePreset('surprised')"">Surprised</button>");
-            sb.AppendLine(@"<button onclick=""facePreset('idle')"">Idle</button>");
+            sb.AppendLine(@"<button onclick=""facePreset('verySad')"">Very Sad</button>");
             sb.AppendLine(@"<button onclick=""customFace()"">Send Custom</button>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"</section>");
