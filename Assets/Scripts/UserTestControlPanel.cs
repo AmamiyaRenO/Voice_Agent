@@ -41,6 +41,18 @@ namespace RobotVoice
         [SerializeField, Tooltip("Automatically start the listener when the scene loads")]
         private bool autoStart = true;
 
+        [Header("Camera Preview")]
+        [SerializeField, Tooltip("Show local PC camera on the tester web panel (/camera.jpg).")]
+        private bool enableCameraPreview = true;
+        [SerializeField, Tooltip("Requested camera width for preview")]
+        private int cameraWidth = 640;
+        [SerializeField, Tooltip("Requested camera height for preview")]
+        private int cameraHeight = 480;
+        [SerializeField, Tooltip("JPEG quality (1-100) for /camera.jpg")]
+        private int cameraJpegQuality = 70;
+        [SerializeField, Tooltip("Target frames per second for snapshot encoding")]
+        private int cameraFps = 30;
+
         private HttpListener listener;
         private CancellationTokenSource shutdownToken;
         private Task listenLoopTask;
@@ -49,6 +61,13 @@ namespace RobotVoice
         private static readonly HttpClient SharedHttpClient = new HttpClient();
         private const float DefaultFaceSeconds = 3f;
         private SynchronizationContext mainThreadContext;
+
+        // --- Camera runtime ---
+        private WebCamTexture _webcam;
+        private Texture2D _cameraTexture;
+        private byte[] _latestJpeg;
+        private readonly object _cameraLock = new object();
+        private float _nextCaptureRealtime;
 
         private void Awake()
         {
@@ -60,6 +79,7 @@ namespace RobotVoice
             {
                 StartServer();
             }
+            TryStartCamera();
         }
 
         private void ApplyModelsDirectoryEnvironmentOverride()
@@ -89,6 +109,7 @@ namespace RobotVoice
         private void OnDestroy()
         {
             StopServer();
+            StopCamera();
         }
 
         public void StartServer()
@@ -208,6 +229,9 @@ namespace RobotVoice
                     case "/index.html":
                         await RespondWithHtmlAsync(context.Response).ConfigureAwait(false);
                         return;
+                    case "/camera.mjpg":
+                        await HandleCameraMjpegAsync(context).ConfigureAwait(false);
+                        return;
                     case "/healthz":
                         await WriteJsonAsync(context.Response, 200, "ok", "panel alive").ConfigureAwait(false);
                         return;
@@ -235,6 +259,9 @@ namespace RobotVoice
                     case "/api/game":
                         await HandleGameAsync(context).ConfigureAwait(false);
                         return;
+                    case "/camera.jpg":
+                        await HandleCameraJpegAsync(context).ConfigureAwait(false);
+                        return;
                     default:
                         context.Response.StatusCode = 404;
                         await WriteJsonAsync(context.Response, 404, "error", "not found").ConfigureAwait(false);
@@ -251,6 +278,52 @@ namespace RobotVoice
                 {
                 }
             }
+        }
+
+        private void Update()
+        {
+            // Throttled camera encoding on main thread
+            if (_webcam == null || !_webcam.isPlaying || !enableCameraPreview)
+            {
+                return;
+            }
+
+            if (!_webcam.didUpdateThisFrame)
+            {
+                return;
+            }
+
+            if (Time.realtimeSinceStartup < _nextCaptureRealtime)
+            {
+                return;
+            }
+
+            if (_cameraTexture == null || _cameraTexture.width != _webcam.width || _cameraTexture.height != _webcam.height)
+            {
+                if (_cameraTexture != null)
+                {
+                    Destroy(_cameraTexture);
+                }
+                // Use RGB24 for faster JPG encode
+                _cameraTexture = new Texture2D(_webcam.width > 0 ? _webcam.width : Mathf.Max(2, cameraWidth),
+                                               _webcam.height > 0 ? _webcam.height : Mathf.Max(2, cameraHeight),
+                                               TextureFormat.RGB24, false);
+            }
+
+            try
+            {
+                _cameraTexture.SetPixels32(_webcam.GetPixels32());
+                _cameraTexture.Apply(false, false);
+                var quality = Mathf.Clamp(cameraJpegQuality, 1, 100);
+                var jpg = _cameraTexture.EncodeToJPG(quality);
+                lock (_cameraLock)
+                {
+                    _latestJpeg = jpg;
+                }
+            }
+            catch (System.Exception) { }
+
+            _nextCaptureRealtime = Time.realtimeSinceStartup + Mathf.Max(0.01f, 1f / Mathf.Max(1, cameraFps));
         }
 
         [Serializable]
@@ -593,6 +666,95 @@ namespace RobotVoice
                 default:
                     await WriteJsonAsync(context.Response, 400, "error", "unknown game action").ConfigureAwait(false);
                     return;
+            }
+        }
+
+        private async Task HandleCameraJpegAsync(HttpListenerContext context)
+        {
+            if (!enableCameraPreview)
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "camera preview disabled").ConfigureAwait(false);
+                return;
+            }
+
+            byte[] jpeg = null;
+            lock (_cameraLock)
+            {
+                if (_latestJpeg != null && _latestJpeg.Length > 0)
+                {
+                    // Create a shallow copy to avoid locking while sending
+                    jpeg = new byte[_latestJpeg.Length];
+                    System.Buffer.BlockCopy(_latestJpeg, 0, jpeg, 0, _latestJpeg.Length);
+                }
+            }
+
+            if (jpeg == null)
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "no camera frame").ConfigureAwait(false);
+                return;
+            }
+
+            try
+            {
+                context.Response.StatusCode = 200;
+                context.Response.ContentType = "image/jpeg";
+                context.Response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate, proxy-revalidate";
+                context.Response.ContentLength64 = jpeg.LongLength;
+                await context.Response.OutputStream.WriteAsync(jpeg, 0, jpeg.Length).ConfigureAwait(false);
+                context.Response.Close();
+            }
+            catch (System.Exception)
+            {
+                try { context.Response.Abort(); } catch { }
+            }
+        }
+
+        private async Task HandleCameraMjpegAsync(HttpListenerContext context)
+        {
+            if (!enableCameraPreview)
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "camera preview disabled").ConfigureAwait(false);
+                return;
+            }
+
+            var boundary = "frame";
+            try
+            {
+                context.Response.StatusCode = 200;
+                context.Response.SendChunked = true;
+                context.Response.ContentType = "multipart/x-mixed-replace; boundary=" + boundary;
+                context.Response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate, proxy-revalidate";
+                var stream = context.Response.OutputStream;
+                var delay = Mathf.Max(1, Mathf.FloorToInt(1000f / Mathf.Max(1, cameraFps)));
+                var newline = Encoding.ASCII.GetBytes("\r\n");
+
+                while (listener != null && context.Response.OutputStream != null)
+                {
+                    byte[] jpeg = null;
+                    lock (_cameraLock)
+                    {
+                        if (_latestJpeg != null && _latestJpeg.Length > 0)
+                        {
+                            jpeg = _latestJpeg;
+                        }
+                    }
+
+                    if (jpeg != null)
+                    {
+                        var header = Encoding.ASCII.GetBytes($"--{boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: {jpeg.Length}\r\n\r\n");
+                        await stream.WriteAsync(header, 0, header.Length).ConfigureAwait(false);
+                        await stream.WriteAsync(jpeg, 0, jpeg.Length).ConfigureAwait(false);
+                        await stream.WriteAsync(newline, 0, newline.Length).ConfigureAwait(false);
+                        await stream.FlushAsync().ConfigureAwait(false);
+                    }
+
+                    await Task.Delay(delay).ConfigureAwait(false);
+                }
+            }
+            catch (Exception)
+            {
+                try { context.Response.OutputStream?.Close(); } catch { }
+                try { context.Response.Close(); } catch { }
             }
         }
 
@@ -945,6 +1107,13 @@ namespace RobotVoice
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"</section>");
             sb.AppendLine(@"<section>");
+            sb.AppendLine(@"<h2>Camera</h2>");
+            sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:flex-start"">");
+            sb.AppendLine(@"<img id=""cameraView"" src=""/camera.mjpg"" alt=""camera"" style=""max-width:100%;width:640px;height:auto;border-radius:12px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 12px 36px rgba(0,0,0,0.35)""/>");
+            sb.AppendLine(@"<small style=""opacity:0.7"">If the image does not update, ensure the camera is available and enabled.</small>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</section>");
+            sb.AppendLine(@"<section>");
             sb.AppendLine(@"<h2>LED Lighting</h2>");
             sb.AppendLine(@"<div class=""controls"">");
             sb.AppendLine(@"<input id=""ledColor"" type=""color"" value=""#00bfff"">");
@@ -1007,6 +1176,7 @@ namespace RobotVoice
             sb.AppendLine(@"const voiceSelect = document.getElementById('voiceSelect');");
             sb.AppendLine(@"const modelSelect = document.getElementById('ttsModelSelect');");
             sb.AppendLine(@"const logContainer = document.getElementById('transcriptLog');");
+            sb.AppendLine(@"const cameraView = document.getElementById('cameraView');");
             sb.AppendLine(@"const logRoleStyles = {");
             sb.AppendLine(@"  user:{icon:'🧍',bg:'rgba(59,130,246,0.18)',color:'#60a5fa'},");
             sb.AppendLine(@"  coach:{icon:'🤖',bg:'rgba(251,146,60,0.18)',color:'#fb923c'},");
@@ -1157,6 +1327,10 @@ namespace RobotVoice
             sb.AppendLine(@"refreshLog();");
             sb.AppendLine(@"setInterval(refreshLog, 4000);");
             sb.AppendLine(@"loadVoiceOptions();");
+            sb.AppendLine(@"let cameraPolling = false;");
+            sb.AppendLine(@"function startPolling(){ if(cameraPolling) return; cameraPolling = true; setInterval(() => { if(cameraView){ cameraView.src = '/camera.jpg?t=' + Date.now(); } }, 200);}");
+            sb.AppendLine(@"function initCamera(){ if(!cameraView) return; cameraView.src = '/camera.mjpg'; setTimeout(() => { if(!cameraPolling && (!cameraView.complete || cameraView.naturalWidth === 0)){ startPolling(); } }, 2000);}");
+            sb.AppendLine(@"initCamera();");
             sb.AppendLine(@"</script>");
             sb.AppendLine(@"</body>");
             sb.AppendLine(@"</html>");
@@ -1209,6 +1383,54 @@ namespace RobotVoice
             }
 
             return value;
+        }
+
+        private void TryStartCamera()
+        {
+            if (!enableCameraPreview)
+            {
+                return;
+            }
+
+            try
+            {
+                if (WebCamTexture.devices == null || WebCamTexture.devices.Length == 0)
+                {
+                    Debug.LogWarning("[UserTestPanel] No camera devices found for preview");
+                    return;
+                }
+
+                var dev = WebCamTexture.devices[0];
+                _webcam = new WebCamTexture(dev.name, Mathf.Max(16, cameraWidth), Mathf.Max(16, cameraHeight), Mathf.Max(1, cameraFps));
+                _webcam.Play();
+                _nextCaptureRealtime = Time.realtimeSinceStartup;
+                Debug.Log($"[UserTestPanel] Camera started: {dev.name} {cameraWidth}x{cameraHeight}@{cameraFps}");
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[UserTestPanel] Failed to start camera: {ex.Message}");
+            }
+        }
+
+        private void StopCamera()
+        {
+            try
+            {
+                if (_webcam != null)
+                {
+                    if (_webcam.isPlaying) _webcam.Stop();
+                    _webcam = null;
+                }
+            }
+            catch (System.Exception) { }
+
+            if (_cameraTexture != null)
+            {
+                Destroy(_cameraTexture);
+                _cameraTexture = null;
+            }
+
+            lock (_cameraLock) { _latestJpeg = null; }
         }
     }
 }

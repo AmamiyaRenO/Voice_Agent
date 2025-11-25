@@ -2033,6 +2033,11 @@ MonoBehaviour:
   scanModelsRecursively: 1
   httpPort: 8787
   autoStart: 1
+  enableCameraPreview: 1
+  cameraWidth: 640
+  cameraHeight: 480
+  cameraJpegQuality: 30
+  cameraFps: 90
 --- !u!114 &1489373255
 MonoBehaviour:
   m_ObjectHideFlags: 0
