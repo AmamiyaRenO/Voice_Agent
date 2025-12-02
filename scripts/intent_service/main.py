@@ -39,7 +39,8 @@ class Config:
     fuzzy_threshold: int = 80
     dedupe_window_sec: float = 1.2
     tts_echo_window_sec: float = 8.0
-    preroll_drop_sec: float = 1.0
+    preroll_drop_sec: float = 0.5
+    tts_hard_drop_sec: float = 0.1
 
     def __post_init__(self) -> None:
         if self.wake_words is None:
@@ -109,6 +110,9 @@ def load_config() -> Config:
         rules_preroll = rules.get("preroll_drop_sec")
         if rules_preroll is not None:
             cfg.preroll_drop_sec = float(rules_preroll)
+        rules_hard_drop = rules.get("tts_hard_drop_sec")
+        if rules_hard_drop is not None:
+            cfg.tts_hard_drop_sec = float(rules_hard_drop)
     else:
         # env-only mode
         cfg.host = os.environ.get("MQTT_HOST", cfg.host)
@@ -125,6 +129,7 @@ def load_config() -> Config:
         cfg.dedupe_window_sec = float(os.environ.get("DEDUPE_WINDOW_SEC", cfg.dedupe_window_sec))
         cfg.tts_echo_window_sec = float(os.environ.get("TTS_ECHO_WINDOW_SEC", cfg.tts_echo_window_sec))
         cfg.preroll_drop_sec = float(os.environ.get("PREROLL_DROP_SEC", cfg.preroll_drop_sec))
+        cfg.tts_hard_drop_sec = float(os.environ.get("TTS_HARD_DROP_SEC", cfg.tts_hard_drop_sec))
     return cfg
 
 
@@ -178,6 +183,7 @@ class IntentService:
         self._tts_last_ts: float = 0.0
         self._tts_last_text_lower: str = ""
         self._dialog_last_ts: float = 0.0
+        self._awaiting_answer_until: float = 0.0
 
     def start(self) -> None:
         print(f"[intent] connecting to mqtt {self.cfg.host}:{self.cfg.port}")
@@ -266,12 +272,20 @@ class IntentService:
         if topic != self.cfg.topics.voice_text:
             return
 
+        # 在我们已发出 QUERY 等待答案的短窗口内，直接丢弃任何新的字幕，避免“hello there”之类的前缀穿透
+        if time.time() < self._awaiting_answer_until:
+            return
+
         # Ignore transcripts while TTS is playing (and短缓冲)
-        if self._tts_playing or (time.time() - self._tts_last_ts) < 0.3:
+        if self._tts_playing or (time.time() - self._tts_last_ts) < 0.1:
             return
 
         # 强化预卷抑制：在发布答案后的极短窗口，不做相似度计算，直接丢弃，避免“Hello there”等前缀穿透
         if (time.time() - self._dialog_last_ts) <= max(0.1, self.cfg.preroll_drop_sec):
+            return
+
+        # 硬抑制：在 TTS 结束后的极短窗口内一律丢弃，留给播放尾音/系统混音沉降
+        if (time.time() - self._tts_last_ts) <= max(0.1, self.cfg.tts_hard_drop_sec):
             return
 
         text = normalize(str(payload.get("text") or ""))
@@ -364,6 +378,8 @@ class IntentService:
         }
         self.client.publish(self.cfg.topics.dialog_query, json.dumps(out))
         print(f"[intent] -> QUERY {self.cfg.topics.dialog_query}")
+        # 进入“等待答案”窗口，防止字幕在 LLM 回复前抢先吐出前缀而再次触发 QUERY
+        self._awaiting_answer_until = time.time() + max(0.1, self.cfg.preroll_drop_sec)
 
 
 def main() -> int:

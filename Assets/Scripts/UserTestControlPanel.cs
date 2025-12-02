@@ -666,6 +666,7 @@ namespace RobotVoice
             // 优先让 Unity 侧直接播放（经由 VoiceGameLauncher → Piper /speak）
             if (voiceLauncher != null)
             {
+                ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel");
                 var voiceToSend = requestedVoice;
                 var modelToSend = requestedModel;
                 PostToMainThread(() => voiceLauncher.TriggerSpeakForTester(text, voiceToSend, modelToSend));
@@ -695,6 +696,7 @@ namespace RobotVoice
                     }
                 }
 
+                ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel");
                 await WriteJsonAsync(context.Response, 200, "ok", "synthesis complete (no local playback)").ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -1283,7 +1285,12 @@ namespace RobotVoice
             sb.AppendLine(@"  }");
             sb.AppendLine(@"  const nearBottom = (logContainer.scrollTop + logContainer.clientHeight) >= (logContainer.scrollHeight - 20);");
             sb.AppendLine(@"  const html = entries.map(entry => {");
-            sb.AppendLine(@"    const role = typeof entry.role === 'string' ? entry.role.toLowerCase() : 'user';");
+            sb.AppendLine(@"    let role = typeof entry.role === 'string' ? entry.role.toLowerCase() : 'user';");
+            sb.AppendLine(@"    const src = typeof entry.source === 'string' ? entry.source.toLowerCase() : '';"); 
+            sb.AppendLine(@"    // 如果来源是对话服务，强制按 coach 展示，避免角色字符串异常被当成 user");
+            sb.AppendLine(@"    if (src.includes('dialog_service') || src === 'dialog' || src.includes('dialog')) { role = 'coach'; }");
+            sb.AppendLine(@"    // 面板触发（tester_panel）或显式标为 wizard 的，按 wizard 展示");
+            sb.AppendLine(@"    if (src.includes('tester_panel') || role === 'wizard') { role = 'wizard'; }");
             sb.AppendLine(@"    const style = logRoleStyles[role] || logRoleStyles.user;");
             sb.AppendLine(@"    const speaker = escapeHtml(entry.speaker || speakerFromRole(role));");
             sb.AppendLine(@"    const text = escapeHtml(entry.message || '');");
