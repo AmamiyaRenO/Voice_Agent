@@ -22,6 +22,7 @@ class Topics:
     dialog_answer: str = "robot/dialog/answer"
     tts_state: str = "robot/tts/state"
     tts_options: str = "robot/tts/options"
+    style: str = "robot/dialog/style"
 
 
 @dataclass
@@ -47,6 +48,7 @@ def load_config() -> Config:
         dialog_answer=os.environ.get("DIALOG_ANSWER_TOPIC", cfg.topics.dialog_answer),
         tts_state=os.environ.get("DIALOG_TTS_STATE_TOPIC", cfg.topics.tts_state),
         tts_options=os.environ.get("DIALOG_TTS_OPTIONS_TOPIC", cfg.topics.tts_options),
+        style=os.environ.get("DIALOG_STYLE_TOPIC", cfg.topics.style),
     )
     # Backward compatibility: VOICE_API_URL used to serve both; now prefer RESPOND_API_URL and TTS_API_URL/PIPER_HTTP_URL
     cfg.respond_api_url = os.environ.get("RESPOND_API_URL", os.environ.get("VOICE_API_URL", cfg.respond_api_url)).rstrip("/")
@@ -65,6 +67,34 @@ class DialogService:
         self.http = httpx.Client(timeout=30.0)
         self.tts_voice: Optional[str] = None
         self.tts_model: Optional[str] = None
+        self.current_style: Optional[str] = None
+        self.current_system_prompt: Optional[str] = None
+
+    @staticmethod
+    def _style_to_prompt(style: str) -> Optional[str]:
+        s = (style or "").strip().lower()
+        if not s:
+            return None
+        if s in {"supportive", "coach", "friendly"}:
+            return (
+                "You are Rachel, a supportive rehabilitation and exercise coach. "
+                "Be encouraging, concise, and proactive. Use simple sentences. "
+                "Guide the user step by step and celebrate small progress."
+            )
+        if s in {"minimalist", "short", "brief"}:
+            return (
+                "You are Rachel the coach. Reply in very short, minimal sentences. "
+                "Only the essential guidance, no small talk. Max two sentences."
+            )
+        if s in {"energetic", "enthusiastic", "cheerful"}:
+            return (
+                "You are Rachel, an energetic and motivating fitness coach. "
+                "Be upbeat and positive. Keep responses concise but spirited."
+            )
+        # Fallback: treat the style string itself as a custom system prompt if it's long
+        if len(s) > 12:
+            return style
+        return None
 
     def start(self) -> None:
         print(f"[dialog] connecting to mqtt {self.cfg.host}:{self.cfg.port}")
@@ -84,6 +114,8 @@ class DialogService:
         print(f"[dialog] subscribed {self.cfg.topics.dialog_query}")
         client.subscribe(self.cfg.topics.tts_options)
         print(f"[dialog] subscribed {self.cfg.topics.tts_options}")
+        client.subscribe(self.cfg.topics.style)
+        print(f"[dialog] subscribed {self.cfg.topics.style}")
 
     def _publish_answer(self, text: str, corr_id: Optional[str]) -> None:
         payload = {
@@ -156,6 +188,14 @@ class DialogService:
             self.tts_model = model or None
             print(f"[dialog] tts options updated voice='{self.tts_voice}' model='{self.tts_model}'")
             return
+        # 风格/提示词更新
+        if topic == self.cfg.topics.style:
+            style = str(payload.get("style") or payload.get("value") or payload or "").strip()
+            prompt = self._style_to_prompt(style)
+            self.current_style = style or None
+            self.current_system_prompt = prompt
+            print(f"[dialog] style updated style='{self.current_style}' prompt={'set' if self.current_system_prompt else 'unset'}")
+            return
 
         text = str(payload.get("text") or "").strip()
         if not text:
@@ -164,7 +204,10 @@ class DialogService:
 
         try:
             url = f"{self.cfg.respond_api_url}{self.cfg.respond_endpoint}"
-            resp = self.http.post(url, json={"text": text})
+            body = {"text": text}
+            if self.current_system_prompt:
+                body["system"] = self.current_system_prompt
+            resp = self.http.post(url, json=body)
             resp.raise_for_status()
             data = resp.json()
             reply_text = (data.get("text") or "").strip()

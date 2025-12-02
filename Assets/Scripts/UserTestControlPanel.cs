@@ -60,6 +60,10 @@ namespace RobotVoice
         [SerializeField, Tooltip("Target frames per second for snapshot encoding")]
         private int cameraFps = 30;
 
+        [Header("Dialogue")]
+        [SerializeField, Tooltip("Available LLM dialogue styles exposed in the tester UI")]
+        private string[] availableDialogStyles = new[] { "Supportive", "Minimalist", "Energetic" };
+
         private HttpListener listener;
         private CancellationTokenSource shutdownToken;
         private Task listenLoopTask;
@@ -263,6 +267,9 @@ namespace RobotVoice
                     case "/api/speak":
                         await HandleSpeakAsync(context).ConfigureAwait(false);
                         return;
+                    case "/api/llm/style":
+                        await HandleLlmStyleAsync(context).ConfigureAwait(false);
+                        return;
                     case "/api/game":
                         await HandleGameAsync(context).ConfigureAwait(false);
                         return;
@@ -396,6 +403,12 @@ namespace RobotVoice
             public string model;
             public float speed;
             public float volume;
+        }
+
+        [Serializable]
+        private struct LlmStyleRequest
+        {
+            public string style;
         }
 
         [Serializable]
@@ -703,6 +716,26 @@ namespace RobotVoice
             {
                 await WriteJsonAsync(context.Response, 500, "error", $"voice request failed: {ex.Message}").ConfigureAwait(false);
             }
+        }
+
+        private async Task HandleLlmStyleAsync(HttpListenerContext context)
+        {
+            var request = ParseJsonBody<LlmStyleRequest>(context.Request);
+            var style = (request.style ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(style))
+            {
+                await WriteJsonAsync(context.Response, 400, "error", "style required").ConfigureAwait(false);
+                return;
+            }
+            if (voiceLauncher == null)
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "VoiceGameLauncher not assigned").ConfigureAwait(false);
+                return;
+            }
+
+            var toSend = style;
+            PostToMainThread(() => voiceLauncher.SetDialogStyleForTester(toSend));
+            await WriteJsonAsync(context.Response, 200, "ok", $"dialog style set: {style}").ConfigureAwait(false);
         }
 
         private async Task HandleGameAsync(HttpListenerContext context)
@@ -1161,6 +1194,14 @@ namespace RobotVoice
             sb.AppendLine(@"<div id=""transcriptLog"" class=""log-list""></div>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"<section>");
+            sb.AppendLine(@"<h2>Dialogue Style</h2>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<button onclick=""setLlmStyle('Supportive')"">Supportive</button>");
+            sb.AppendLine(@"<button onclick=""setLlmStyle('Minimalist')"">Minimalist</button>");
+            sb.AppendLine(@"<button onclick=""setLlmStyle('Energetic')"">Energetic</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</section>");
+            sb.AppendLine(@"<section>");
             sb.AppendLine(@"<h2>Expressions</h2>");
             sb.AppendLine(@"<div class=""controls"">");
             sb.AppendLine(@"<label for=""faceSeconds"">Duration (s)</label>");
@@ -1371,6 +1412,10 @@ namespace RobotVoice
             sb.AppendLine(@"  const model = modelSelect ? modelSelect.value : '';");
             sb.AppendLine(@"  send('/api/speak',{text:text,voice:voiceSelect.value,model:model,speed:speed,volume:volume});");
             sb.AppendLine(@"}");
+            sb.AppendLine(@"function setLlmStyle(value){");
+            sb.AppendLine(@"  if(!value) return;");
+            sb.AppendLine(@"  send('/api/llm/style',{style:value});");
+            sb.AppendLine(@"}");
             sb.AppendLine(@"function launchGame(){");
             sb.AppendLine(@"  const name = document.getElementById('gameName').value||'';");
             sb.AppendLine(@"  send('/api/game',{action:'launch',name:name});");
@@ -1481,13 +1526,22 @@ namespace RobotVoice
 
             try
             {
-                if (WebCamTexture.devices == null || WebCamTexture.devices.Length == 0)
+                var availableSources = WebCamTexture.devices;
+                if (availableSources == null || availableSources.Length == 0)
                 {
                     Debug.LogWarning("[UserTestPanel] No camera devices found for preview");
                     return;
                 }
 
-                var dev = WebCamTexture.devices[0];
+                // 优先尝试 OBS 虚拟摄像头，其次任何名称包含 "virtual" 的设备
+                var dev = availableSources.FirstOrDefault(d =>
+                    (!string.IsNullOrEmpty(d.name) &&
+                     (d.name.IndexOf("obs", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                      d.name.IndexOf("virtual", StringComparison.OrdinalIgnoreCase) >= 0)));
+                if (string.IsNullOrEmpty(dev.name))
+                {
+                    dev = availableSources[0];
+                }
                 _webcam = new WebCamTexture(dev.name, Mathf.Max(16, cameraWidth), Mathf.Max(16, cameraHeight), Mathf.Max(1, cameraFps));
                 _webcam.Play();
                 _nextCaptureRealtime = Time.realtimeSinceStartup;
