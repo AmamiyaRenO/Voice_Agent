@@ -39,6 +39,7 @@ class Config:
     fuzzy_threshold: int = 80
     dedupe_window_sec: float = 1.2
     tts_echo_window_sec: float = 8.0
+    preroll_drop_sec: float = 1.0
 
     def __post_init__(self) -> None:
         if self.wake_words is None:
@@ -105,6 +106,9 @@ def load_config() -> Config:
         rules_tts_echo = rules.get("tts_echo_window_sec")
         if rules_tts_echo is not None:
             cfg.tts_echo_window_sec = float(rules_tts_echo)
+        rules_preroll = rules.get("preroll_drop_sec")
+        if rules_preroll is not None:
+            cfg.preroll_drop_sec = float(rules_preroll)
     else:
         # env-only mode
         cfg.host = os.environ.get("MQTT_HOST", cfg.host)
@@ -120,6 +124,7 @@ def load_config() -> Config:
         cfg.fuzzy_threshold = int(os.environ.get("FUZZY_THRESHOLD", cfg.fuzzy_threshold))
         cfg.dedupe_window_sec = float(os.environ.get("DEDUPE_WINDOW_SEC", cfg.dedupe_window_sec))
         cfg.tts_echo_window_sec = float(os.environ.get("TTS_ECHO_WINDOW_SEC", cfg.tts_echo_window_sec))
+        cfg.preroll_drop_sec = float(os.environ.get("PREROLL_DROP_SEC", cfg.preroll_drop_sec))
     return cfg
 
 
@@ -172,6 +177,7 @@ class IntentService:
         self._tts_playing: bool = False
         self._tts_last_ts: float = 0.0
         self._tts_last_text_lower: str = ""
+        self._dialog_last_ts: float = 0.0
 
     def start(self) -> None:
         print(f"[intent] connecting to mqtt {self.cfg.host}:{self.cfg.port}")
@@ -232,11 +238,14 @@ class IntentService:
             speaking = bool(payload.get("speaking"))
             self._tts_playing = speaking
             self._tts_last_ts = time.time()
+            # 任何一端宣布开始说话，都刷新对话预卷时间，提前丢弃字幕抢先的短前缀
+            self._dialog_last_ts = self._tts_last_ts
             try:
                 txt = str(payload.get("text") or "").strip().lower()
                 if txt:
                     self._tts_last_text_lower = txt
             except Exception:
+                # 保底：忽略解析错误，保持最近一次时间戳
                 pass
             return
 
@@ -247,8 +256,11 @@ class IntentService:
                 if txt:
                     self._tts_last_text_lower = txt
                 self._tts_last_ts = time.time()
+                self._dialog_last_ts = self._tts_last_ts
             except Exception:
-            self._tts_last_ts = time.time()
+                # 至少更新时间戳，触发预抑制窗口
+                self._tts_last_ts = time.time()
+                self._dialog_last_ts = self._tts_last_ts
             return
 
         if topic != self.cfg.topics.voice_text:
@@ -256,6 +268,10 @@ class IntentService:
 
         # Ignore transcripts while TTS is playing (and短缓冲)
         if self._tts_playing or (time.time() - self._tts_last_ts) < 0.3:
+            return
+
+        # 强化预卷抑制：在发布答案后的极短窗口，不做相似度计算，直接丢弃，避免“Hello there”等前缀穿透
+        if (time.time() - self._dialog_last_ts) <= max(0.1, self.cfg.preroll_drop_sec):
             return
 
         text = normalize(str(payload.get("text") or ""))
@@ -277,6 +293,7 @@ class IntentService:
                             return
                 except Exception:
                     if tt in t or t in tt:
+                        return
             return
 
         corr_id = payload.get("corr_id") or new_corr_id()
