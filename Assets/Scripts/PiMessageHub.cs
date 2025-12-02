@@ -136,12 +136,47 @@ public class PiMessageHub : MonoBehaviour
                 await PublishRawAsync(ledTopic, json);
     }
 
+    // 透传自定义 duration（秒）；<=0 时回退到默认
+    public async Task SendLedBreathAsync(string hexColor, float brightness, float periodSeconds, float durationSeconds)
+    {
+        var seconds = durationSeconds > 0f
+            ? durationSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : defaultLedBreathSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var color = string.IsNullOrWhiteSpace(hexColor) ? "#00BFFF" : hexColor;
+        var clampedBrightness = Mathf.Clamp01(brightness <= 0f ? 1f : brightness);
+        var period = periodSeconds > 0f
+            ? periodSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : "1.5";
+        var value = "breathe:" + Escape(color) + ":" + seconds + ":" + clampedBrightness.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + period;
+        var json = "{" +
+                   "\"action\":\"led\"," +
+                   "\"value\":\"" + Escape(value) + "\"" +
+                   "}";
+        await PublishRawAsync(ledTopic, json);
+    }
+
         public async Task SendLedSolidAsync(string hexColor, float brightness = 1f)
         {
                 var color = string.IsNullOrWhiteSpace(hexColor) ? "#FFFFFF" : hexColor.Trim();
                 var duration = defaultLedOnSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 var clampedBrightness = Mathf.Clamp01(brightness <= 0f ? 1f : brightness);
                 var value = "on:" + Escape(color) + ":" + duration + ":" + clampedBrightness.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var json = "{" +
+                                   "\"action\":\"led\"," +
+                                   "\"value\":\"" + Escape(value) + "\"" +
+                                   "}";
+                await PublishRawAsync(ledTopic, json);
+        }
+
+        // 透传自定义 duration（秒）；<=0 时回退到默认
+        public async Task SendLedSolidAsync(string hexColor, float brightness, float durationSeconds)
+        {
+                var color = string.IsNullOrWhiteSpace(hexColor) ? "#FFFFFF" : hexColor.Trim();
+                var seconds = durationSeconds > 0f
+                        ? durationSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        : defaultLedOnSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var clampedBrightness = Mathf.Clamp01(brightness <= 0f ? 1f : brightness);
+                var value = "on:" + Escape(color) + ":" + seconds + ":" + clampedBrightness.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 var json = "{" +
                                    "\"action\":\"led\"," +
                                    "\"value\":\"" + Escape(value) + "\"" +
@@ -163,6 +198,23 @@ public class PiMessageHub : MonoBehaviour
 				   "}";
 		await PublishRawAsync(ledTopic, json);
 	}
+
+    // 随机色 + 自定义 duration（秒）；<=0 时回退到默认
+    public async Task SendLedRandomAsync(float durationSeconds)
+    {
+        var rand = new System.Random();
+        int r = rand.Next(0, 256), g = rand.Next(0, 256), b = rand.Next(0, 256);
+        var hex = "#" + r.ToString("X2") + g.ToString("X2") + b.ToString("X2");
+        var seconds = durationSeconds > 0f
+            ? durationSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : defaultLedOnSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var value = "on:" + hex + ":" + seconds + ":1.0";
+        var json = "{" +
+                   "\"action\":\"led\"," +
+                   "\"value\":\"" + Escape(value) + "\"" +
+                   "}";
+        await PublishRawAsync(ledTopic, json);
+    }
 
 	public async Task SendLedOffAsync()
 	{

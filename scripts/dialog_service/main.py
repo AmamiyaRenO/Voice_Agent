@@ -21,6 +21,7 @@ class Topics:
     dialog_query: str = "robot/dialog/query"
     dialog_answer: str = "robot/dialog/answer"
     tts_state: str = "robot/tts/state"
+    tts_options: str = "robot/tts/options"
 
 
 @dataclass
@@ -44,6 +45,8 @@ def load_config() -> Config:
     cfg.topics = Topics(
         dialog_query=os.environ.get("DIALOG_QUERY_TOPIC", cfg.topics.dialog_query),
         dialog_answer=os.environ.get("DIALOG_ANSWER_TOPIC", cfg.topics.dialog_answer),
+        tts_state=os.environ.get("DIALOG_TTS_STATE_TOPIC", cfg.topics.tts_state),
+        tts_options=os.environ.get("DIALOG_TTS_OPTIONS_TOPIC", cfg.topics.tts_options),
     )
     # Backward compatibility: VOICE_API_URL used to serve both; now prefer RESPOND_API_URL and TTS_API_URL/PIPER_HTTP_URL
     cfg.respond_api_url = os.environ.get("RESPOND_API_URL", os.environ.get("VOICE_API_URL", cfg.respond_api_url)).rstrip("/")
@@ -60,6 +63,8 @@ class DialogService:
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
         self.http = httpx.Client(timeout=30.0)
+        self.tts_voice: Optional[str] = None
+        self.tts_model: Optional[str] = None
 
     def start(self) -> None:
         print(f"[dialog] connecting to mqtt {self.cfg.host}:{self.cfg.port}")
@@ -77,6 +82,8 @@ class DialogService:
         print(f"[dialog] connected rc={reason_code}")
         client.subscribe(self.cfg.topics.dialog_query)
         print(f"[dialog] subscribed {self.cfg.topics.dialog_query}")
+        client.subscribe(self.cfg.topics.tts_options)
+        print(f"[dialog] subscribed {self.cfg.topics.tts_options}")
 
     def _publish_answer(self, text: str, corr_id: Optional[str]) -> None:
         payload = {
@@ -104,8 +111,13 @@ class DialogService:
     def _tts_and_play(self, text: str, corr_id: Optional[str]) -> None:
         try:
             url = f"{self.cfg.tts_api_url}{self.cfg.tts_endpoint}"
-            # Piper HTTP 支持 GET /speak?text=... 直接返回 WAV
-            resp = self.http.get(url, params={"text": text})
+            # Piper HTTP 支持 GET /speak?text=... 直接返回 WAV；可附带 voice/model
+            params = {"text": text}
+            if self.tts_voice:
+                params["voice"] = self.tts_voice
+            if self.tts_model:
+                params["model"] = self.tts_model
+            resp = self.http.get(url, params=params)
             resp.raise_for_status()
             wav_bytes = resp.content
             try:
@@ -132,6 +144,17 @@ class DialogService:
             payload = json.loads(msg.payload.decode("utf-8"))
         except json.JSONDecodeError:
             print("[dialog] invalid json, ignored")
+            return
+
+        topic = msg.topic or ""
+
+        # TTS 选项更新
+        if topic == self.cfg.topics.tts_options:
+            voice = str(payload.get("voice") or "").strip()
+            model = str(payload.get("model") or "").strip()
+            self.tts_voice = voice or None
+            self.tts_model = model or None
+            print(f"[dialog] tts options updated voice='{self.tts_voice}' model='{self.tts_model}'")
             return
 
         text = str(payload.get("text") or "").strip()

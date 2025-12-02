@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.UI;
 using PiHub = global::PiMessageHub;
 
 namespace RobotVoice
@@ -44,6 +45,12 @@ namespace RobotVoice
         [Header("Camera Preview")]
         [SerializeField, Tooltip("Show local PC camera on the tester web panel (/camera.jpg).")]
         private bool enableCameraPreview = true;
+        [SerializeField, Tooltip("Use an external texture (e.g., from MediaPipe) instead of opening WebCamTexture")]
+        private bool useExternalCameraTexture = false;
+        [SerializeField, Tooltip("When useExternalCameraTexture=true, read frames from this RawImage's texture (e.g., MediaPipe Annotatable Screen)")]
+        private RawImage externalCameraRawImage;
+        [SerializeField, Tooltip("Fallback: If RawImage is not set, read from this Renderer.material.mainTexture")]
+        private Renderer externalCameraRenderer;
         [SerializeField, Tooltip("Requested camera width for preview")]
         private int cameraWidth = 640;
         [SerializeField, Tooltip("Requested camera height for preview")]
@@ -283,16 +290,36 @@ namespace RobotVoice
         private void Update()
         {
             // Throttled camera encoding on main thread
-            if (_webcam == null || !_webcam.isPlaying || !enableCameraPreview)
+            if (!enableCameraPreview)
             {
                 return;
             }
 
+            // Choose source: external texture (e.g., MediaPipe) or local webcam
+            if (useExternalCameraTexture)
+            {
+                if (Time.realtimeSinceStartup < _nextCaptureRealtime)
+                {
+                    return;
+                }
+                var tex = GetExternalCameraTexture();
+                if (tex == null)
+                {
+                    return;
+                }
+                CaptureTextureToJpeg(tex);
+                _nextCaptureRealtime = Time.realtimeSinceStartup + Mathf.Max(0.01f, 1f / Mathf.Max(1, cameraFps));
+                return;
+            }
+
+            if (_webcam == null || !_webcam.isPlaying)
+            {
+                return;
+            }
             if (!_webcam.didUpdateThisFrame)
             {
                 return;
             }
-
             if (Time.realtimeSinceStartup < _nextCaptureRealtime)
             {
                 return;
@@ -349,6 +376,7 @@ namespace RobotVoice
             public string color;
             public float brightness;
             public float period;
+            public float duration;
         }
 
         [Serializable]
@@ -480,6 +508,7 @@ namespace RobotVoice
             var mode = (request.mode ?? string.Empty).Trim().ToLowerInvariant();
             var brightness = request.brightness > 0f ? Mathf.Clamp01(request.brightness) : 1f;
             var period = request.period > 0f ? request.period : 1.5f;
+            var duration = request.duration > 0f ? request.duration : 0f;
             if (piHub == null)
             {
                 await WriteJsonAsync(context.Response, 503, "error", "PiMessageHub not assigned").ConfigureAwait(false);
@@ -495,7 +524,14 @@ namespace RobotVoice
                         await WriteJsonAsync(context.Response, 400, "error", "invalid color").ConfigureAwait(false);
                         return;
                     }
-                    await piHub.SendLedBreathAsync(color, brightness, period).ConfigureAwait(false);
+                    if (duration > 0f)
+                    {
+                        await piHub.SendLedBreathAsync(color, brightness, period, duration).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await piHub.SendLedBreathAsync(color, brightness, period).ConfigureAwait(false);
+                    }
                     await WriteJsonAsync(context.Response, 200, "ok", $"led breathe {color}").ConfigureAwait(false);
                     return;
                 case "solid":
@@ -505,11 +541,25 @@ namespace RobotVoice
                         await WriteJsonAsync(context.Response, 400, "error", "invalid color").ConfigureAwait(false);
                         return;
                     }
-                    await piHub.SendLedSolidAsync(solidColor, brightness).ConfigureAwait(false);
+                    if (duration > 0f)
+                    {
+                        await piHub.SendLedSolidAsync(solidColor, brightness, duration).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await piHub.SendLedSolidAsync(solidColor, brightness).ConfigureAwait(false);
+                    }
                     await WriteJsonAsync(context.Response, 200, "ok", $"led solid {solidColor}").ConfigureAwait(false);
                     return;
                 case "random":
-                    await piHub.SendLedRandomAsync().ConfigureAwait(false);
+                    if (duration > 0f)
+                    {
+                        await piHub.SendLedRandomAsync(duration).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await piHub.SendLedRandomAsync().ConfigureAwait(false);
+                    }
                     await WriteJsonAsync(context.Response, 200, "ok", "led random").ConfigureAwait(false);
                     return;
                 case "off":
@@ -521,6 +571,23 @@ namespace RobotVoice
                     return;
             }
         }
+        
+        private void ScheduleLedOff(float seconds)
+        {
+            if (seconds <= 0f || piHub == null)
+            {
+                return;
+            }
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(seconds)).ConfigureAwait(false);
+                    await piHub.SendLedOffAsync().ConfigureAwait(false);
+                }
+                catch (Exception) { }
+            });
+        }
 
         private async Task HandleVoiceAsync(HttpListenerContext context)
         {
@@ -529,15 +596,6 @@ namespace RobotVoice
 
             switch (action)
             {
-                case "wake":
-                    if (voiceLauncher == null)
-                    {
-                        await WriteJsonAsync(context.Response, 503, "error", "VoiceGameLauncher not assigned").ConfigureAwait(false);
-                        return;
-                    }
-                    voiceLauncher.TriggerWakeWordForTester();
-                    await WriteJsonAsync(context.Response, 200, "ok", "wake flow started").ConfigureAwait(false);
-                    return;
                 case "set":
                 case "set_voice":
                     var newVoice = string.IsNullOrWhiteSpace(request.voice) ? request.value : request.voice;
@@ -548,6 +606,12 @@ namespace RobotVoice
                         return;
                     }
                     activeVoiceCode = newVoice;
+                    if (voiceLauncher != null)
+                    {
+                        var voiceToSend = activeVoiceCode;
+                        var modelToSend = activeTtsModel;
+                        PostToMainThread(() => voiceLauncher.SetTtsOptionsForTester(voiceToSend, modelToSend));
+                    }
                     await WriteJsonAsync(context.Response, 200, "ok", $"voice set to {activeVoiceCode}").ConfigureAwait(false);
                     return;
                 case "set_model":
@@ -560,6 +624,12 @@ namespace RobotVoice
                         return;
                     }
                     activeTtsModel = newModel;
+                    if (voiceLauncher != null)
+                    {
+                        var voiceToSend2 = activeVoiceCode;
+                        var modelToSend2 = activeTtsModel;
+                        PostToMainThread(() => voiceLauncher.SetTtsOptionsForTester(voiceToSend2, modelToSend2));
+                    }
                     await WriteJsonAsync(context.Response, 200, "ok", $"tts model set to {activeTtsModel}").ConfigureAwait(false);
                     return;
                 default:
@@ -602,8 +672,6 @@ namespace RobotVoice
                 await WriteJsonAsync(context.Response, 200, "ok", "playing locally").ConfigureAwait(false);
                 return;
             }
-
-            ConversationLog.AddEntry(ConversationRole.Wizard, text, "Wizard Override");
 
             // 回退：如果未绑定 VoiceGameLauncher，则仍向语音服务发送请求（但不会在本机播放）
             var url = (voiceServiceUrl ?? string.Empty).Trim();
@@ -1121,11 +1189,13 @@ namespace RobotVoice
             sb.AppendLine(@"<input id=""ledBrightness"" type=""number"" min=""0.1"" max=""1"" step=""0.1"" value=""0.8"">");
             sb.AppendLine(@"<label for=""ledPeriod"">Period</label>");
             sb.AppendLine(@"<input id=""ledPeriod"" type=""number"" min=""0.5"" step=""0.1"" value=""2"">");
+            sb.AppendLine(@"<label for=""ledDuration"">Duration</label>");
+            sb.AppendLine(@"<input id=""ledDuration"" type=""number"" min=""0"" step=""0.1"" value=""0"">");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"<div class=""controls"">");
             sb.AppendLine(@"<button onclick=""ledBreathe()"">Breathe</button>");
             sb.AppendLine(@"<button onclick=""ledSolid()"">Solid</button>");
-            sb.AppendLine(@"<button onclick=""send('/api/led',{mode:'random'})"">Random</button>");
+            sb.AppendLine(@"<button onclick=""ledRandom()"">Random</button>");
             sb.AppendLine(@"<button onclick=""send('/api/led',{mode:'off'})"">Off</button>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"</section>");
@@ -1149,7 +1219,6 @@ namespace RobotVoice
             sb.AppendLine(@"<select id=""voiceSelect"" onchange=""setVoice(this.value)""></select>");
             sb.AppendLine(@"<label for=""ttsModelSelect"">TTS Model</label>");
             sb.AppendLine(@"<select id=""ttsModelSelect"" onchange=""setTtsModel(this.value)""></select>");
-            sb.AppendLine(@"<button onclick=""send('/api/voice',{action:'wake'})"">Start Wake Flow</button>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:stretch;"">");
             sb.AppendLine(@"<textarea id=""speakText"" placeholder=""Type the phrase you want the robot to say""></textarea>");
@@ -1263,12 +1332,18 @@ namespace RobotVoice
             sb.AppendLine(@"  const color = document.getElementById('ledColor').value;");
             sb.AppendLine(@"  const brightness = parseFloat(document.getElementById('ledBrightness').value)||0.8;");
             sb.AppendLine(@"  const period = parseFloat(document.getElementById('ledPeriod').value)||2;");
-            sb.AppendLine(@"  send('/api/led',{mode:'breathe',color:color,brightness:brightness,period:period});");
+            sb.AppendLine(@"  const duration = parseFloat(document.getElementById('ledDuration').value)||0;");
+            sb.AppendLine(@"  send('/api/led',{mode:'breathe',color:color,brightness:brightness,period:period,duration:duration});");
             sb.AppendLine(@"}");
             sb.AppendLine(@"function ledSolid(){");
             sb.AppendLine(@"  const color = document.getElementById('ledColor').value;");
             sb.AppendLine(@"  const brightness = parseFloat(document.getElementById('ledBrightness').value)||0.8;");
-            sb.AppendLine(@"  send('/api/led',{mode:'solid',color:color,brightness:brightness});");
+            sb.AppendLine(@"  const duration = parseFloat(document.getElementById('ledDuration').value)||0;");
+            sb.AppendLine(@"  send('/api/led',{mode:'solid',color:color,brightness:brightness,duration:duration});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function ledRandom(){");
+            sb.AppendLine(@"  const duration = parseFloat(document.getElementById('ledDuration').value)||0;");
+            sb.AppendLine(@"  send('/api/led',{mode:'random',duration:duration});");
             sb.AppendLine(@"}");
             sb.AppendLine(@"function setVoice(value){");
             sb.AppendLine(@"  if(!value) return;");
@@ -1391,6 +1466,11 @@ namespace RobotVoice
             {
                 return;
             }
+            // If using external texture (e.g., MediaPipe), we don't open WebCamTexture here
+            if (useExternalCameraTexture)
+            {
+                return;
+            }
 
             try
             {
@@ -1431,6 +1511,52 @@ namespace RobotVoice
             }
 
             lock (_cameraLock) { _latestJpeg = null; }
+        }
+
+        private Texture GetExternalCameraTexture()
+        {
+            if (externalCameraRawImage != null && externalCameraRawImage.texture != null)
+            {
+                return externalCameraRawImage.texture;
+            }
+            if (externalCameraRenderer != null && externalCameraRenderer.material != null)
+            {
+                var tex = externalCameraRenderer.material.mainTexture;
+                if (tex != null) return tex;
+            }
+            return null;
+        }
+
+        private void CaptureTextureToJpeg(Texture source)
+        {
+            try
+            {
+                var width = Mathf.Max(2, source.width);
+                var height = Mathf.Max(2, source.height);
+                if (_cameraTexture == null || _cameraTexture.width != width || _cameraTexture.height != height)
+                {
+                    if (_cameraTexture != null) Destroy(_cameraTexture);
+                    _cameraTexture = new Texture2D(width, height, TextureFormat.RGB24, false);
+                }
+
+                // Blit to a temporary RenderTexture then ReadPixels to CPU
+                var tmp = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
+                Graphics.Blit(source, tmp);
+                var prev = RenderTexture.active;
+                RenderTexture.active = tmp;
+                _cameraTexture.ReadPixels(new Rect(0, 0, width, height), 0, 0, false);
+                _cameraTexture.Apply(false, false);
+                RenderTexture.active = prev;
+                RenderTexture.ReleaseTemporary(tmp);
+
+                var quality = Mathf.Clamp(cameraJpegQuality, 1, 100);
+                var jpg = _cameraTexture.EncodeToJPG(quality);
+                lock (_cameraLock)
+                {
+                    _latestJpeg = jpg;
+                }
+            }
+            catch (System.Exception) { }
         }
     }
 }

@@ -540,6 +540,10 @@ PrefabInstance:
       propertyPath: m_Name
       value: Main Canvas
       objectReference: {fileID: 0}
+    - target: {fileID: 8571076842338426121, guid: 140d1d2c406167c50819d89f86d9092e, type: 3}
+      propertyPath: m_IsActive
+      value: 1
+      objectReference: {fileID: 0}
     - target: {fileID: 8571076842338426122, guid: 140d1d2c406167c50819d89f86d9092e, type: 3}
       propertyPath: m_Camera
       value: 
@@ -655,6 +659,10 @@ PrefabInstance:
     - target: {fileID: 8571076842338426133, guid: 140d1d2c406167c50819d89f86d9092e, type: 3}
       propertyPath: m_LocalEulerAnglesHint.z
       value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 8571076842583978906, guid: 140d1d2c406167c50819d89f86d9092e, type: 3}
+      propertyPath: m_IsActive
+      value: 1
       objectReference: {fileID: 0}
     - target: {fileID: 8571076842583978917, guid: 140d1d2c406167c50819d89f86d9092e, type: 3}
       propertyPath: m_Pivot.x
@@ -2034,6 +2042,9 @@ MonoBehaviour:
   httpPort: 8787
   autoStart: 1
   enableCameraPreview: 1
+  useExternalCameraTexture: 1
+  externalCameraRawImage: {fileID: 2080068839}
+  externalCameraRenderer: {fileID: 0}
   cameraWidth: 640
   cameraHeight: 480
   cameraJpegQuality: 30
@@ -2057,6 +2068,9 @@ MonoBehaviour:
   clientIdSuffix: unity-caption
   launcher: {fileID: 1489373251}
   autoWakeOnFirstSentence: 1
+  ttsStateTopic: robot/tts/state
+  ttsSuppressTailMs: 1200
+  ttsEchoWindowMs: 3000
   verboseLogging: 1
 --- !u!114 &1489373256
 MonoBehaviour:

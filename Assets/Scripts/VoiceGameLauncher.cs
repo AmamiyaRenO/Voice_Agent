@@ -36,13 +36,11 @@ namespace RobotVoice
         private float duplicateSuppressionSeconds = 2f;
         [Header("Wake Word Interaction")]
         [SerializeField] private string wakeWordPrompt = "Listening";
-        // removed fixed listening window: we act on first command after wake word
         [SerializeField] private AudioSource wakeWordPromptSource;
         [SerializeField] private AudioClip wakeWordPromptClip;
         [SerializeField] private GameObject wakeListeningIndicatorRoot;
         [SerializeField] private Image wakeListeningProgressImage;
         [SerializeField] private Text wakeListeningCountdownText;
-        // Coach replies are handled by external dialog_service; Unity no longer fetches /respond or renders coach UI.
         [Header("TTS (Piper)")]
         [SerializeField] private string piperSpeakUrl = "http://127.0.0.1:5005/speak";
         [SerializeField, Tooltip("Prompt text sent to LLM when wake word is detected. Keep it short.")]
@@ -52,8 +50,6 @@ namespace RobotVoice
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
         private readonly List<KeywordPhrase> keywordPhrases = new List<KeywordPhrase>();
-        private bool awaitingFirstCommand;
-        // removed expiry timestamp: awaitingFirstCommand controls lifecycle
         private Coroutine wakeListeningIndicatorCoroutine;
         private string lastDeliveredTranscript = string.Empty;
         private float lastDeliveredTranscriptTime = -999f;
@@ -217,7 +213,6 @@ namespace RobotVoice
 
             if (runtimeConfig != null)
             {
-                TryAdd(runtimeConfig.WakeWord);
                 TryAddRange(runtimeConfig.LaunchKeywords);
                 TryAddRange(runtimeConfig.ExitKeywords);
 
@@ -288,7 +283,11 @@ namespace RobotVoice
                 {
                     Debug.Log($"[RobotVoice] Ignored low-confidence speech \"{candidateText.Trim()}\"");
                 }
-
+                // 即便被噪声过滤，仍记录到日志以便观察
+                if (!string.IsNullOrWhiteSpace(candidateText))
+                {
+                    ConversationLog.AddEntry(ConversationRole.User, candidateText, "filtered_noise");
+                }
                 return;
             }
 
@@ -306,30 +305,6 @@ namespace RobotVoice
             {
                 RegisterTranscriptUsage(normalizedCandidate);
             }
-            var wakeWordSource = hasKeywordMatch ? recognised : rawRecognised;
-            if (string.IsNullOrWhiteSpace(wakeWordSource))
-            {
-                wakeWordSource = recognised;
-            }
-
-            var configuredWakeWord = runtimeConfig?.WakeWord?.Trim();
-            var hasWakeWordPrefix = !string.IsNullOrWhiteSpace(wakeWordSource) && MatchesWakeWordPrefix(wakeWordSource, configuredWakeWord);
-            var containsWakeWord = !string.IsNullOrWhiteSpace(wakeWordSource) && ContainsWakeWord(wakeWordSource, configuredWakeWord);
-            // 仅用于日志观察，不再使用时间窗口
-
-            var textAfterWakeWord = hasWakeWordPrefix
-                ? wakeWordSource.Substring(configuredWakeWord.Length).TrimStart()
-                : wakeWordSource;
-
-            if ((hasWakeWordPrefix && string.IsNullOrWhiteSpace(textAfterWakeWord)) ||
-                (containsWakeWord && string.Equals(wakeWordSource.Trim(), configuredWakeWord, StringComparison.OrdinalIgnoreCase)))
-            {
-                // 立即进入首命令等待，避免协程调度带来的竞态
-                awaitingFirstCommand = true;
-                HandleWakeWordOnlyDetected();
-                return;
-            }
-
             if (IsOnCooldown())
             {
                 if (logDebugMessages)
@@ -339,24 +314,10 @@ namespace RobotVoice
                 return;
             }
 
-            // 强制唤醒词门控：未在唤醒窗口且本段不含唤醒前缀，则直接忽略
-            if (requireWakeWord && !awaitingFirstCommand && !hasWakeWordPrefix)
-            {
-                return;
-            }
+            // 去掉唤醒词门控，直接使用候选文本
+            var processed = string.IsNullOrWhiteSpace(candidateText) ? rawRecognised : candidateText;
 
-            var processed = ApplyWakeWord(wakeWordSource, hasWakeWordPrefix, textAfterWakeWord);
-            if (processed == null && awaitingFirstCommand)
-            {
-                // 唤醒后无条件放行下一句
-                processed = wakeWordSource;
-            }
-            if (processed == null)
-            {
-                return;
-            }
-
-            if (hasKeywordMatch && (awaitingFirstCommand || hasWakeWordPrefix))
+            if (hasKeywordMatch)
             {
                 if (IsExitIntent(processed))
                 {
@@ -372,7 +333,13 @@ namespace RobotVoice
 
                 if (!requireLaunchKeyword && !string.IsNullOrWhiteSpace(processed))
                 {
-                    PublishLaunch(runtimeConfig.ResolveGameName(processed), rawRecognised);
+                    var resolved = runtimeConfig != null ? runtimeConfig.ResolveGameName(processed) : processed;
+                    // 若没有解析出游戏名，也记录一下用户指令文本，避免“open”等未被记录
+                    if (string.IsNullOrWhiteSpace(resolved) && !string.IsNullOrWhiteSpace(rawRecognised))
+                    {
+                        ConversationLog.AddEntry(ConversationRole.User, rawRecognised, "no_game_resolved");
+                    }
+                    PublishLaunch(resolved, rawRecognised);
                     return;
                 }
             }
@@ -380,23 +347,11 @@ namespace RobotVoice
             var textForCoach = string.IsNullOrWhiteSpace(processed) ? rawRecognised : processed;
             if (!string.IsNullOrWhiteSpace(textForCoach))
             {
-                // 未被唤醒时不允许触发 LLM 回复
-                if (!(awaitingFirstCommand || hasWakeWordPrefix))
-                {
-                    return;
-                }
-
                 ConversationLog.AddEntry(ConversationRole.User, textForCoach);
-                ClearWakeWordWindow();
-                // Coach reply handled by external dialog_service
             }
         }
 
-        public void TriggerWakeWordForTester()
-        {
-            awaitingFirstCommand = true;
-            HandleWakeWordOnlyDetected();
-        }
+        // Wake flow removed
 
         public void TriggerLaunchForTester(string gameName)
         {
@@ -436,141 +391,26 @@ namespace RobotVoice
 
         private bool IsOnCooldown()
         {
-            // 唤醒后的第一条命令不受冷却限制
-            if (awaitingFirstCommand && IsWakeWordWindowActive())
-            {
-                return false;
-            }
-
             return Time.realtimeSinceStartup - lastIntentTime < Mathf.Max(0.1f, intentCooldownSeconds);
         }
 
-        private void HandleWakeWordOnlyDetected()
-        {
-			// 唤醒词响应：同时开花并亮灯（短暂常亮）
-			if (piHub != null)
-			{
-				_ = piHub.OpenFlowerHoldAsync();
-				_ = piHub.SendLedRandomAsync();
-			}
-			// 先让 LLM 回复一句“我在听”（TTS 播放），再开启首条命令监听
-			StartCoroutine(WakeThenListenFlow());
-        }
+        // Wake-only flow removed
 
-        private void TriggerWakeWordRecordingWindow()
-        {
-            if (speechToText == null)
-            {
-                return;
-            }
+        // Wake recording window removed
 
-            // 不再使用固定时长窗口，由 awaitingFirstCommand 控制生命周期
-            speechToText.StartWakeWordWindow(Mathf.Max(0.5f, firstCommandListenSeconds)); // 仍需触发录音启动，给一个很短的窗口
-        }
+        // Wake prompt flow removed
 
-        private IEnumerator PlayPromptThenOpenWakeWindow()
-        {
-            // 立即开启录音窗口，不等待提示音播放完成
-            ActivateWakeWordWindow();
-            awaitingFirstCommand = true;
-            TriggerWakeWordRecordingWindow();
-            yield break;
-        }
+        // Wake ack flow removed
 
-        private IEnumerator WakeThenListenFlow()
-        {
-            var ack = string.IsNullOrWhiteSpace(wakeAcknowledgeUserText)
-                ? "I'm listening."
-                : wakeAcknowledgeUserText.Trim();
+        // Wake window state removed
 
-            // 仅播放 TTS（若可用），不再显示 Coach UI
-            if (!string.IsNullOrWhiteSpace(piperSpeakUrl))
-            {
-                yield return PlayTtsFromPiper(ack);
-            }
+        // Wake window activation removed
 
-            // TTS 播放后开始监听第一条命令
-            ActivateWakeWordWindow();
-            awaitingFirstCommand = true;
-            TriggerWakeWordRecordingWindow();
-        }
+        // Wake window clear removed
 
-        private bool IsWakeWordWindowActive()
-        {
-            // 改为“只等待第一条命令”，不再依赖倒计时窗口
-            return awaitingFirstCommand;
-        }
+        // Wake word application removed
 
-        private void ActivateWakeWordWindow()
-        {
-            awaitingFirstCommand = true;
-        }
-
-        private void ClearWakeWordWindow()
-        {
-            StopWakeWordListeningIndicator();
-            awaitingFirstCommand = false;
-        }
-
-        private string ApplyWakeWord(string recognised, bool hasWakeWordPrefix, string textAfterWakeWord)
-        {
-            var configuredWakeWord = runtimeConfig.WakeWord?.Trim();
-            if (string.IsNullOrEmpty(configuredWakeWord))
-            {
-                return recognised;
-            }
-
-            if (hasWakeWordPrefix)
-            {
-                return textAfterWakeWord;
-            }
-
-            if (IsWakeWordWindowActive())
-            {
-                return recognised;
-            }
-
-            if (requireWakeWord && !awaitingFirstCommand)
-            {
-                if (logDebugMessages)
-                {
-                    Debug.Log($"[RobotVoice] Wake word '{configuredWakeWord}' missing in '{recognised}'");
-                }
-                return null;
-            }
-
-            return recognised;
-        }
-
-        private bool MatchesWakeWordPrefix(string recognised, string configured)
-        {
-            if (string.IsNullOrWhiteSpace(recognised))
-            {
-                return false;
-            }
-
-            if (!string.IsNullOrEmpty(configured) && recognised.StartsWith(configured, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            return false;
-        }
-
-        private bool ContainsWakeWord(string recognised, string configured)
-        {
-            if (string.IsNullOrWhiteSpace(recognised))
-            {
-                return false;
-            }
-
-            if (!string.IsNullOrEmpty(configured) && recognised.IndexOf(configured, StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                return true;
-            }
-
-            return false;
-        }
+        // Wake word normalization and matching removed
 
         private bool IsExitIntent(string recognised)
         {
@@ -648,8 +488,6 @@ namespace RobotVoice
                                 _ = piHub.SendFaceHappyAsync();
 			}
 
-            awaitingFirstCommand = false;
-            ClearWakeWordWindow();
             lastIntentTime = Time.realtimeSinceStartup;
             _ = publisher.PublishLaunchIntentAsync(gameName, rawText);
             // Coach reply handled by external dialog_service
@@ -657,8 +495,6 @@ namespace RobotVoice
 
         private void PublishExit(string rawText)
         {
-            awaitingFirstCommand = false;
-            ClearWakeWordWindow();
             lastIntentTime = Time.realtimeSinceStartup;
             if (!string.IsNullOrWhiteSpace(rawText) &&
                 !rawText.StartsWith("tester_panel", StringComparison.OrdinalIgnoreCase))
@@ -667,6 +503,42 @@ namespace RobotVoice
             }
             _ = publisher.PublishExitIntentAsync(rawText);
             // Coach reply handled by external dialog_service
+        }
+
+        // --- Dialogue style (LLM persona) ---
+        public void SetDialogStyleForTester(string styleIdOrName)
+        {
+            var style = string.IsNullOrWhiteSpace(styleIdOrName) ? string.Empty : styleIdOrName.Trim();
+            if (publisher != null && !string.IsNullOrEmpty(style))
+            {
+                var payload = "{\"style\":\"" + EscapeJson(style) + "\"}";
+                _ = publisher.PublishRawAsync("robot/dialog/style", payload);
+            }
+            ConversationLog.AddEntry(ConversationRole.System, $"Dialogue style = {style}", "tester_panel");
+        }
+
+        // --- TTS options (voice / model) ---
+        public void SetTtsOptionsForTester(string voiceCode, string modelPath)
+        {
+            var voice = string.IsNullOrWhiteSpace(voiceCode) ? string.Empty : voiceCode.Trim();
+            var model = string.IsNullOrWhiteSpace(modelPath) ? string.Empty : modelPath.Trim();
+            if (publisher != null)
+            {
+                var sb = new StringBuilder(128);
+                sb.Append('{');
+                if (!string.IsNullOrEmpty(voice))
+                {
+                    sb.Append("\"voice\":\"").Append(EscapeJson(voice)).Append('\"');
+                }
+                if (!string.IsNullOrEmpty(model))
+                {
+                    if (sb[sb.Length - 1] != '{') sb.Append(',');
+                    sb.Append("\"model\":\"").Append(EscapeJson(model)).Append('\"');
+                }
+                sb.Append('}');
+                _ = publisher.PublishRawAsync("robot/tts/options", sb.ToString());
+            }
+            ConversationLog.AddEntry(ConversationRole.System, $"TTS options updated (voice={voice}, model={model})", "tester_panel");
         }
 
         private void PresentWakeWordPrompt() { }

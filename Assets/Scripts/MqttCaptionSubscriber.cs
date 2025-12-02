@@ -23,8 +23,16 @@ namespace RobotVoice
 
         [Header("Routing")]
         [SerializeField] private VoiceGameLauncher launcher;
-        [SerializeField, Tooltip("Auto trigger wake flow on first incoming sentence to pass gating")]
-        private bool autoWakeOnFirstSentence = true;
+        [SerializeField, Tooltip("Auto trigger wake flow on first incoming sentence to pass gating (deprecated)")]
+        private bool autoWakeOnFirstSentence = false;
+
+        [Header("TTS Gating")]
+        [SerializeField, Tooltip("MQTT topic carrying robot speaking state to suppress echo")]
+        private string ttsStateTopic = "robot/tts/state";
+        [SerializeField, Tooltip("Milliseconds to continue suppressing after TTS stops")]
+        private int ttsSuppressTailMs = 1200;
+        [SerializeField, Tooltip("Milliseconds window to treat text similar to last TTS as echo")]
+        private int ttsEchoWindowMs = 3000;
 
         [Header("Diagnostics")]
         [SerializeField] private bool verboseLogging = true;
@@ -32,8 +40,11 @@ namespace RobotVoice
         private CancellationTokenSource loopCts;
         private Task loopTask;
         private SynchronizationContext mainThreadContext;
-        private bool wakePrimed;
+        // wake flow removed
         private string mqttClientId;
+        private volatile bool ttsSpeaking;
+        private DateTime ttsLastUpdateUtc = DateTime.MinValue;
+        private string ttsLastTextLower = "";
 
         private void Awake()
         {
@@ -104,6 +115,10 @@ namespace RobotVoice
 
                     // SUBSCRIBE
                     await SendSubscribeAsync(stream, topic, packetId: 1, token: token);
+                    if (!string.IsNullOrWhiteSpace(ttsStateTopic))
+                    {
+                        await SendSubscribeAsync(stream, ttsStateTopic, packetId: 2, token: token);
+                    }
                     if (verboseLogging) Debug.Log($"[CaptionSubscriber] subscribed '{topic}'");
 
                     // Loop
@@ -133,7 +148,14 @@ namespace RobotVoice
                             {
                                 string json = Encoding.UTF8.GetString(buffer, idx, payloadLen);
                                 if (verboseLogging) Debug.Log($"[CaptionSubscriber] msg on '{msgTopic}': {json}");
-                                HandleIncomingJson(json);
+                                if (!string.IsNullOrWhiteSpace(ttsStateTopic) && string.Equals(msgTopic, ttsStateTopic, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    HandleTtsState(json);
+                                }
+                                else if (string.Equals(msgTopic, topic, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    HandleIncomingJson(json);
+                                }
                             }
                         }
                     }
@@ -149,11 +171,13 @@ namespace RobotVoice
         private void HandleIncomingJson(string json)
         {
             if (string.IsNullOrWhiteSpace(json)) return;
+            if (IsTtsActive()) return;
             try
             {
                 var node = JSONNode.Parse(json);
                 var text = node?["text"]?.Value ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(text)) return;
+                if (IsLikelyTtsEcho(text)) return;
 
                 // Wrap into Vosk-compatible minimal payload for the existing handler.
                 var wrapped = $"{{\"text\":\"{Escape(text)}\"}}";
@@ -161,12 +185,6 @@ namespace RobotVoice
 
                 PostToMainThread(() =>
                 {
-                    if (autoWakeOnFirstSentence && !wakePrimed)
-                    {
-                        wakePrimed = true;
-                        try { launcher.TriggerWakeWordForTester(); } catch { }
-                        if (verboseLogging) Debug.Log("[CaptionSubscriber] auto wake triggered");
-                    }
                     try
                     {
                         if (verboseLogging) Debug.Log($"[CaptionSubscriber] forwarding transcript: {text}");
@@ -179,6 +197,59 @@ namespace RobotVoice
             {
                 // ignore parse errors
             }
+        }
+
+        private void HandleTtsState(string json)
+        {
+            try
+            {
+                var node = JSONNode.Parse(json);
+                bool speaking = false;
+                if (node.HasKey("speaking"))
+                {
+                    var s = node["speaking"];
+                    speaking = (s.IsBoolean && s.AsBool) || (s.IsNumber && s.AsInt != 0);
+                }
+                string txt = node.HasKey("text") ? (node["text"]?.Value ?? string.Empty) : string.Empty;
+                ttsSpeaking = speaking;
+                ttsLastUpdateUtc = DateTime.UtcNow;
+                if (!string.IsNullOrWhiteSpace(txt)) ttsLastTextLower = txt.Trim().ToLowerInvariant();
+            }
+            catch { }
+        }
+
+        private bool IsTtsActive()
+        {
+            if (ttsSpeaking) return true;
+            if (ttsLastUpdateUtc == DateTime.MinValue) return false;
+            return (DateTime.UtcNow - ttsLastUpdateUtc).TotalMilliseconds < Math.Max(0, ttsSuppressTailMs);
+        }
+
+        private bool IsLikelyTtsEcho(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(ttsLastTextLower)) return false;
+            if ((DateTime.UtcNow - ttsLastUpdateUtc).TotalMilliseconds > Math.Max(0, ttsEchoWindowMs)) return false;
+            string s = text.Trim().ToLowerInvariant();
+            if (s.Length < 4 || ttsLastTextLower.Length < 4) return false;
+            if (ttsLastTextLower.Contains(s)) return true;
+            if (s.Contains(ttsLastTextLower)) return true;
+            int common = LongestCommonSubsequenceLength(s, ttsLastTextLower);
+            return common * 10 >= s.Length * 6;
+        }
+
+        private static int LongestCommonSubsequenceLength(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return 0;
+            int n = a.Length, m = b.Length;
+            var dp = new int[n + 1, m + 1];
+            for (int i = 1; i <= n; i++)
+            {
+                for (int j = 1; j <= m; j++)
+                {
+                    dp[i, j] = (a[i - 1] == b[j - 1]) ? dp[i - 1, j - 1] + 1 : Math.Max(dp[i - 1, j], dp[i, j - 1]);
+                }
+            }
+            return dp[n, m];
         }
 
         private void PostToMainThread(Action action)

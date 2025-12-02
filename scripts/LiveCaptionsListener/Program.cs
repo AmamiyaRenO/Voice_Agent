@@ -22,6 +22,9 @@ class Program
     static int ttsSuppressTailMs = 1200;
     static string ttsLastTextLower = "";
     static int ttsEchoWindowMs = 3000;
+		static int publishedEchoWindowMs = 6000;
+		static int publishedHistorySize = 6;
+		static System.Collections.Generic.List<PublishedEntry> publishedHistory = new System.Collections.Generic.List<PublishedEntry>(8);
     static volatile bool listeningEnabled = true;
     static MqttConfig mqttConfig = MqttConfig.Disabled;
 
@@ -40,6 +43,10 @@ class Program
             ttsSuppressTailMs = tail;
         if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_TTS_ECHO_MS"), out var echoMs) && echoMs >= 0)
             ttsEchoWindowMs = echoMs;
+			if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_PUBLISHED_ECHO_MS"), out var pubEchoMs) && pubEchoMs >= 0)
+				publishedEchoWindowMs = pubEchoMs;
+			if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_PUBLISHED_HISTORY_SIZE"), out var histSize) && histSize > 0 && histSize <= 32)
+				publishedHistorySize = histSize;
 
         if (!string.IsNullOrWhiteSpace(mqttConfig.TtsStateTopic))
         {
@@ -487,10 +494,12 @@ class Program
         if (IsLikelyTtsEcho(sentence)) return;
         if (TryHandleListeningCommand(sentence)) return;
         if (!listeningEnabled) return;
+			if (IsLikelyEchoOfRecentlyPublished(sentence)) return;
 
         if (sentence == lastPublished && (DateTime.UtcNow - lastPublishedAt).TotalSeconds < 3) return;
         lastPublished = sentence;
         lastPublishedAt = DateTime.UtcNow;
+			AddToPublishedHistory(sentence);
 
         Console.WriteLine($"🗣 {sentence}");
 
@@ -585,6 +594,61 @@ class Program
             dp[i, j] = (a[i - 1] == b[j - 1]) ? dp[i - 1, j - 1] + 1 : Math.Max(dp[i - 1, j], dp[i, j - 1]);
         return dp[n, m];
     }
+
+		static bool IsLikelyEchoOfRecentlyPublished(string sentence)
+		{
+			if (string.IsNullOrWhiteSpace(sentence)) return false;
+			if (publishedHistory == null || publishedHistory.Count == 0) return false;
+			string s = sentence.Trim().ToLowerInvariant();
+			if (s.Length < 6) return false;
+			DateTime now = DateTime.UtcNow;
+
+			PrunePublishedHistory(now);
+			for (int i = 0; i < publishedHistory.Count; i++)
+			{
+				var item = publishedHistory[i];
+				if ((now - item.at).TotalMilliseconds > publishedEchoWindowMs) continue;
+				// 长度过短会降低判定质量
+				if (item.lower.Length < 6) continue;
+				if (item.lower.Contains(s)) return true;
+				if (s.Contains(item.lower)) return true;
+				int common = LongestCommonSubsequenceLength(s, item.lower);
+				if (common * 10 >= s.Length * 6) return true;
+			}
+			return false;
+		}
+
+		static void AddToPublishedHistory(string sentence)
+		{
+			string s = (sentence ?? string.Empty).Trim().ToLowerInvariant();
+			var entry = new PublishedEntry { lower = s, at = DateTime.UtcNow };
+			publishedHistory.Add(entry);
+			if (publishedHistory.Count > publishedHistorySize)
+			{
+				int removeCount = publishedHistory.Count - publishedHistorySize;
+				publishedHistory.RemoveRange(0, removeCount);
+			}
+			PrunePublishedHistory(DateTime.UtcNow);
+		}
+
+		static void PrunePublishedHistory(DateTime nowUtc)
+		{
+			if (publishedHistory.Count == 0) return;
+			int firstAlive = 0;
+			for (; firstAlive < publishedHistory.Count; firstAlive++)
+			{
+				if ((nowUtc - publishedHistory[firstAlive].at).TotalMilliseconds <= publishedEchoWindowMs)
+					break;
+			}
+			if (firstAlive > 0 && firstAlive <= publishedHistory.Count)
+				publishedHistory.RemoveRange(0, firstAlive);
+		}
+
+		struct PublishedEntry
+		{
+			public string lower;
+			public DateTime at;
+		}
 
     static bool TryHandleListeningCommand(string sentence)
     {

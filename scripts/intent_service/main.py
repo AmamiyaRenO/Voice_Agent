@@ -22,6 +22,7 @@ class Topics:
     intent: str = "robot/intent"
     dialog_query: str = "robot/dialog/query"
     tts_state: str = "robot/tts/state"
+    dialog_answer: str = "robot/dialog/answer"
 
 
 @dataclass
@@ -37,6 +38,7 @@ class Config:
     manifest_path: Optional[str] = None
     fuzzy_threshold: int = 80
     dedupe_window_sec: float = 1.2
+    tts_echo_window_sec: float = 8.0
 
     def __post_init__(self) -> None:
         if self.wake_words is None:
@@ -86,6 +88,7 @@ def load_config() -> Config:
             intent=os.environ.get("INTENT_TOPIC", topics.get("intent", cfg.topics.intent)),
             dialog_query=os.environ.get("DIALOG_QUERY_TOPIC", topics.get("dialog_query", cfg.topics.dialog_query)),
             tts_state=os.environ.get("TTS_STATE_TOPIC", topics.get("tts_state", cfg.topics.tts_state)),
+            dialog_answer=os.environ.get("DIALOG_ANSWER_TOPIC", topics.get("dialog_answer", cfg.topics.dialog_answer)),
         )
         cfg.require_wake_word = bool(rules.get("require_wake_word", cfg.require_wake_word))
         cfg.wake_words = rules.get("wake_words", cfg.wake_words)
@@ -99,6 +102,9 @@ def load_config() -> Config:
         rules_dedupe = rules.get("dedupe_window_sec")
         if rules_dedupe is not None:
             cfg.dedupe_window_sec = float(rules_dedupe)
+        rules_tts_echo = rules.get("tts_echo_window_sec")
+        if rules_tts_echo is not None:
+            cfg.tts_echo_window_sec = float(rules_tts_echo)
     else:
         # env-only mode
         cfg.host = os.environ.get("MQTT_HOST", cfg.host)
@@ -108,10 +114,12 @@ def load_config() -> Config:
             intent=os.environ.get("INTENT_TOPIC", cfg.topics.intent),
             dialog_query=os.environ.get("DIALOG_QUERY_TOPIC", cfg.topics.dialog_query),
             tts_state=os.environ.get("TTS_STATE_TOPIC", cfg.topics.tts_state),
+            dialog_answer=os.environ.get("DIALOG_ANSWER_TOPIC", cfg.topics.dialog_answer),
         )
         cfg.manifest_path = os.environ.get("INTENT_MANIFEST_PATH")
         cfg.fuzzy_threshold = int(os.environ.get("FUZZY_THRESHOLD", cfg.fuzzy_threshold))
         cfg.dedupe_window_sec = float(os.environ.get("DEDUPE_WINDOW_SEC", cfg.dedupe_window_sec))
+        cfg.tts_echo_window_sec = float(os.environ.get("TTS_ECHO_WINDOW_SEC", cfg.tts_echo_window_sec))
     return cfg
 
 
@@ -163,6 +171,7 @@ class IntentService:
         self._last_launch_ts: float = 0.0
         self._tts_playing: bool = False
         self._tts_last_ts: float = 0.0
+        self._tts_last_text_lower: str = ""
 
     def start(self) -> None:
         print(f"[intent] connecting to mqtt {self.cfg.host}:{self.cfg.port}")
@@ -207,6 +216,8 @@ class IntentService:
         print(f"[intent] subscribed {self.cfg.topics.voice_text}")
         client.subscribe(self.cfg.topics.tts_state)
         print(f"[intent] subscribed {self.cfg.topics.tts_state}")
+        client.subscribe(self.cfg.topics.dialog_answer)
+        print(f"[intent] subscribed {self.cfg.topics.dialog_answer}")
 
     def _on_message(self, client, userdata, msg):
         try:
@@ -221,6 +232,23 @@ class IntentService:
             speaking = bool(payload.get("speaking"))
             self._tts_playing = speaking
             self._tts_last_ts = time.time()
+            try:
+                txt = str(payload.get("text") or "").strip().lower()
+                if txt:
+                    self._tts_last_text_lower = txt
+            except Exception:
+                pass
+            return
+
+        # Pre-roll suppression using dialog answer (before TTS state arrives)
+        if topic == self.cfg.topics.dialog_answer:
+            try:
+                txt = str(payload.get("text") or "").strip().lower()
+                if txt:
+                    self._tts_last_text_lower = txt
+                self._tts_last_ts = time.time()
+            except Exception:
+            self._tts_last_ts = time.time()
             return
 
         if topic != self.cfg.topics.voice_text:
@@ -232,6 +260,23 @@ class IntentService:
 
         text = normalize(str(payload.get("text") or ""))
         if not text:
+            return
+
+        # Suppress likely echo of recent TTS within a window
+        now = time.time()
+        if (now - self._tts_last_ts) <= max(0.5, self.cfg.tts_echo_window_sec):
+            t = text.lower()
+            tt = self._tts_last_text_lower or ""
+            if tt:
+                try:
+                    if len(t) >= 6 and len(tt) >= 6:
+                        if tt in t or t in tt:
+                            return
+                        score = fuzz.partial_ratio(t, tt)
+                        if score >= 70:
+                            return
+                except Exception:
+                    if tt in t or t in tt:
             return
 
         corr_id = payload.get("corr_id") or new_corr_id()
