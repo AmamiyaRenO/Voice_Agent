@@ -193,6 +193,13 @@ If you prefer to start/stop the listener manually, untick **Auto Start** on the
 component and call `StartServer`/`StopServer` from the inspector’s context menu
 or another script.
 
+## Python SDK
+
+For non-Unity integrations, a lightweight Python SDK is available under
+`python_sdk/` with parity for the UserTestControlPanel controls (TTS, face,
+LED, servo/flower, dialog style, and game intents). See
+[`docs/PYTHON_SDK.md`](docs/PYTHON_SDK.md) for usage details.
+
 ## Working with Robot_opr
 
 When the Unity client detects the wake phrase ("hi rachel" by default) it plays
