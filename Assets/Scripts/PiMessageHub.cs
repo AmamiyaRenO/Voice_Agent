@@ -47,6 +47,47 @@ public class PiMessageHub : MonoBehaviour
 		await SendFaceAsync($"happy:{defaultFaceSeconds}");
 	}
 
+    /// <summary>
+    /// 兼容发送：若是 A/B/C/D_ 前缀，既发送单下划线也发送双下划线版本，避免命名不一致导致匹配失败。
+    /// 例如传入 A_Happy，会发送 A_Happy:3 和 A__Happy:3；传入 A__Happy 同理也会附带 A_Happy。
+    /// 其他非 A/B/C/D 前缀的预设，按原样发送一次。
+    /// </summary>
+    public async Task SendFacePresetCompatAsync(string presetName, float durationSeconds)
+    {
+        var trimmed = string.IsNullOrWhiteSpace(presetName) ? "idle" : presetName.Trim();
+        var seconds = durationSeconds > 0f
+            ? durationSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : defaultFaceSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        // 原始
+        await SendFaceAsync(trimmed + ":" + seconds);
+
+        if (trimmed.Length >= 2)
+        {
+            var c0 = char.ToUpperInvariant(trimmed[0]);
+            if (c0 == 'A' || c0 == 'B' || c0 == 'C' || c0 == 'D')
+            {
+                // 生成另一种下划线形式
+                string alt = null;
+                if (trimmed.Length >= 3 && trimmed[1] == '_' && trimmed[2] == '_')
+                {
+                    // 双下划线 -> 单下划线
+                    alt = trimmed.Remove(2, 1);
+                }
+                else if (trimmed[1] == '_' && (trimmed.Length < 3 || trimmed[2] != '_'))
+                {
+                    // 单下划线 -> 双下划线
+                    alt = trimmed.Insert(1, "_");
+                }
+
+                if (!string.IsNullOrEmpty(alt) && alt != trimmed)
+                {
+                    await SendFaceAsync(alt + ":" + seconds);
+                }
+            }
+        }
+    }
+
 	public async Task SendFaceIdleAsync()
 	{
 		await SendFaceAsync("idle");

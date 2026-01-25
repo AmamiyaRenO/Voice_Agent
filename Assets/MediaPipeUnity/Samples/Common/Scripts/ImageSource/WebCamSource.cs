@@ -136,7 +136,12 @@ namespace Mediapipe.Unity
 
       if (availableSources != null && availableSources.Length > 0)
       {
-        webCamDevice = availableSources[0];
+        // 优先选择 OBS 或 Virtual 类设备，找不到再回退第一个
+        var preferred = availableSources.FirstOrDefault(d =>
+          !string.IsNullOrEmpty(d.name) &&
+          (d.name.IndexOf("obs", StringComparison.OrdinalIgnoreCase) >= 0 ||
+           d.name.IndexOf("virtual", StringComparison.OrdinalIgnoreCase) >= 0));
+        webCamDevice = string.IsNullOrEmpty(preferred.name) ? availableSources[0] : preferred;
       }
     }
 

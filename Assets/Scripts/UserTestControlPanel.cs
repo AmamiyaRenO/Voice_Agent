@@ -306,7 +306,7 @@ namespace RobotVoice
             if (useExternalCameraTexture)
             {
                 if (Time.realtimeSinceStartup < _nextCaptureRealtime)
-                {
+            {
                     return;
                 }
                 var tex = GetExternalCameraTexture();
@@ -466,10 +466,15 @@ namespace RobotVoice
                     await WriteJsonAsync(context.Response, 200, "ok", $"face command {value}").ConfigureAwait(false);
                     return;
                 default:
-                    await WriteJsonAsync(context.Response, 400, "error", "unknown face mode").ConfigureAwait(false);
+                    // 未知模式统一按“预设名”处理，走与 happy 等相同路径
+                    // 发送所选预设名（避免多变体覆盖导致瞬时回退 neutral）
+                    await piHub.SendFacePresetAsync(mode, duration).ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, 200, "ok", $"face preset set to {mode}").ConfigureAwait(false);
                     return;
             }
         }
+
+        
 
         private async Task HandleFlowerAsync(HttpListenerContext context)
         {
@@ -1206,6 +1211,39 @@ namespace RobotVoice
             sb.AppendLine(@"<div class=""controls"">");
             sb.AppendLine(@"<label for=""faceSeconds"">Duration (s)</label>");
             sb.AppendLine(@"<input id=""faceSeconds"" type=""number"" min=""0"" step=""0.5"" value=""3"">");
+            sb.AppendLine(@"<label for=""faceSelect"">Preset</label>");
+            sb.AppendLine(@"<select id=""faceSelect"">");
+            sb.AppendLine(@"  <option value="""">-- Select --</option>");
+            sb.AppendLine(@"  <option value=""neutral"">neutral</option>");
+            sb.AppendLine(@"  <option value=""happy"">happy</option>");
+            sb.AppendLine(@"  <option value=""excited"">excited</option>");
+            sb.AppendLine(@"  <option value=""sad"">sad</option>");
+            sb.AppendLine(@"  <option value=""verysad"">verySad</option>");
+            sb.AppendLine(@"  <option value=""confused"">confused</option>");
+            sb.AppendLine(@"  <option value=""concerned"">concerned</option>");
+            sb.AppendLine(@"  <option value=""upset"">upset</option>");
+            sb.AppendLine(@"  <option disabled>──────────</option>");
+            sb.AppendLine(@"  <option value=""ANeutral"">ANeutral</option>");
+            sb.AppendLine(@"  <option value=""AHappy"">AHappy</option>");
+            sb.AppendLine(@"  <option value=""AConcerned"">AConcerned</option>");
+            sb.AppendLine(@"  <option value=""AConfused"">AConfused</option>");
+            sb.AppendLine(@"  <option value=""AUpset"">AUpset</option>");
+            sb.AppendLine(@"  <option value=""BNeutral"">BNeutral</option>");
+            sb.AppendLine(@"  <option value=""BHappy"">BHappy</option>");
+            sb.AppendLine(@"  <option value=""BConcerned"">BConcerned</option>");
+            sb.AppendLine(@"  <option value=""BConfused"">BConfused</option>");
+            sb.AppendLine(@"  <option value=""BUpset"">BUpset</option>");
+            sb.AppendLine(@"  <option value=""CNeutral"">CNeutral</option>");
+            sb.AppendLine(@"  <option value=""CHappy"">CHappy</option>");
+            sb.AppendLine(@"  <option value=""CConcerned"">CConcerned</option>");
+            sb.AppendLine(@"  <option value=""CConfused"">CConfused</option>");
+            sb.AppendLine(@"  <option value=""CUpset"">CUpset</option>");
+            sb.AppendLine(@"  <option value=""DNeutral"">DNeutral</option>");
+            sb.AppendLine(@"  <option value=""DHappy"">DHappy</option>");
+            sb.AppendLine(@"  <option value=""DConcerned"">DConcerned</option>");
+            sb.AppendLine(@"  <option value=""DConfused"">DConfused</option>");
+            sb.AppendLine(@"  <option value=""DUpset"">DUpset</option>");
+            sb.AppendLine(@"</select>");
             sb.AppendLine(@"<input id=""faceCustom"" type=""text"" placeholder=""custom preset name"">");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"<div class=""controls"">");
@@ -1214,6 +1252,7 @@ namespace RobotVoice
             sb.AppendLine(@"<button onclick=""facePreset('neutral')"">Neutral</button>");
             sb.AppendLine(@"<button onclick=""facePreset('sad')"">Sad</button>");
             sb.AppendLine(@"<button onclick=""facePreset('verySad')"">Very Sad</button>");
+            sb.AppendLine(@"<button onclick=""faceSelected()"">Send Selected</button>");
             sb.AppendLine(@"<button onclick=""customFace()"">Send Custom</button>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"</section>");
@@ -1375,6 +1414,15 @@ namespace RobotVoice
             sb.AppendLine(@"function customFace(){");
             sb.AppendLine(@"  const value = document.getElementById('faceCustom').value||'happy';");
             sb.AppendLine(@"  send('/api/face',{mode:'custom',value:value,seconds:parseSeconds()});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function faceSelected(){");
+            sb.AppendLine(@"  const sel = document.getElementById('faceSelect');");
+            sb.AppendLine(@"  if(!sel) return;");
+            sb.AppendLine(@"  let value = (sel.value||'').trim();");
+            sb.AppendLine(@"  if(!value){ statusEl.textContent='error: select a preset'; return; }");
+            sb.AppendLine(@"  // 兼容：若用户列表里仍有空格，发送前去掉空格");
+            sb.AppendLine(@"  value = value.replace(/\s+/g,'');");
+            sb.AppendLine(@"  send('/api/face',{mode:value,seconds:parseSeconds()});");
             sb.AppendLine(@"}");
             sb.AppendLine(@"function ledBreathe(){");
             sb.AppendLine(@"  const color = document.getElementById('ledColor').value;");

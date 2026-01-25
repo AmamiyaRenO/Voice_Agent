@@ -696,6 +696,10 @@ PrefabInstance:
       propertyPath: _baseRunner
       value: 
       objectReference: {fileID: 1254377050}
+    - target: {fileID: 8571076843876106078, guid: 140d1d2c406167c50819d89f86d9092e, type: 3}
+      propertyPath: m_IsActive
+      value: 1
+      objectReference: {fileID: 0}
     - target: {fileID: 8571076843980202029, guid: 140d1d2c406167c50819d89f86d9092e, type: 3}
       propertyPath: contents
       value: 
@@ -2042,13 +2046,17 @@ MonoBehaviour:
   httpPort: 8787
   autoStart: 1
   enableCameraPreview: 1
-  useExternalCameraTexture: 1
+  useExternalCameraTexture: 0
   externalCameraRawImage: {fileID: 2080068839}
   externalCameraRenderer: {fileID: 0}
   cameraWidth: 640
   cameraHeight: 480
   cameraJpegQuality: 30
   cameraFps: 90
+  availableDialogStyles:
+  - Supportive
+  - Minimalist
+  - Energetic
 --- !u!114 &1489373255
 MonoBehaviour:
   m_ObjectHideFlags: 0
