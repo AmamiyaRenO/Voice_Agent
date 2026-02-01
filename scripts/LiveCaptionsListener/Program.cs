@@ -39,20 +39,7 @@ class Program
         else
             Console.WriteLine("[MQTT] disabled (set LIVE_CAPTIONS_MQTT_TOPIC to enable).");
 
-        if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_TTS_SUPPRESS_MS"), out var tail) && tail >= 0)
-            ttsSuppressTailMs = tail;
-        if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_TTS_ECHO_MS"), out var echoMs) && echoMs >= 0)
-            ttsEchoWindowMs = echoMs;
-			if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_PUBLISHED_ECHO_MS"), out var pubEchoMs) && pubEchoMs >= 0)
-				publishedEchoWindowMs = pubEchoMs;
-			if (int.TryParse(Environment.GetEnvironmentVariable("LIVE_CAPTIONS_PUBLISHED_HISTORY_SIZE"), out var histSize) && histSize > 0 && histSize <= 32)
-				publishedHistorySize = histSize;
-
-        if (!string.IsNullOrWhiteSpace(mqttConfig.TtsStateTopic))
-        {
-            Console.WriteLine($"[MQTT] subscribing TTS state: {mqttConfig.TtsStateTopic}");
-            _ = Task.Run(() => MqttTtsSubscriber.RunAsync(mqttConfig, OnTtsStateMessageInternal));
-        }
+        // Echo suppression disabled (user-requested).
 
         Console.WriteLine("== Bootstrapping Live Captions ==");
         var (liveWindow, captionsBlock) = BootstrapLiveCaptions();
@@ -80,7 +67,7 @@ class Program
             {
                 var src = sender as AutomationElement ?? captionsBlock;
                 if (src == null) return;
-                if (IsTtsActive()) return;
+                // Echo suppression disabled
 
                 string raw = ReadCaptionText(src);
                 string text = CleanToLastLine(raw);
@@ -131,11 +118,7 @@ class Program
                     continue;
                 }
 
-                if (IsTtsActive())
-                {
-                    Thread.Sleep(50);
-                    continue;
-                }
+                // Echo suppression disabled
 
                 string current = CleanToLastLine(ReadCaptionText(captionsBlock));
 
@@ -490,16 +473,12 @@ class Program
     {
         sentence = CleanToLastLine(sentence);
         if (string.IsNullOrEmpty(sentence)) return;
-        if (IsTtsActive()) return;
-        if (IsLikelyTtsEcho(sentence)) return;
         if (TryHandleListeningCommand(sentence)) return;
         if (!listeningEnabled) return;
-			if (IsLikelyEchoOfRecentlyPublished(sentence)) return;
 
         if (sentence == lastPublished && (DateTime.UtcNow - lastPublishedAt).TotalSeconds < 3) return;
         lastPublished = sentence;
         lastPublishedAt = DateTime.UtcNow;
-			AddToPublishedHistory(sentence);
 
         Console.WriteLine($"🗣 {sentence}");
 
@@ -558,31 +537,19 @@ class Program
 
     static void OnTtsStateMessageInternal(bool speaking, string text)
     {
-        ttsSpeaking = speaking;
-        ttsLastUpdateUtc = DateTime.UtcNow;
-        if (speaking)
-            ttsLastTextLower = (text ?? string.Empty).Trim().ToLowerInvariant();
-        else if (!string.IsNullOrEmpty(text))
-            ttsLastTextLower = text.Trim().ToLowerInvariant();
+        // Echo suppression disabled (no-op).
     }
 
     static bool IsTtsActive()
     {
-        if (ttsSpeaking) return true;
-        if (ttsLastUpdateUtc == DateTime.MinValue) return false;
-        return (DateTime.UtcNow - ttsLastUpdateUtc).TotalMilliseconds < ttsSuppressTailMs;
+        // Echo suppression disabled.
+        return false;
     }
 
     static bool IsLikelyTtsEcho(string sentence)
     {
-        if (string.IsNullOrWhiteSpace(sentence) || string.IsNullOrWhiteSpace(ttsLastTextLower)) return false;
-        if ((DateTime.UtcNow - ttsLastUpdateUtc).TotalMilliseconds > ttsEchoWindowMs) return false;
-        string s = sentence.Trim().ToLowerInvariant();
-        if (s.Length < 6 || ttsLastTextLower.Length < 6) return false;
-        if (ttsLastTextLower.Contains(s)) return true;
-        if (s.Contains(ttsLastTextLower)) return true;
-        int common = LongestCommonSubsequenceLength(s, ttsLastTextLower);
-        return common * 10 >= s.Length * 6;
+        // Echo suppression disabled.
+        return false;
     }
 
     static int LongestCommonSubsequenceLength(string a, string b)
@@ -597,24 +564,7 @@ class Program
 
 		static bool IsLikelyEchoOfRecentlyPublished(string sentence)
 		{
-			if (string.IsNullOrWhiteSpace(sentence)) return false;
-			if (publishedHistory == null || publishedHistory.Count == 0) return false;
-			string s = sentence.Trim().ToLowerInvariant();
-			if (s.Length < 6) return false;
-			DateTime now = DateTime.UtcNow;
-
-			PrunePublishedHistory(now);
-			for (int i = 0; i < publishedHistory.Count; i++)
-			{
-				var item = publishedHistory[i];
-				if ((now - item.at).TotalMilliseconds > publishedEchoWindowMs) continue;
-				// 长度过短会降低判定质量
-				if (item.lower.Length < 6) continue;
-				if (item.lower.Contains(s)) return true;
-				if (s.Contains(item.lower)) return true;
-				int common = LongestCommonSubsequenceLength(s, item.lower);
-				if (common * 10 >= s.Length * 6) return true;
-			}
+			// Echo suppression disabled.
 			return false;
 		}
 

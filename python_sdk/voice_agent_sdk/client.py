@@ -26,12 +26,14 @@ class VoiceAgentClient:
         self,
         host: str = "127.0.0.1",
         tts_port: int = 5005,
+        panel_port: int = 8787,
         mqtt_config: Optional[MqttConfig] = None,
         mqtt_client: Optional[mqtt.Client] = None,
         http_session: Optional[requests.Session] = None,
     ) -> None:
         self._host = host
         self._tts_port = tts_port
+        self._panel_port = panel_port
         self._mqtt_config = mqtt_config or MqttConfig(host=host)
         self._mqtt_client = mqtt_client
         self._http = http_session or requests.Session()
@@ -51,8 +53,13 @@ class VoiceAgentClient:
         self.tts_options_topic = "robot/tts/options"
 
     @property
-    def tts_url(self) -> str:
+    def piper_url(self) -> str:
         return f"http://{self._host}:{self._tts_port}/speak"
+
+    @property
+    def panel_speak_url(self) -> str:
+        # Mirrors UserTestControlPanel: POST /api/speak
+        return f"http://{self._host}:{self._panel_port}/api/speak"
 
     def connect_mqtt(self, start_loop: bool = True) -> None:
         if self._mqtt_client is None:
@@ -80,25 +87,69 @@ class VoiceAgentClient:
         model: Optional[str] = None,
         speed: float = 1.0,
         volume: float = 1.0,
-        play: bool = True,
-        use_post: bool = False,
-        timeout: float = 10.0,
-    ) -> bytes:
+        timeout: float = 30.0,
+    ) -> Dict[str, Any]:
+        """
+        Trigger audible speech via Unity UserTestControlPanel (/api/speak).
+
+        This is intentionally aligned with the UserTestControlPanel's speak payload shape:
+        text / voice / model / speed / volume.
+
+        Notes:
+        - Unity must be running with UserTestControlPanel listening on panel_port.
+        - UserTestControlPanel must have VoiceGameLauncher assigned to actually play audio.
+        """
         if not text or not text.strip():
             raise ValueError("text is required")
+
         payload: Dict[str, Any] = {
             "text": text,
             "voice": voice,
             "model": model,
             "speed": speed,
             "volume": volume,
-            "play": play,
+        }
+        filtered = {k: v for k, v in payload.items() if v is not None}
+        r = self._http.post(self.panel_speak_url, json=filtered, timeout=timeout)
+        r.raise_for_status()
+        try:
+            return r.json()
+        except Exception:
+            return {"raw": r.text}
+
+    def synthesize_wav(
+        self,
+        text: str,
+        voice: Optional[str] = None,
+        model: Optional[str] = None,
+        config: Optional[str] = None,
+        speed: float = 1.0,
+        volume: float = 1.0,
+        use_post: bool = False,
+        timeout: float = 10.0,
+    ) -> bytes:
+        """
+        Call the Piper HTTP service directly and return WAV bytes.
+
+        Note: Piper HTTP in this repo accepts text/model/config. It does not play audio.
+        Parameters voice/speed/volume are included to mirror UserTestControlPanel;
+        they may be ignored by the server depending on implementation.
+        """
+        if not text or not text.strip():
+            raise ValueError("text is required")
+        payload: Dict[str, Any] = {
+            "text": text,
+            "voice": voice,
+            "model": model,
+            "config": config,
+            "speed": speed,
+            "volume": volume,
         }
         filtered = {k: v for k, v in payload.items() if v is not None}
         if use_post:
-            response = self._http.post(self.tts_url, json=filtered, timeout=timeout)
+            response = self._http.post(self.piper_url, json=filtered, timeout=timeout)
         else:
-            response = self._http.get(self.tts_url, params=filtered, timeout=timeout)
+            response = self._http.get(self.piper_url, params=filtered, timeout=timeout)
         response.raise_for_status()
         return response.content
 

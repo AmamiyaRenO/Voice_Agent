@@ -45,6 +45,11 @@ namespace RobotVoice
         [SerializeField] private string piperSpeakUrl = "http://127.0.0.1:5005/speak";
         [SerializeField, Tooltip("Prompt text sent to LLM when wake word is detected. Keep it short.")]
         private string wakeAcknowledgeUserText = "Wake word detected. Reply briefly that you are listening.";
+        [Header("Backend Voice Pipeline")]
+        [SerializeField, Tooltip("Auto-enable MQTT publishing on the MqttIntentPublisher so speech can reach intent_service/dialog_service.")]
+        private bool autoEnableMqttPublishing = true;
+        [SerializeField, Tooltip("Topic for raw recognised speech text. intent_service subscribes to this topic.")]
+        private string voiceTextTopic = "robot/voice/text";
         [Header("Wake/First Command")]
         [SerializeField, Min(0.5f)] private float firstCommandListenSeconds = 4.5f;
         private float lastIntentTime = -999f;
@@ -101,6 +106,16 @@ namespace RobotVoice
             ApplyFullscreenMode();
             runtimeConfig = BuildRuntimeConfig();
             ApplySpeechKeyPhrases();
+
+            // Ensure Unity can actually publish to MQTT; otherwise the backend never receives transcripts.
+            if (autoEnableMqttPublishing && publisher != null)
+            {
+                try
+                {
+                    publisher.SetPublishingEnabled(true);
+                }
+                catch { }
+            }
         }
 
         private void Start()
@@ -348,6 +363,7 @@ namespace RobotVoice
             if (!string.IsNullOrWhiteSpace(textForCoach))
             {
                 ConversationLog.AddEntry(ConversationRole.User, textForCoach);
+                PublishVoiceText(textForCoach, metadata);
             }
         }
 
@@ -392,6 +408,38 @@ namespace RobotVoice
         private bool IsOnCooldown()
         {
             return Time.realtimeSinceStartup - lastIntentTime < Mathf.Max(0.1f, intentCooldownSeconds);
+        }
+
+        private void PublishVoiceText(string text, RecognitionMetadata metadata)
+        {
+            if (publisher == null) return;
+            if (string.IsNullOrWhiteSpace(text)) return;
+
+            var payload = new StringBuilder(256)
+                .Append("{\"text\":\"").Append(EscapeJson(text.Trim())).Append('"')
+                .Append(",\"source\":\"unity_whisper\"")
+                .Append(",\"ts\":").Append(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+
+            if (!float.IsNaN(metadata.AvgLogProb))
+            {
+                payload.Append(",\"avg_logprob\":").Append(metadata.AvgLogProb.ToString(CultureInfo.InvariantCulture));
+            }
+            if (metadata.Rms > 0f)
+            {
+                payload.Append(",\"rms\":").Append(metadata.Rms.ToString(CultureInfo.InvariantCulture));
+            }
+            if (metadata.MaxAmplitude > 0f)
+            {
+                payload.Append(",\"max_amplitude\":").Append(metadata.MaxAmplitude.ToString(CultureInfo.InvariantCulture));
+            }
+            payload.Append('}');
+
+            if (logDebugMessages && publisher.DisablePublishing)
+            {
+                Debug.LogWarning("[RobotVoice] MQTT publishing is disabled; enable MqttIntentPublisher or set autoEnableMqttPublishing=true.");
+            }
+
+            _ = publisher.PublishRawAsync(voiceTextTopic, payload.ToString());
         }
 
         // Wake-only flow removed

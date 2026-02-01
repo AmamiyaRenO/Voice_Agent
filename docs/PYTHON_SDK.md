@@ -6,7 +6,8 @@ MQTT topics already used by the Unity client.
 
 ## What it covers
 
-- **TTS**: `GET/POST /speak` for speech playback.
+- **TTS (audible)**: `POST /api/speak` via Unity `UserTestControlPanel` (requires Unity running).
+- **TTS (synthesis only)**: `GET/POST /speak` (Piper HTTP returns WAV bytes; no playback).
 - **Face presets**: publish to `robot/pi/face/cmd`.
 - **Servo / flower control**: publish to `robot/pi/servo/cmd`.
 - **LED control**: publish to `robot/pi/led/cmd`.
@@ -29,8 +30,12 @@ from voice_agent_sdk import VoiceAgentClient
 
 client = VoiceAgentClient(host="10.0.0.1")
 
-# TTS
-client.speak("Hello Rachel", voice="en_US", model="piper-en", speed=1.0, volume=1.0)
+# Speak (audible) via Unity UserTestControlPanel (/api/speak)
+# model should be an absolute .onnx path, matching the User Panel dropdown.
+client.speak("hi", voice="en_US", model=r"D:\piper\models\en_US-amy-medium.onnx", speed=1.0, volume=1.0)
+
+# Or synthesize only (returns WAV bytes) by calling Piper HTTP directly (/speak)
+wav_bytes = client.synthesize_wav("Hello Rachel", model=r"D:\piper\models\en_US-amy-medium.onnx")
 
 # Face presets
 client.face_happy(duration=3)
@@ -46,7 +51,7 @@ client.servo_close_slow()
 
 # Dialog style + TTS options
 client.set_dialog_style("Supportive")
-client.set_tts_options(voice="en_US", model="piper-en")
+client.set_tts_options(voice="en_US", model=r"D:\piper\models\en_US-amy-medium.onnx")
 
 # Game intents
 client.launch_game("cornhole")

@@ -314,16 +314,73 @@ namespace Mediapipe.Unity
       throw new InvalidOperationException("Cannot initialize WebCamTexture because WebCamDevice is not selected");
     }
 
+    private void LogWebCamDiagnostics(string prefix)
+    {
+      try
+      {
+        var selected = sourceName ?? "(null)";
+        var req = _shouldRequestExplicitWidthHeight
+          ? (_shouldRequestExplicitFrameRate
+            ? $"{resolution.width}x{resolution.height}@{resolution.frameRate}"
+            : $"{resolution.width}x{resolution.height}")
+          : "(device default)";
+        var candidates = (availableSources == null || availableSources.Length == 0)
+          ? "(none)"
+          : string.Join(", ", availableSources.Select(d => d.name));
+        Debug.Log($"{prefix} device='{selected}', request={req}, candidates=[{candidates}]");
+      }
+      catch
+      {
+        // ignore diagnostics failures
+      }
+    }
+
+    private void RecreateWebCamTextureWithDefaults()
+    {
+      if (webCamDevice is not WebCamDevice valueOfWebCamDevice)
+      {
+        throw new InvalidOperationException("Cannot recreate WebCamTexture because WebCamDevice is not selected");
+      }
+      // Drop explicit width/height/fps constraints to improve compatibility with drivers.
+      Stop();
+      webCamTexture = new WebCamTexture(valueOfWebCamDevice.name);
+    }
+
     private IEnumerator WaitForWebCamTexture()
     {
       const int timeoutFrame = 2000;
       var count = 0;
       Debug.Log("Waiting for WebCamTexture to start");
+      LogWebCamDiagnostics("[WebCamSource] Waiting for WebCamTexture to start:");
       yield return new WaitUntil(() => count++ > timeoutFrame || webCamTexture.width > 16);
 
       if (webCamTexture.width <= 16)
       {
-        throw new TimeoutException("Failed to start WebCam");
+        // First fallback: recreate the texture without explicit constraints (some drivers fail when width/height/fps are requested).
+        Debug.LogWarning("[WebCamSource] WebCamTexture start timed out; retrying with device defaults...");
+        var fallbackStarted = false;
+        try
+        {
+          RecreateWebCamTextureWithDefaults();
+          webCamTexture.Play();
+          fallbackStarted = true;
+        }
+        catch (Exception exc)
+        {
+          Debug.LogWarning($"[WebCamSource] Fallback recreate failed: {exc.GetType().Name}: {exc.Message}");
+        }
+
+        if (fallbackStarted)
+        {
+          count = 0;
+          yield return new WaitUntil(() => count++ > timeoutFrame || webCamTexture.width > 16);
+        }
+
+        if (webCamTexture == null || webCamTexture.width <= 16)
+        {
+          LogWebCamDiagnostics("[WebCamSource] Failed to start WebCamTexture:");
+          throw new TimeoutException("Failed to start WebCam (no frames received; camera may be busy, permission-blocked, or driver rejected the requested format)");
+        }
       }
     }
 

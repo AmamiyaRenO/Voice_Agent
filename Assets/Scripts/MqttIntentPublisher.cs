@@ -49,6 +49,19 @@ namespace RobotVoice
         public string Host => host;
         public int Port => port;
 
+        /// <summary>
+        /// Runtime override for enabling/disabling MQTT publishes.
+        /// Useful when the scene accidentally has Disable Publishing enabled and the voice pipeline becomes silent.
+        /// </summary>
+        public void SetPublishingEnabled(bool enabled)
+        {
+            disablePublishing = !enabled;
+            if (!disablePublishing && autoConnectOnStart)
+            {
+                _ = EnsureConnectedAsync();
+            }
+        }
+
         private void Awake()
         {
             mainThreadContext = SynchronizationContext.Current;

@@ -55,6 +55,10 @@ public class VoskSpeechToText : MonoBehaviour
 	//Called after a transcription is ready.
 	public Action<string> OnTranscriptionResult;
 
+        [Header("Diagnostics")]
+        [Tooltip("If true, log record stop events (can be noisy because segmentation stops recording frequently).")]
+        public bool VerboseStopLogging = false;
+
 	private bool _isInitializing;
 
 	private bool _didInit;
@@ -258,7 +262,10 @@ public class VoskSpeechToText : MonoBehaviour
         private void VoiceProcessorOnOnRecordingStop()
         {
                 StartCoroutine(HandlePythonRecordingStop(_running));
-                Debug.Log("Stopped");
+                if (VerboseStopLogging)
+                {
+                        Debug.Log("[VoskSpeechToText] Recording stopped");
+                }
         }
 
         public void StartWakeWordWindow(float durationSeconds)

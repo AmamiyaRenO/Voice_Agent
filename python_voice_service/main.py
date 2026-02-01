@@ -48,6 +48,45 @@ DEFAULT_SYSTEM_PROMPT = (
 
 DEFAULT_HTTP_TIMEOUT = httpx.Timeout(30.0)
 
+def _resolve_whisper_model_path(raw: str) -> str:
+    """Resolve WHISPER_MODEL_PATH for faster-whisper.
+
+    Notes:
+    - This service uses `faster-whisper` (CTranslate2) models.
+    - HuggingFace repos like `openai/whisper-large-v3-turbo` are Transformers checkpoints
+      and are NOT directly loadable by faster-whisper.
+    - For "large-v3-turbo", use a faster-whisper / CTranslate2 converted repo instead.
+      A common choice is `Systran/faster-whisper-large-v3-turbo`.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return "large-v3"
+
+    lower = value.lower()
+    # User pasted HF URL
+    if lower.startswith("https://huggingface.co/"):
+        value = value[len("https://huggingface.co/") :].strip().strip("/")
+        lower = value.lower()
+
+    # Map the Transformers repo to a faster-whisper compatible repo.
+    if lower == "openai/whisper-large-v3-turbo":
+        try:
+            logger.warning(
+                "WHISPER_MODEL_PATH=%r is a Transformers checkpoint; "
+                "mapping to faster-whisper repo %r",
+                raw,
+                "Systran/faster-whisper-large-v3-turbo",
+            )
+        except Exception:
+            pass
+        return "Systran/faster-whisper-large-v3-turbo"
+
+    # Allow shorthand for turbo if user provides it.
+    if lower in {"large-v3-turbo", "whisper-large-v3-turbo"}:
+        return "Systran/faster-whisper-large-v3-turbo"
+
+    return value
+
 
 class _AsyncHttpClient:
     """Singleton-style manager for a shared httpx.AsyncClient instance.
@@ -277,7 +316,7 @@ WHISPER_LENGTH_PENALTY = _non_negative_float(
 
 @lru_cache(maxsize=1)
 def _load_model() -> WhisperModel:
-    model_path = _environment("WHISPER_MODEL_PATH", "large-v3")
+    model_path = _resolve_whisper_model_path(_environment("WHISPER_MODEL_PATH", "large-v3"))
     compute_type = _environment("WHISPER_COMPUTE_TYPE", "int8_float16")
     device_pref = _environment("WHISPER_DEVICE", "auto").lower()
 
@@ -285,14 +324,30 @@ def _load_model() -> WhisperModel:
         # If compute_type is tuned for GPU (e.g., float16), pick a CPU-friendly default
         return "int8" if "float16" in ct.lower() else ct
 
+    def _raise_load_error(exc: Exception) -> "WhisperModel":
+        msg = (
+            "Failed to load Faster-Whisper model.\n"
+            f"- WHISPER_MODEL_PATH={model_path}\n"
+            "If your machine is offline / outgoing traffic is disabled, you must pre-download the model.\n"
+            "Run:\n"
+            "  python scripts\\download_whisper_model.py --repo Systran/faster-distil-whisper-large-v3\n"
+            "Then set:\n"
+            "  $env:WHISPER_MODEL_PATH=\"<downloaded_folder>\"\n"
+            "and restart the service."
+        )
+        raise RuntimeError(msg) from exc
+
     # Explicit CPU request
     if device_pref == "cpu":
-        model = WhisperModel(
-            model_path,
-            device="cpu",
-            compute_type=_cpu_compute(compute_type),
-            cpu_threads=WHISPER_CPU_THREADS,
-        )
+        try:
+            model = WhisperModel(
+                model_path,
+                device="cpu",
+                compute_type=_cpu_compute(compute_type),
+                cpu_threads=WHISPER_CPU_THREADS,
+            )
+        except Exception as exc:
+            _raise_load_error(exc)
         try:
             print(
                 "[VoiceService] Loaded Faster-Whisper "
@@ -312,12 +367,15 @@ def _load_model() -> WhisperModel:
             pass
         return model
     except Exception as exc:
-        model = WhisperModel(
-            model_path,
-            device="cpu",
-            compute_type=_cpu_compute(compute_type),
-            cpu_threads=WHISPER_CPU_THREADS,
-        )
+        try:
+            model = WhisperModel(
+                model_path,
+                device="cpu",
+                compute_type=_cpu_compute(compute_type),
+                cpu_threads=WHISPER_CPU_THREADS,
+            )
+        except Exception as exc2:
+            _raise_load_error(exc2)
         try:
             print(
                 "[VoiceService] Loaded Faster-Whisper "
@@ -636,6 +694,45 @@ def _audio_energy_metrics(audio: np.ndarray) -> tuple[float, float]:
 LOW_CONFIDENCE_THRESHOLD = -0.6
 
 
+def _energy_speech_fraction(audio: np.ndarray, sample_rate: int) -> float:
+    """Estimate how much of the clip looks like speech based on short-time energy.
+
+    Returns a value in [0,1]. This is intentionally simple and fast; it's only used
+    to decide whether we should retry transcription when VAD returns empty output.
+    """
+    if audio.size == 0:
+        return 0.0
+
+    frame_ms = 30
+    hop_ms = 15
+    frame_length = max(1, int(sample_rate * frame_ms / 1000))
+    hop_length = max(1, int(sample_rate * hop_ms / 1000))
+
+    if audio.size <= frame_length * 2:
+        return 0.0
+
+    starts = list(range(0, audio.size - frame_length + 1, hop_length))
+    if not starts:
+        return 0.0
+
+    energies = np.empty(len(starts), dtype=np.float32)
+    for idx, start in enumerate(starts):
+        frame = audio[start : start + frame_length]
+        energies[idx] = float(np.sqrt(np.mean(np.square(frame)))) if frame.size else 0.0
+
+    high_energy = float(np.percentile(energies, 90)) if energies.size else 0.0
+    # If the whole clip is extremely quiet, treat it as non-speech.
+    if high_energy <= 0.0008:
+        return 0.0
+
+    threshold = max(0.0008, high_energy * 0.35)
+    speech_mask = energies >= threshold
+    if not speech_mask.any():
+        return 0.0
+
+    return float(np.mean(speech_mask))
+
+
 def _extract_recent_speech_window(audio: np.ndarray, sample_rate: int) -> np.ndarray:
     if audio.size == 0:
         return audio
@@ -831,6 +928,8 @@ async def transcribe(
     sample_rate: int = Query(DEFAULT_SAMPLE_RATE, ge=8000, le=48000),
     language: Optional[str] = Query("en", min_length=1, max_length=8),
     beam_size: int = Query(5, ge=1, le=10),
+    vad: bool = Query(True, description="Whether to enable faster-whisper VAD filter (silence trimming)."),
+    vad_fallback_retry: bool = Query(True, description="If VAD removes everything and text is empty, retry once with VAD disabled."),
 ) -> JSONResponse:
     start_time = time.perf_counter()
     payload = await request.body()
@@ -848,6 +947,7 @@ async def transcribe(
     audio = _extract_recent_speech_window(audio, DEFAULT_SAMPLE_RATE)
 
     rms, max_amplitude = _audio_energy_metrics(audio)
+    speech_fraction = _energy_speech_fraction(audio, DEFAULT_SAMPLE_RATE)
 
     model = _load_model()
 
@@ -863,6 +963,7 @@ async def transcribe(
         primary_beam_size,
         normalized_language,
         primary_temperatures,
+        {"vad_filter": bool(vad)},
     )
 
     avg_logprob_values = _collect_avg_logprobs(segments)
@@ -902,6 +1003,57 @@ async def transcribe(
     if not full_text and words:
         full_text = " ".join(word["word"] for word in words).strip()
 
+    # If VAD was enabled and we got nothing back, retry once without VAD.
+    # This helps when the upstream audio is valid but the built-in VAD is too aggressive.
+    if (
+        vad
+        and vad_fallback_retry
+        and not full_text
+        and not words
+        # Don't retry just because there's "some" volume; require the clip to look speech-like.
+        and speech_fraction >= 0.25
+        and max_amplitude >= 0.03
+        and rms >= 0.006
+    ):
+        segments2, info2 = await asyncio.to_thread(
+            _run_transcription,
+            model,
+            audio,
+            primary_beam_size,
+            normalized_language,
+            primary_temperatures,
+            {"vad_filter": False},
+        )
+
+        words2: List[dict] = []
+        combined_text_parts2: List[str] = []
+        for segment in segments2:
+            text2 = segment.text.strip()
+            if text2:
+                combined_text_parts2.append(text2)
+            for word in segment.words or []:
+                word_text2 = word.word.strip()
+                if not word_text2:
+                    continue
+                words2.append(
+                    {
+                        "word": word_text2,
+                        "start": max(0.0, float(word.start) if word.start is not None else 0.0),
+                        "end": max(0.0, float(word.end) if word.end is not None else 0.0),
+                        "confidence": round(float(word.probability), 4) if word.probability is not None else None,
+                    }
+                )
+        full_text2 = " ".join(part for part in combined_text_parts2 if part).strip()
+        if not full_text2 and words2:
+            full_text2 = " ".join(word["word"] for word in words2).strip()
+
+        if full_text2 or words2:
+            segments = segments2
+            info = info2
+            words = words2
+            combined_text_parts = combined_text_parts2
+            full_text = full_text2
+
     if _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
         collapsed_text, collapsed_words = _collapse_repetitive_output(full_text or full_raw_text, words)
         if collapsed_text and collapsed_text != full_text:
@@ -937,13 +1089,13 @@ async def transcribe(
         "translation": False,
         "rms": rms,
         "max_amplitude": max_amplitude,
+        "speech_fraction": speech_fraction,
     }
 
     if avg_logprob is not None:
-        if avg_logprob >= LOW_CONFIDENCE_THRESHOLD or not _looks_like_meaningful_text(full_text):
-            response["avg_logprob"] = float(round(avg_logprob, 4))
-        else:
-            response["avg_logprob_raw"] = float(round(avg_logprob, 4))
+        # Always include avg_logprob so the Unity-side noise filter can work reliably.
+        # (Unity historically only reads "avg_logprob", not "avg_logprob_raw".)
+        response["avg_logprob"] = float(round(avg_logprob, 4))
 
     processing_seconds = round(time.perf_counter() - start_time, 4)
     response["processing_seconds"] = processing_seconds
