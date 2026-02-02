@@ -416,6 +416,18 @@ public class WhisperSpeechToText : MonoBehaviour
                 builder.Append("sample_rate=");
                 builder.Append(sampleRate);
 
+                // Stable session id so the Python service can apply streaming overlap/context.
+                try
+                {
+                        var sid = SystemInfo.deviceUniqueIdentifier;
+                        if (!string.IsNullOrWhiteSpace(sid))
+                        {
+                                builder.Append("&session_id=");
+                                builder.Append(UnityWebRequest.EscapeURL(sid));
+                        }
+                }
+                catch { }
+
                 if (!string.IsNullOrWhiteSpace(PythonServiceLanguage))
                 {
                         builder.Append("&language=");

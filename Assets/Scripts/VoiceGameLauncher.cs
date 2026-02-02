@@ -73,6 +73,15 @@ namespace RobotVoice
         private float ttsEchoTokenOverlapThreshold = 0.6f;
         [SerializeField, Tooltip("Minimum characters to apply echo rejection to (avoid dropping short interjections).")]
         private int ttsEchoMinChars = 10;
+        [SerializeField, Tooltip("Hard drop: if candidate strongly matches last TTS even after playback ended (handles late ASR buffering).")]
+        [Range(0.5f, 1f)]
+        private float ttsEchoHardMatchThreshold = 0.85f;
+        [SerializeField, Tooltip("Hard drop only when max amplitude is below this (avoid blocking real user barge-in).")]
+        [Range(0f, 1f)]
+        private float ttsEchoHardMaxAmplitude = 0.25f;
+        [SerializeField, Tooltip("How long after TTS started we still allow hard-drop (seconds).")]
+        [Range(1f, 120f)]
+        private float ttsEchoHardMaxAgeSeconds = 45f;
 
         private string lastTtsText = string.Empty;
         private string lastTtsTextNorm = string.Empty;
@@ -998,7 +1007,6 @@ namespace RobotVoice
         {
             if (string.IsNullOrWhiteSpace(candidateText)) return false;
             if (string.IsNullOrWhiteSpace(lastTtsTextNorm)) return false;
-            if (!IsTtsPlayingNow()) return false;
 
             var cand = candidateText.Trim();
             if (cand.Length < Mathf.Max(0, ttsEchoMinChars)) return false;
@@ -1009,16 +1017,45 @@ namespace RobotVoice
             // Fast containment check handles most cases (ASR transcribes substrings of TTS).
             if (lastTtsTextNorm.Contains(candNorm) || candNorm.Contains(lastTtsTextNorm))
             {
-                return true;
+                // If we're currently in the TTS window, always drop.
+                if (IsTtsPlayingNow()) return true;
+                // Late ASR buffering: allow hard-drop for a while after TTS started, but only for low-amplitude segments.
+                var age = Time.realtimeSinceStartup - lastTtsStartTime;
+                if (age <= Mathf.Max(0f, ttsEchoHardMaxAgeSeconds) &&
+                    metadata.MaxAmplitude > 0f &&
+                    metadata.MaxAmplitude <= Mathf.Clamp01(ttsEchoHardMaxAmplitude))
+                {
+                    return true;
+                }
+                // Otherwise don't treat as echo (user might be repeating content later).
+                return false;
             }
 
             // Token overlap (Jaccard) as a fallback.
             // IMPORTANT: For long TTS answers, comparing against the full answer can under-score short ASR chunks.
             // Use the best overlap against sliding windows of the TTS tokens.
             var overlap = BestTokenOverlapAgainstWindows(candNorm, lastTtsTextNorm);
-            if (overlap >= Mathf.Clamp01(ttsEchoTokenOverlapThreshold))
+            if (IsTtsPlayingNow())
             {
-                return true;
+                if (overlap >= Mathf.Clamp01(ttsEchoTokenOverlapThreshold))
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                // Late ASR buffering can surface TTS chunks well after playback ends (segmentation + request latency).
+                // For very strong matches, drop anyway as long as:
+                // - we're still within a reasonable time since TTS started, and
+                // - the captured segment is relatively quiet (echo tends to be quieter than real user speech).
+                var age = Time.realtimeSinceStartup - lastTtsStartTime;
+                if (age <= Mathf.Max(0f, ttsEchoHardMaxAgeSeconds) &&
+                    overlap >= Mathf.Clamp01(ttsEchoHardMatchThreshold) &&
+                    metadata.MaxAmplitude > 0f &&
+                    metadata.MaxAmplitude <= Mathf.Clamp01(ttsEchoHardMaxAmplitude))
+                {
+                    return true;
+                }
             }
 
             return false;

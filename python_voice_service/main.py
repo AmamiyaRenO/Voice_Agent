@@ -278,19 +278,19 @@ WHISPER_LENGTH_PENALTY = _non_negative_float(
 )
 WHISPER_CPU_THREADS = max(1, _environment_int("WHISPER_CPU_THREADS", os.cpu_count() or 4))
 WHISPER_MAX_AUDIO_SECONDS = _non_negative_float(
-    _environment_float("WHISPER_MAX_AUDIO_SECONDS", 5.0)
+    _environment_float("WHISPER_MAX_AUDIO_SECONDS", 12.0)
 )
 WHISPER_VAD_SILENCE_MS = _positive_or_zero(
-    _environment_int("WHISPER_VAD_SILENCE_MS", 250)
+    _environment_int("WHISPER_VAD_SILENCE_MS", 300)
 )
 WHISPER_VAD_MIN_SPEECH_MS = _positive_or_zero(
     _environment_int("WHISPER_VAD_MIN_SPEECH_MS", 150)
 )
 WHISPER_RECENT_WINDOW_PAD_MS = _positive_or_zero(
-    _environment_int("WHISPER_RECENT_WINDOW_PAD_MS", 100)
+    _environment_int("WHISPER_RECENT_WINDOW_PAD_MS", 200)
 )
 WHISPER_RECENT_WINDOW_MAX_GAP_MS = _positive_or_zero(
-    _environment_int("WHISPER_RECENT_WINDOW_MAX_GAP_MS", 600)
+    _environment_int("WHISPER_RECENT_WINDOW_MAX_GAP_MS", 1200)
 )
 WHISPER_CONDITION_ON_PREVIOUS_TEXT = _environment_bool(
     "WHISPER_CONDITION_ON_PREVIOUS_TEXT", False
@@ -312,6 +312,80 @@ WHISPER_REPETITION_PENALTY = max(1.0, _environment_float("WHISPER_REPETITION_PEN
 WHISPER_LENGTH_PENALTY = _non_negative_float(
     _environment_float("WHISPER_LENGTH_PENALTY", 1.0)
 )
+
+# Optional hotwords/bias terms (comma or whitespace separated). Applied on top of initial_prompt.
+WHISPER_HOTWORDS = os.getenv("WHISPER_HOTWORDS", "").strip()
+
+# Retry thresholds (layered decoding)
+WHISPER_LOW_CONFIDENCE_THRESHOLD = _environment_float("WHISPER_LOW_CONFIDENCE_THRESHOLD", -0.6)
+WHISPER_RETRY_BEAM_BONUS = max(0, _environment_int("WHISPER_RETRY_BEAM_BONUS", 3))
+WHISPER_RETRY_MAX_BEAM = max(1, _environment_int("WHISPER_RETRY_MAX_BEAM", 10))
+WHISPER_RETRY_TEMPERATURES = tuple(
+    float(x)
+    for x in (
+        os.getenv("WHISPER_RETRY_TEMPERATURES", "0.0,0.2,0.4").split(",")
+        if os.getenv("WHISPER_RETRY_TEMPERATURES") is not None
+        else ["0.0", "0.2", "0.4"]
+    )
+    if str(x).strip() != ""
+)
+
+# Streaming/session glue: allow overlap and carry over some context across adjacent chunks.
+WHISPER_STREAM_OVERLAP_SECONDS = _non_negative_float(
+    _environment_float("WHISPER_STREAM_OVERLAP_SECONDS", 0.8)
+)
+WHISPER_STREAM_SESSION_TTL_SECONDS = _non_negative_float(
+    _environment_float("WHISPER_STREAM_SESSION_TTL_SECONDS", 12.0)
+)
+WHISPER_STREAM_MAX_SESSIONS = max(4, _environment_int("WHISPER_STREAM_MAX_SESSIONS", 32))
+WHISPER_STREAM_CONTEXT_CHARS = max(0, _environment_int("WHISPER_STREAM_CONTEXT_CHARS", 220))
+
+
+def _parse_hotwords(raw: str) -> Optional[List[str]]:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    # allow commas or whitespace as separators
+    parts = re.split(r"[,\s]+", value)
+    hotwords = [p.strip() for p in parts if p and p.strip()]
+    return hotwords or None
+
+
+class _SessionState:
+    __slots__ = ("last_ts", "last_text", "audio_tail")
+
+    def __init__(self) -> None:
+        self.last_ts: float = 0.0
+        self.last_text: str = ""
+        self.audio_tail: Optional[np.ndarray] = None
+
+
+_SESSIONS: Dict[str, _SessionState] = {}
+
+
+def _get_session(session_id: Optional[str]) -> _SessionState:
+    key = (session_id or "default").strip()[:64] or "default"
+    state = _SESSIONS.get(key)
+    if state is None:
+        state = _SessionState()
+        _SESSIONS[key] = state
+    return state
+
+
+def _prune_sessions(now: float) -> None:
+    if not _SESSIONS:
+        return
+    ttl = WHISPER_STREAM_SESSION_TTL_SECONDS
+    if ttl <= 0:
+        return
+    expired = [k for k, v in _SESSIONS.items() if now - (v.last_ts or 0.0) > ttl]
+    for k in expired:
+        _SESSIONS.pop(k, None)
+    # cap size (simple LRU by last_ts)
+    if len(_SESSIONS) > WHISPER_STREAM_MAX_SESSIONS:
+        ordered = sorted(_SESSIONS.items(), key=lambda kv: kv[1].last_ts)
+        for k, _ in ordered[: max(0, len(_SESSIONS) - WHISPER_STREAM_MAX_SESSIONS)]:
+            _SESSIONS.pop(k, None)
 
 
 @lru_cache(maxsize=1)
@@ -691,7 +765,7 @@ def _audio_energy_metrics(audio: np.ndarray) -> tuple[float, float]:
     return rms, max_amplitude
 
 
-LOW_CONFIDENCE_THRESHOLD = -0.6
+LOW_CONFIDENCE_THRESHOLD = float(WHISPER_LOW_CONFIDENCE_THRESHOLD)
 
 
 def _energy_speech_fraction(audio: np.ndarray, sample_rate: int) -> float:
@@ -879,6 +953,16 @@ def _resample_audio(samples: np.ndarray, source_rate: int, target_rate: int) -> 
     return resampled.astype(np.float32, copy=False)
 
 
+def _remove_dc(audio: np.ndarray) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+    # DC offset hurts VAD and decoding a bit; safe to remove.
+    mean = float(np.mean(audio, dtype=np.float64))
+    if abs(mean) < 1e-6:
+        return audio
+    return (audio - mean).astype(np.float32, copy=False)
+
+
 def _build_vosk_result(words: Iterable[dict]) -> List[dict]:
     # Vosk uses "result" for word-level entries. Unity expects "word" and timing fields.
     return list(words)
@@ -893,13 +977,16 @@ def _run_transcription(
     overrides: Optional[Dict[str, object]] = None,
 ):
     best_of = 1 if all(temp <= 0.0 for temp in temperature_schedule) else max(beam_size, 1)
-    transcription_kwargs = {
+    transcription_kwargs: Dict[str, object] = {
         "beam_size": beam_size,
         "language": language,
         "task": "transcribe",
         "word_timestamps": True,
         "vad_filter": True,
-        "vad_parameters": {"min_silence_duration_ms": 300, "speech_pad_ms": 200},
+        "vad_parameters": {
+            "min_silence_duration_ms": int(max(0, WHISPER_VAD_SILENCE_MS)),
+            "speech_pad_ms": int(max(0, WHISPER_RECENT_WINDOW_PAD_MS)),
+        },
         "initial_prompt": _wake_word_prompt(),
         "temperature": temperature_schedule,
         "best_of": best_of,
@@ -915,10 +1002,20 @@ def _run_transcription(
         for key, value in overrides.items():
             transcription_kwargs[key] = value
 
-    segments_generator, info = model.transcribe(
-        audio,
-        **transcription_kwargs,
-    )
+    # hotwords is supported by recent faster-whisper; include only if available.
+    hotwords = _parse_hotwords(WHISPER_HOTWORDS)
+    if hotwords:
+        transcription_kwargs["hotwords"] = hotwords
+
+    try:
+        segments_generator, info = model.transcribe(
+            audio,
+            **transcription_kwargs,
+        )
+    except TypeError:
+        # Compatibility fallback if the installed faster-whisper doesn't support some kwargs (e.g., hotwords).
+        transcription_kwargs.pop("hotwords", None)
+        segments_generator, info = model.transcribe(audio, **transcription_kwargs)
     return list(segments_generator), info
 
 
@@ -930,8 +1027,11 @@ async def transcribe(
     beam_size: int = Query(5, ge=1, le=10),
     vad: bool = Query(True, description="Whether to enable faster-whisper VAD filter (silence trimming)."),
     vad_fallback_retry: bool = Query(True, description="If VAD removes everything and text is empty, retry once with VAD disabled."),
+    session_id: Optional[str] = Query(None, description="Client/session id for streaming context and overlap."),
+    hotwords: Optional[str] = Query(None, description="Optional per-request hotwords (comma/space separated)."),
 ) -> JSONResponse:
     start_time = time.perf_counter()
+    now = time.time()
     payload = await request.body()
     if not payload:
         raise HTTPException(status_code=400, detail="Empty audio payload")
@@ -943,6 +1043,22 @@ async def transcribe(
     audio = audio.astype(np.float32) / 32768.0
     if sample_rate != DEFAULT_SAMPLE_RATE:
         audio = _resample_audio(audio, sample_rate, DEFAULT_SAMPLE_RATE)
+
+    audio = _remove_dc(audio)
+
+    # Streaming overlap: prepend a small tail from the previous request so boundary words aren't chopped.
+    state = _get_session(session_id)
+    _prune_sessions(now)
+    if (
+        WHISPER_STREAM_OVERLAP_SECONDS > 0.0
+        and state.audio_tail is not None
+        and state.audio_tail.size > 0
+        and now - (state.last_ts or 0.0) <= 2.0
+    ):
+        try:
+            audio = np.concatenate([state.audio_tail, audio]).astype(np.float32, copy=False)
+        except Exception:
+            pass
 
     audio = _extract_recent_speech_window(audio, DEFAULT_SAMPLE_RATE)
 
@@ -963,7 +1079,17 @@ async def transcribe(
         primary_beam_size,
         normalized_language,
         primary_temperatures,
-        {"vad_filter": bool(vad)},
+        {
+            "vad_filter": bool(vad),
+            # Allow per-request hotwords override (if provided).
+            **({"hotwords": _parse_hotwords(hotwords)} if _parse_hotwords(hotwords) else {}),
+            # If we have session context, we can optionally condition on it (helps streaming continuity).
+            "initial_prompt": (
+                (_wake_word_prompt() + " " + state.last_text[-WHISPER_STREAM_CONTEXT_CHARS :]).strip()
+                if WHISPER_STREAM_CONTEXT_CHARS > 0 and state.last_text and now - (state.last_ts or 0.0) <= WHISPER_STREAM_SESSION_TTL_SECONDS
+                else _wake_word_prompt()
+            ),
+        },
     )
 
     avg_logprob_values = _collect_avg_logprobs(segments)
@@ -1060,6 +1186,71 @@ async def transcribe(
             full_text = collapsed_text
             words = collapsed_words
 
+    # Layered decoding: if confidence is low / output is suspicious, do one stronger retry.
+    avg_logprob_for_retry = avg_logprob if avg_logprob is not None else -999.0
+    needs_retry = False
+    if full_text and avg_logprob_for_retry < LOW_CONFIDENCE_THRESHOLD:
+        needs_retry = True
+    if not full_text and speech_fraction >= 0.25 and max_amplitude >= 0.03 and rms >= 0.006:
+        needs_retry = True
+    if _should_retry_for_repetition(full_raw_text, getattr(info, "compression_ratio", None)):
+        needs_retry = True
+
+    if needs_retry:
+        retry_beam = min(WHISPER_RETRY_MAX_BEAM, max(1, primary_beam_size + WHISPER_RETRY_BEAM_BONUS))
+        retry_temps = WHISPER_RETRY_TEMPERATURES if WHISPER_RETRY_TEMPERATURES else (0.0, 0.2, 0.4)
+        try:
+            segments_r, info_r = await asyncio.to_thread(
+                _run_transcription,
+                model,
+                audio,
+                retry_beam,
+                normalized_language,
+                tuple(retry_temps),
+                {
+                    "vad_filter": bool(vad),
+                    **({"hotwords": _parse_hotwords(hotwords)} if _parse_hotwords(hotwords) else {}),
+                    "initial_prompt": (
+                        (_wake_word_prompt() + " " + state.last_text[-WHISPER_STREAM_CONTEXT_CHARS :]).strip()
+                        if WHISPER_STREAM_CONTEXT_CHARS > 0 and state.last_text and now - (state.last_ts or 0.0) <= WHISPER_STREAM_SESSION_TTL_SECONDS
+                        else _wake_word_prompt()
+                    ),
+                },
+            )
+            # adopt retry result if it yields more meaningful text or better logprob
+            texts_r = _collect_segment_texts(segments_r)
+            full_text_r = _canonicalize_wake_words(" ".join(texts_r).strip())
+            avg_r_values = _collect_avg_logprobs(segments_r)
+            avg_r = _mean(avg_r_values)
+            if _looks_like_meaningful_text(full_text_r) and (
+                not full_text
+                or (avg_r is not None and avg_logprob is not None and avg_r > avg_logprob)
+                or len(full_text_r) > len(full_text)
+            ):
+                segments = segments_r
+                info = info_r
+                combined_text_parts = [seg.text.strip() for seg in segments if getattr(seg, "text", "").strip()]
+                words = []
+                for seg in segments:
+                    for w in seg.words or []:
+                        wtxt = w.word.strip()
+                        if not wtxt:
+                            continue
+                        words.append(
+                            {
+                                "word": wtxt,
+                                "start": max(0.0, float(w.start) if w.start is not None else 0.0),
+                                "end": max(0.0, float(w.end) if w.end is not None else 0.0),
+                                "confidence": round(float(w.probability), 4) if w.probability is not None else None,
+                            }
+                        )
+                full_text = full_text_r
+                full_raw_text = " ".join(texts_r).strip()
+                avg_logprob = avg_r
+        except Exception:
+            # If retry fails, keep primary result.
+            pass
+
     full_text = _canonicalize_wake_words(full_text)
 
     for word in words:
@@ -1106,6 +1297,16 @@ async def transcribe(
         response.get("language"),
         len(words),
     )
+
+    # Update session state for streaming continuity
+    state.last_ts = now
+    state.last_text = full_text or state.last_text
+    if WHISPER_STREAM_OVERLAP_SECONDS > 0.0 and audio.size > 0:
+        tail_samples = int(DEFAULT_SAMPLE_RATE * WHISPER_STREAM_OVERLAP_SECONDS)
+        if tail_samples > 0 and audio.size >= tail_samples:
+            state.audio_tail = np.asarray(audio[-tail_samples:], dtype=np.float32)
+        elif tail_samples > 0:
+            state.audio_tail = np.asarray(audio, dtype=np.float32)
 
     return JSONResponse(response)
 
