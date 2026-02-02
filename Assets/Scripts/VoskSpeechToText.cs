@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
+using RobotVoice.Audio;
 
 public class VoskSpeechToText : MonoBehaviour
 {
@@ -59,6 +60,20 @@ public class VoskSpeechToText : MonoBehaviour
         [Tooltip("If true, log record stop events (can be noisy because segmentation stops recording frequently).")]
         public bool VerboseStopLogging = false;
 
+        [Header("AEC (WebRTC APM/AEC3)")]
+        [Tooltip("If enabled, microphone frames are processed through AEC before buffering/sending to ASR.")]
+        public bool EnableAec = true;
+
+        [Tooltip("Optional reference to the AEC engine. If null, the first AecEngine found in the scene will be used.")]
+        public AecEngine AecEngine;
+
+        [Tooltip("If true, dump mic/render/aec WAV files under Application.persistentDataPath\\aec_dumps.")]
+        public bool AecDumpWav = false;
+
+        [Tooltip("Maximum duration (seconds) to dump per session.")]
+        [Range(1, 60)]
+        public int AecDumpMaxSeconds = 10;
+
 	private bool _isInitializing;
 
 	private bool _didInit;
@@ -105,6 +120,62 @@ public class VoskSpeechToText : MonoBehaviour
                         _defaultMaxRecordLength = MaxRecordLength;
                         _defaultMaxRecordLengthCaptured = true;
                 }
+
+                if (AecEngine == null)
+                {
+                        AecEngine = FindObjectOfType<AecEngine>();
+                }
+                if (EnableAec && AecEngine == null)
+                {
+                        var go = new GameObject("AecEngine");
+                        AecEngine = go.AddComponent<AecEngine>();
+                        DontDestroyOnLoad(go);
+                }
+        }
+
+        private int PickBestNativeAecSampleRateHz()
+        {
+                // WebRTC APM supports native rates: 8k/16k/32k/48k. Prefer highest supported by mic device caps.
+                try
+                {
+                        var device = VoiceProcessor != null ? VoiceProcessor.CurrentDeviceName : string.Empty;
+                        Microphone.GetDeviceCaps(device, out int minFreq, out int maxFreq);
+                        if (minFreq <= 0 && maxFreq <= 0)
+                        {
+                                // unknown caps: use Unity output sample rate if it's a native rate, else fallback 48k
+                                var outSr = AudioSettings.outputSampleRate;
+                                if (outSr == 48000 || outSr == 32000 || outSr == 16000 || outSr == 8000) return outSr;
+                                return 48000;
+                        }
+
+                        int[] native = { 48000, 32000, 16000, 8000 };
+                        foreach (var sr in native)
+                        {
+                                if (maxFreq > 0 && sr > maxFreq) continue;
+                                if (minFreq > 0 && sr < minFreq) continue;
+                                return sr;
+                        }
+                }
+                catch { }
+                return 32000;
+        }
+
+        private void GetRecordingFormat(out int sampleRate, out int frameLength)
+        {
+                sampleRate = VoiceProcessor != null && VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
+                frameLength = PythonFrameLength > 0 ? PythonFrameLength : (VoiceProcessor != null && VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512);
+
+                if (EnableAec && AecEngine != null && AecEngine.enableAec)
+                {
+                        var sr = PickBestNativeAecSampleRateHz();
+                        sampleRate = sr;
+                        frameLength = Mathf.Max(80, sr / 100); // 10ms
+                }
+        }
+
+        public bool HasActiveAec()
+        {
+                return EnableAec && AecEngine != null && AecEngine.enableAec && AecEngine.IsAvailable;
         }
 
 	//If Auto start is enabled, starts vosk speech to text.
@@ -192,8 +263,36 @@ public class VoskSpeechToText : MonoBehaviour
                         _running = true;
 
                         ClearPythonBuffer();
-                        var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
-                        var frameLength = PythonFrameLength > 0 ? PythonFrameLength : (VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512);
+                        var aec = EnableAec ? AecEngine : null;
+                        if (aec != null && aec.enableAec)
+                        {
+                                // Run AEC in 10ms native blocks at a rate supported by the mic device (commonly 32kHz).
+                                var sr = PickBestNativeAecSampleRateHz();
+                                var fl = Mathf.Max(80, sr / 100); // 10ms
+                                aec.targetSampleRateHz = sr;
+                                aec.blockMs = 10;
+                                aec.captureChannels = 1;
+                                aec.dumpWav = AecDumpWav;
+                                aec.dumpMaxSeconds = Mathf.Clamp(AecDumpMaxSeconds, 1, 60);
+                                var ok = aec.TryInit();
+                                if (!ok)
+                                {
+                                        Debug.LogWarning($"[RobotVoice] AEC init failed. sr={sr} err={aec.LastInitError}");
+                                        Debug.LogWarning($"[RobotVoice] WAV dumps (if enabled) would be under: {Application.persistentDataPath}\\aec_dumps");
+                                }
+                                else
+                                {
+                                        Debug.Log($"[RobotVoice] AEC init OK. sr={sr} delayMs={aec.streamDelayMs} renderTapSr={(aec.renderTap != null ? aec.renderTap.SampleRateHz : AudioSettings.outputSampleRate)}");
+                                        if (AecDumpWav)
+                                        {
+                                                Debug.Log($"[RobotVoice] AEC WAV dumps enabled -> {Application.persistentDataPath}\\aec_dumps");
+                                        }
+                                }
+                                VoiceProcessor.StartRecording(sr, fl, false);
+                                return;
+                        }
+
+                        GetRecordingFormat(out var sampleRate, out var frameLength);
                         VoiceProcessor.StartRecording(sampleRate, frameLength, false);
                 }
                 else
@@ -229,6 +328,15 @@ public class VoskSpeechToText : MonoBehaviour
                 {
                         // Drop frames while TTS is playing to avoid feedback
                         return;
+                }
+
+                // If AEC is active, process the frame before buffering it for ASR.
+                if (EnableAec && AecEngine != null && AecEngine.enableAec && AecEngine.IsAvailable)
+                {
+                        if (AecEngine.TryProcessCapturePcm16(samples, out var processed) && processed != null)
+                        {
+                                samples = processed;
+                        }
                 }
                 lock (_pythonBufferLock)
                 {
@@ -296,8 +404,7 @@ public class VoskSpeechToText : MonoBehaviour
                 if (!VoiceProcessor.IsRecording)
                 {
                         ClearPythonBuffer();
-                        var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
-                        var frameLength = PythonFrameLength > 0 ? PythonFrameLength : (VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512);
+                        GetRecordingFormat(out var sampleRate, out var frameLength);
                         VoiceProcessor.StartRecording(sampleRate, frameLength, false);
                 }
                 else
@@ -359,8 +466,7 @@ public class VoskSpeechToText : MonoBehaviour
 
                 if (restartRecording && _running)
                 {
-                        var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
-                        var frameLength = PythonFrameLength > 0 ? PythonFrameLength : (VoiceProcessor.FrameLength > 0 ? VoiceProcessor.FrameLength : 512);
+                        GetRecordingFormat(out var sampleRate, out var frameLength);
                         VoiceProcessor.StartRecording(sampleRate, frameLength, false);
                 }
         }

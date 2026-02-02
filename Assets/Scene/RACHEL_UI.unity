@@ -1938,6 +1938,10 @@ MonoBehaviour:
   - bee
   - robot
   VerboseStopLogging: 0
+  EnableAec: 1
+  AecEngine: {fileID: 0}
+  AecDumpWav: 1
+  AecDumpMaxSeconds: 15
 --- !u!114 &1489373251
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1968,7 +1972,7 @@ MonoBehaviour:
   logDebugMessages: 1
   speechEnergyNoiseGate: 0.05
   noiseAverageLogProbThreshold: -0.6
-  duplicateSuppressionSeconds: 2
+  duplicateSuppressionSeconds: 0
   wakeWordPrompt: 
   wakeWordPromptSource: {fileID: 0}
   wakeWordPromptClip: {fileID: 0}
@@ -1977,6 +1981,9 @@ MonoBehaviour:
   wakeListeningCountdownText: {fileID: 0}
   piperSpeakUrl: http://127.0.0.1:5005/speak
   wakeAcknowledgeUserText: 
+  muteMicDuringTtsWhenAecInactive: 1
+  autoEnableMqttPublishing: 1
+  voiceTextTopic: robot/voice/text
   firstCommandListenSeconds: 3
 --- !u!114 &1489373252
 MonoBehaviour:
@@ -2065,21 +2072,18 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1489373248}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 2e7dec8d086792645b1c31183804ddc3, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
   host: 127.0.0.1
   port: 1883
-  topic: robot/voice/text
-  autoStart: 1
+  topic: robot/captions/text
+  autoStart: 0
   clientIdSuffix: unity-caption
   launcher: {fileID: 1489373251}
-  autoWakeOnFirstSentence: 1
-  ttsStateTopic: robot/tts/state
-  ttsSuppressTailMs: 1200
-  ttsEchoWindowMs: 3000
+  autoWakeOnFirstSentence: 0
   verboseLogging: 1
 --- !u!114 &1489373256
 MonoBehaviour:

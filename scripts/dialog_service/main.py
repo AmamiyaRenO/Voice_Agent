@@ -13,7 +13,6 @@ from typing import Optional
 
 import httpx
 import paho.mqtt.client as mqtt
-import winsound
 
 
 @dataclass
@@ -35,7 +34,10 @@ class Config:
     tts_api_url: str = "http://127.0.0.1:5005"
     tts_endpoint: str = "/speak"  # GET ?text=...
     respond_endpoint: str = "/respond"  # POST {text}
-    speak_audio: bool = True
+    # IMPORTANT (AEC): For echo cancellation to work, TTS must be played through Unity so
+    # the AudioListener render reference is available. Therefore, this service must NOT
+    # play audio locally (winsound).
+    speak_audio: bool = False
     source_label: str = "dialog_service"
 
 
@@ -53,7 +55,8 @@ def load_config() -> Config:
     # Backward compatibility: VOICE_API_URL used to serve both; now prefer RESPOND_API_URL and TTS_API_URL/PIPER_HTTP_URL
     cfg.respond_api_url = os.environ.get("RESPOND_API_URL", os.environ.get("VOICE_API_URL", cfg.respond_api_url)).rstrip("/")
     cfg.tts_api_url = os.environ.get("TTS_API_URL", os.environ.get("PIPER_HTTP_URL", cfg.tts_api_url)).rstrip("/")
-    cfg.speak_audio = os.environ.get("DIALOG_SPEAK_AUDIO", "1").lower() in {"1", "true", "yes", "on"}
+    # Force-disable local playback (even if env is set) to avoid double audio.
+    cfg.speak_audio = False
     cfg.source_label = os.environ.get("DIALOG_SOURCE_LABEL", cfg.source_label)
     return cfg
 
@@ -69,6 +72,8 @@ class DialogService:
         self.tts_model: Optional[str] = None
         self.current_style: Optional[str] = None
         self.current_system_prompt: Optional[str] = None
+        if os.environ.get("DIALOG_SPEAK_AUDIO"):
+            print("[dialog] NOTE: DIALOG_SPEAK_AUDIO is set but will be ignored (forced off for AEC).")
 
     @staticmethod
     def _style_to_prompt(style: str) -> Optional[str]:
@@ -141,35 +146,8 @@ class DialogService:
             pass
 
     def _tts_and_play(self, text: str, corr_id: Optional[str]) -> None:
-        try:
-            url = f"{self.cfg.tts_api_url}{self.cfg.tts_endpoint}"
-            # Piper HTTP 支持 GET /speak?text=... 直接返回 WAV；可附带 voice/model
-            params = {"text": text}
-            if self.tts_voice:
-                params["voice"] = self.tts_voice
-            if self.tts_model:
-                params["model"] = self.tts_model
-            resp = self.http.get(url, params=params)
-            resp.raise_for_status()
-            wav_bytes = resp.content
-            try:
-                self._publish_tts_state(True, corr_id, text)
-                winsound.PlaySound(wav_bytes, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
-            except Exception:
-                pass
-            finally:
-                self._publish_tts_state(False, corr_id)
-        except httpx.HTTPStatusError as exc:
-            # 打印服务器返回的错误正文，便于快速定位 500 的真实原因
-            body = ""
-            try:
-                body = exc.response.text if exc.response is not None else ""
-            except Exception:
-                body = ""
-            preview = body[:400].replace("\n", "\\n")
-            print(f"[dialog] TTS failed: {exc} | body={preview}")
-        except Exception as exc:
-            print(f"[dialog] TTS failed: {exc}")
+        # Local playback disabled (Unity will play audio using robot/dialog/answer).
+        return
 
     def _on_message(self, client, userdata, msg):
         try:

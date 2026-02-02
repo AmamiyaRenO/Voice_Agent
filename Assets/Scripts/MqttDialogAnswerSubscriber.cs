@@ -17,6 +17,11 @@ namespace RobotVoice
         [SerializeField] private string topic = "robot/dialog/answer";
         [SerializeField] private bool autoStart = true;
 
+        [Header("Playback (Unity TTS)")]
+        [SerializeField, Tooltip("If set, plays dialog answers through Unity (recommended for AEC).")]
+        private bool playAnswerInUnity = true;
+        [SerializeField] private VoiceGameLauncher launcher;
+
         [Header("Diagnostics")]
         [SerializeField] private bool verboseLogging = true;
 
@@ -28,6 +33,10 @@ namespace RobotVoice
         private void Awake()
         {
             mainThreadContext = SynchronizationContext.Current;
+            if (launcher == null)
+            {
+                launcher = FindObjectOfType<VoiceGameLauncher>();
+            }
             try
             {
                 var unique = SystemInfo.deviceUniqueIdentifier;
@@ -131,10 +140,16 @@ namespace RobotVoice
                 var node = JSONNode.Parse(json);
                 var text = node?["text"]?.Value ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(text)) return;
+                var corrId = node?["corr_id"]?.Value ?? string.Empty;
 
                 PostToMainThread(() =>
                 {
                     ConversationLog.AddEntry(ConversationRole.Coach, text, "dialog_service");
+                    if (playAnswerInUnity && launcher != null)
+                    {
+                        // Play via Unity so RenderTap has a reference signal for AEC.
+                        launcher.PlayDialogAnswerFromService(text, corrId);
+                    }
                 });
             }
             catch { }

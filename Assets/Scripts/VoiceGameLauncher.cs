@@ -7,6 +7,7 @@ using System.Globalization;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.UI;
+using System.Collections.Generic;
 
 namespace RobotVoice
 {
@@ -45,6 +46,8 @@ namespace RobotVoice
         [SerializeField] private string piperSpeakUrl = "http://127.0.0.1:5005/speak";
         [SerializeField, Tooltip("Prompt text sent to LLM when wake word is detected. Keep it short.")]
         private string wakeAcknowledgeUserText = "Wake word detected. Reply briefly that you are listening.";
+        [SerializeField, Tooltip("Fallback: mute mic capture while TTS is playing (prevents echo if AEC is not active).")]
+        private bool muteMicDuringTtsWhenAecInactive = true;
         [Header("Backend Voice Pipeline")]
         [SerializeField, Tooltip("Auto-enable MQTT publishing on the MqttIntentPublisher so speech can reach intent_service/dialog_service.")]
         private bool autoEnableMqttPublishing = true;
@@ -58,6 +61,39 @@ namespace RobotVoice
         private Coroutine wakeListeningIndicatorCoroutine;
         private string lastDeliveredTranscript = string.Empty;
         private float lastDeliveredTranscriptTime = -999f;
+        private AudioSource ttsFallbackSource;
+        [Header("Echo Rejection (post-AEC)")]
+        [SerializeField, Tooltip("If true, drop ASR results that match the last TTS while TTS is playing (prevents self-conversation).")]
+        private bool dropTtsEchoWhileSpeaking = true;
+        [SerializeField, Tooltip("Additional seconds after TTS ends to still drop likely echo.")]
+        [Range(0f, 10f)]
+        private float ttsEchoTailSeconds = 0.6f;
+        [SerializeField, Tooltip("Minimum token overlap (0-1) to consider a transcript as TTS echo during playback.")]
+        [Range(0.1f, 1f)]
+        private float ttsEchoTokenOverlapThreshold = 0.6f;
+        [SerializeField, Tooltip("Minimum characters to apply echo rejection to (avoid dropping short interjections).")]
+        private int ttsEchoMinChars = 10;
+
+        private string lastTtsText = string.Empty;
+        private string lastTtsTextNorm = string.Empty;
+        private float lastTtsStartTime = -999f;
+        private float lastTtsEndTime = -999f;
+        private string pendingTtsText = string.Empty;
+        private bool ttsWasPlayingLastFrame = false;
+
+        // Whisper/transcribe pipelines can emit text a few seconds AFTER playback ends due to buffering/segmentation.
+        // Keep a conservative minimum tail window to avoid self-conversation.
+        private const float MinEchoTailSeconds = 4f;
+
+        // Correlation for debugging: corr_id -> user text (recent)
+        private readonly Dictionary<string, (string text, float ts)> recentCorrToUserText = new Dictionary<string, (string, float)>();
+        private readonly Queue<string> recentCorrOrder = new Queue<string>();
+        [SerializeField, Tooltip("How many corr_id->user-text mappings to keep for debug logging.")]
+        private int corrHistorySize = 32;
+        private readonly HashSet<string> playedAnswerCorrIds = new HashSet<string>();
+        private readonly Queue<string> playedAnswerOrder = new Queue<string>();
+        [SerializeField, Tooltip("How many answer corr_ids to remember for de-duping playback.")]
+        private int playedAnswerHistorySize = 64;
 
         private static readonly HashSet<string> NoiseSingles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -121,6 +157,21 @@ namespace RobotVoice
         private void Start()
         {
             // Piper 统一出声，无需 Windows TTS 初始化
+        }
+
+        private void Update()
+        {
+            // Track actual end-of-playback based on AudioSource.isPlaying to avoid relying on clip.length timing.
+            var playing =
+                (wakeWordPromptSource != null && wakeWordPromptSource.isPlaying) ||
+                (ttsFallbackSource != null && ttsFallbackSource.isPlaying);
+
+            if (ttsWasPlayingLastFrame && !playing)
+            {
+                lastTtsEndTime = Time.realtimeSinceStartup;
+            }
+
+            ttsWasPlayingLastFrame = playing;
         }
 
         private void OnDestroy()
@@ -292,33 +343,16 @@ namespace RobotVoice
             var candidateText = SelectCandidateText(rawRecognised, recognised, masked, metadata.Text);
             var normalizedCandidate = NormalizeTranscript(candidateText);
 
-            if (!hasKeywordMatch && ShouldIgnoreTranscriptAsNoise(candidateText, metadata))
+            // AEC test: disable similarity/echo suppression here.
+            // (No low-confidence/noise gate; no duplicate suppression.)
+            if (dropTtsEchoWhileSpeaking && IsLikelyTtsEcho(candidateText, metadata))
             {
                 if (logDebugMessages && !string.IsNullOrWhiteSpace(candidateText))
                 {
-                    Debug.Log($"[RobotVoice] Ignored low-confidence speech \"{candidateText.Trim()}\"");
+                    Debug.Log($"[RobotVoice] Dropped TTS echo: \"{candidateText.Trim()}\" (tts=\"{TruncateForLog(lastTtsText, 80)}\")");
                 }
-                // 即便被噪声过滤，仍记录到日志以便观察
-                if (!string.IsNullOrWhiteSpace(candidateText))
-                {
-                    ConversationLog.AddEntry(ConversationRole.User, candidateText, "filtered_noise");
-                }
+                ConversationLog.AddEntry(ConversationRole.System, candidateText, "dropped_tts_echo");
                 return;
-            }
-
-            if (IsDuplicateTranscript(normalizedCandidate))
-            {
-                if (logDebugMessages && !string.IsNullOrWhiteSpace(candidateText))
-                {
-                    Debug.Log($"[RobotVoice] Ignored duplicate speech \"{candidateText.Trim()}\"");
-                }
-
-                return;
-            }
-
-            if (!string.IsNullOrEmpty(normalizedCandidate))
-            {
-                RegisterTranscriptUsage(normalizedCandidate);
             }
             if (IsOnCooldown())
             {
@@ -415,9 +449,13 @@ namespace RobotVoice
             if (publisher == null) return;
             if (string.IsNullOrWhiteSpace(text)) return;
 
+            var corrId = Guid.NewGuid().ToString("N");
+            TrackCorrId(corrId, text.Trim());
+
             var payload = new StringBuilder(256)
                 .Append("{\"text\":\"").Append(EscapeJson(text.Trim())).Append('"')
                 .Append(",\"source\":\"unity_whisper\"")
+                .Append(",\"corr_id\":\"").Append(corrId).Append('"')
                 .Append(",\"ts\":").Append(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
             if (!float.IsNaN(metadata.AvgLogProb))
@@ -440,6 +478,76 @@ namespace RobotVoice
             }
 
             _ = publisher.PublishRawAsync(voiceTextTopic, payload.ToString());
+        }
+
+        private void TrackCorrId(string corrId, string userText)
+        {
+            if (string.IsNullOrWhiteSpace(corrId) || string.IsNullOrWhiteSpace(userText))
+            {
+                return;
+            }
+
+            recentCorrToUserText[corrId] = (userText, Time.realtimeSinceStartup);
+            recentCorrOrder.Enqueue(corrId);
+            while (recentCorrOrder.Count > Mathf.Max(4, corrHistorySize))
+            {
+                var old = recentCorrOrder.Dequeue();
+                if (recentCorrToUserText.ContainsKey(old))
+                {
+                    recentCorrToUserText.Remove(old);
+                }
+            }
+        }
+
+        private bool MarkAnswerPlayed(string corrId)
+        {
+            if (string.IsNullOrWhiteSpace(corrId))
+            {
+                return false;
+            }
+            if (playedAnswerCorrIds.Contains(corrId))
+            {
+                return true;
+            }
+            playedAnswerCorrIds.Add(corrId);
+            playedAnswerOrder.Enqueue(corrId);
+            while (playedAnswerOrder.Count > Mathf.Max(8, playedAnswerHistorySize))
+            {
+                var old = playedAnswerOrder.Dequeue();
+                playedAnswerCorrIds.Remove(old);
+            }
+            return false;
+        }
+
+        public void PlayDialogAnswerFromService(string answerText, string corrId)
+        {
+            var trimmed = string.IsNullOrWhiteSpace(answerText) ? string.Empty : answerText.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return;
+            }
+
+            // De-dupe: if the same corr_id answer arrives multiple times, only play once.
+            if (MarkAnswerPlayed(corrId))
+            {
+                if (logDebugMessages)
+                {
+                    Debug.Log($"[RobotVoice] Skipping duplicate answer playback corr_id={corrId}");
+                }
+                return;
+            }
+
+            if (logDebugMessages)
+            {
+                string userText = string.Empty;
+                if (!string.IsNullOrWhiteSpace(corrId) && recentCorrToUserText.TryGetValue(corrId, out var entry))
+                {
+                    userText = entry.text;
+                }
+                Debug.Log($"[RobotVoice] Playing answer corr_id={corrId} replying_to=\"{userText}\"");
+            }
+
+            TriggerSpeakForTester(trimmed);
         }
 
         // Wake-only flow removed
@@ -718,8 +826,21 @@ namespace RobotVoice
             }
             var fullUrl = url + separator + string.Join("&", query);
 
-            // 告知采集端静音，避免自我回录
+            // Track the text we are about to speak (for echo rejection).
+            pendingTtsText = text;
+
+            var shouldMute = muteMicDuringTtsWhenAecInactive;
             if (speechToText != null)
+            {
+                // If AEC is active, keep capture enabled (future barge-in) and rely on echo cancellation.
+                var vosk = speechToText as VoskSpeechToText;
+                if (vosk != null && vosk.HasActiveAec())
+                {
+                    shouldMute = false;
+                }
+            }
+
+            if (shouldMute && speechToText != null)
             {
                 speechToText.SendMessage("SetPlaybackMute", true, SendMessageOptions.DontRequireReceiver);
             }
@@ -734,7 +855,7 @@ namespace RobotVoice
                     {
                         Debug.LogWarning($"[RobotVoice] Piper TTS GET failed: {request.error}");
                     }
-                    if (speechToText != null)
+                    if (shouldMute && speechToText != null)
                     {
                         speechToText.SendMessage("SetPlaybackMute", false, SendMessageOptions.DontRequireReceiver);
                     }
@@ -758,7 +879,7 @@ namespace RobotVoice
                 }
             }
             // 播放完毕后解除静音
-            if (speechToText != null)
+            if (shouldMute && speechToText != null)
             {
                 speechToText.SendMessage("SetPlaybackMute", false, SendMessageOptions.DontRequireReceiver);
             }
@@ -769,6 +890,8 @@ namespace RobotVoice
                 var payloadEnd = "{\"speaking\":false}";
                 _ = publisher.PublishRawAsync("robot/tts/state", payloadEnd);
             }
+            // Mark TTS end for echo tail window
+            lastTtsEndTime = Time.realtimeSinceStartup;
         }
 
         private AudioClip ParsePiperBase64ToClip(string json)
@@ -810,18 +933,185 @@ namespace RobotVoice
 
             if (wakeWordPromptSource != null)
             {
+                if (logDebugMessages)
+                {
+                    Debug.Log($"[RobotVoice] TTS playback via wakeWordPromptSource on '{wakeWordPromptSource.gameObject.name}' clipLen={clip.length:0.00}s");
+                }
                 wakeWordPromptSource.Stop();
                 wakeWordPromptSource.clip = clip;
                 wakeWordPromptSource.loop = false;
                 wakeWordPromptSource.Play();
+                MarkTtsStarted(pendingTtsText);
                 return;
             }
 
-            var listener = FindObjectOfType<AudioListener>();
-            if (listener != null)
+            // Fallback: use a dedicated AudioSource on a separate GameObject.
+            // Do NOT attach an AudioSource to the same GameObject as the active AudioListener/RenderTap,
+            // otherwise Unity can warn about ambiguous OnAudioFilterRead routing and RenderTap may not
+            // capture a reliable render reference for AEC.
+            var ttsSource = ttsFallbackSource;
+            if (ttsSource == null)
             {
-                AudioSource.PlayClipAtPoint(clip, listener.transform.position);
+                var existing = GameObject.Find("TtsOutput");
+                var host = existing != null ? existing : new GameObject("TtsOutput");
+                ttsSource = host.GetComponent<AudioSource>();
+                if (ttsSource == null)
+                {
+                    ttsSource = host.AddComponent<AudioSource>();
+                }
+                ttsSource.playOnAwake = false;
+                ttsSource.loop = false;
+                ttsSource.spatialBlend = 0f;
+                ttsFallbackSource = ttsSource;
             }
+            if (logDebugMessages)
+            {
+                Debug.Log($"[RobotVoice] TTS playback via dedicated AudioSource on '{ttsSource.gameObject.name}' clipLen={clip.length:0.00}s");
+            }
+            ttsSource.Stop();
+            ttsSource.clip = clip;
+            ttsSource.loop = false;
+            ttsSource.Play();
+            MarkTtsStarted(pendingTtsText);
+        }
+
+        private void MarkTtsStarted(string text)
+        {
+            pendingTtsText = string.Empty;
+            lastTtsStartTime = Time.realtimeSinceStartup;
+            lastTtsEndTime = -999f;
+            lastTtsText = string.IsNullOrWhiteSpace(text) ? string.Empty : text.Trim();
+            lastTtsTextNorm = NormalizeForEchoCompare(lastTtsText);
+        }
+
+        private bool IsTtsPlayingNow()
+        {
+            if (wakeWordPromptSource != null && wakeWordPromptSource.isPlaying) return true;
+            if (ttsFallbackSource != null && ttsFallbackSource.isPlaying) return true;
+            // Tail window after playback ends.
+            var tail = Mathf.Max(MinEchoTailSeconds, Mathf.Max(0f, ttsEchoTailSeconds));
+            if (Time.realtimeSinceStartup - lastTtsEndTime <= tail) return true;
+            return false;
+        }
+
+        private bool IsLikelyTtsEcho(string candidateText, RecognitionMetadata metadata)
+        {
+            if (string.IsNullOrWhiteSpace(candidateText)) return false;
+            if (string.IsNullOrWhiteSpace(lastTtsTextNorm)) return false;
+            if (!IsTtsPlayingNow()) return false;
+
+            var cand = candidateText.Trim();
+            if (cand.Length < Mathf.Max(0, ttsEchoMinChars)) return false;
+
+            var candNorm = NormalizeForEchoCompare(cand);
+            if (candNorm.Length == 0) return false;
+
+            // Fast containment check handles most cases (ASR transcribes substrings of TTS).
+            if (lastTtsTextNorm.Contains(candNorm) || candNorm.Contains(lastTtsTextNorm))
+            {
+                return true;
+            }
+
+            // Token overlap (Jaccard) as a fallback.
+            // IMPORTANT: For long TTS answers, comparing against the full answer can under-score short ASR chunks.
+            // Use the best overlap against sliding windows of the TTS tokens.
+            var overlap = BestTokenOverlapAgainstWindows(candNorm, lastTtsTextNorm);
+            if (overlap >= Mathf.Clamp01(ttsEchoTokenOverlapThreshold))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static string NormalizeForEchoCompare(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+            var sb = new StringBuilder(text.Length);
+            for (int i = 0; i < text.Length; i++)
+            {
+                var ch = char.ToLowerInvariant(text[i]);
+                if (char.IsLetterOrDigit(ch) || char.IsWhiteSpace(ch))
+                {
+                    sb.Append(ch);
+                }
+                else
+                {
+                    sb.Append(' ');
+                }
+            }
+            return Regex.Replace(sb.ToString(), "\\s+", " ").Trim();
+        }
+
+        private static float TokenOverlap(string a, string b)
+        {
+            if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return 0f;
+            var sa = new HashSet<string>(a.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries));
+            var sb = new HashSet<string>(b.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries));
+            if (sa.Count == 0 || sb.Count == 0) return 0f;
+            int inter = 0;
+            foreach (var t in sa)
+            {
+                if (sb.Contains(t)) inter++;
+            }
+            // Use "candidate coverage" instead of Jaccard:
+            // For echo detection we care whether MOST of the candidate tokens are present in the TTS window,
+            // even if the TTS window contains many extra tokens (long answers).
+            //
+            // Example: candidate="welcome let's get started at" vs TTS window="welcome let's get started on your..."
+            // inter=5, |cand|=6 => 0.83 (good), while Jaccard would be much smaller.
+            return sa.Count <= 0 ? 0f : (float)inter / sa.Count;
+        }
+
+        private static float BestTokenOverlapAgainstWindows(string candidateNorm, string ttsNorm)
+        {
+            if (string.IsNullOrWhiteSpace(candidateNorm) || string.IsNullOrWhiteSpace(ttsNorm))
+            {
+                return 0f;
+            }
+
+            var candTokens = candidateNorm.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var ttsTokens = ttsNorm.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (candTokens.Length == 0 || ttsTokens.Length == 0)
+            {
+                return 0f;
+            }
+
+            // If TTS is short, just compare full text.
+            if (ttsTokens.Length <= 40 || candTokens.Length >= ttsTokens.Length)
+            {
+                return TokenOverlap(candidateNorm, ttsNorm);
+            }
+
+            // Compare candidate against sliding windows of TTS tokens of comparable size.
+            // Window is a bit larger than candidate to tolerate minor ASR insertions/deletions.
+            var win = Mathf.Clamp(candTokens.Length * 3, 12, 80);
+            var step = Mathf.Clamp(candTokens.Length / 2, 1, 8);
+
+            float best = 0f;
+            for (int start = 0; start + 1 < ttsTokens.Length; start += step)
+            {
+                var end = Math.Min(ttsTokens.Length, start + win);
+                var windowText = string.Join(" ", ttsTokens, start, end - start);
+                var ov = TokenOverlap(candidateNorm, windowText);
+                if (ov > best)
+                {
+                    best = ov;
+                    if (best >= 0.9f)
+                    {
+                        break;
+                    }
+                }
+                if (end >= ttsTokens.Length) break;
+            }
+
+            return best;
+        }
+
+        private static string TruncateForLog(string text, int max)
+        {
+            if (string.IsNullOrEmpty(text)) return string.Empty;
+            return text.Length <= max ? text : text.Substring(0, max) + "...";
         }
 
         // Minimal WAV decoder (PCM16 mono) -> AudioClip

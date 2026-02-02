@@ -16,7 +16,9 @@ namespace RobotVoice
         [Header("MQTT")]
         [SerializeField] private string host = "127.0.0.1";
         [SerializeField] private int port = 1883;
-        [SerializeField] private string topic = "robot/voice/text";
+        // IMPORTANT: Do NOT subscribe to robot/voice/text here, because VoiceGameLauncher publishes to that topic.
+        // Subscribing to the same topic and forwarding back into VoiceGameLauncher creates an infinite loop.
+        [SerializeField] private string topic = "robot/captions/text";
         [SerializeField] private bool autoStart = true;
         [SerializeField, Tooltip("ClientId suffix to distinguish multiple Unity instances")]
         private string clientIdSuffix = "unity-caption";
@@ -155,6 +157,20 @@ namespace RobotVoice
             try
             {
                 var node = JSONNode.Parse(json);
+                // Prevent feedback loop: ignore Unity-originated publishes (VoiceGameLauncher publishes source=unity_whisper).
+                var source = node?["source"]?.Value ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(source) &&
+                    source.StartsWith("unity", StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+                var sourceLabel = node?["sourceLabel"]?.Value ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(sourceLabel) &&
+                    sourceLabel.StartsWith("unity", StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
                 var text = node?["text"]?.Value ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(text)) return;
 

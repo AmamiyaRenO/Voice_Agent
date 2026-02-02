@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional
 
 import paho.mqtt.client as mqtt
 import yaml
-from rapidfuzz import fuzz
 
 
 @dataclass
@@ -237,31 +236,12 @@ class IntentService:
         # 1) 优先从触发词后的短语提取
         game = extract_game_name(text, self.cfg.launch_triggers)
 
-        # 2) 模糊匹配：对候选短语或整句在 manifest 别名中找最相近
+        # 2) 仅做严格匹配（禁用相似度/模糊匹配，便于测试 AEC 无回音抑制）
         if self._alias_to_name:
-            best_name: Optional[str] = None
-            best_score = -1
-            candidates = [game] if game else []
-            if not candidates:
-                candidates = [text]
-            for cand in candidates:
-                c = cand.strip()
-                if not c:
-                    continue
-                for alias, canonical in self._alias_to_name.items():
-                    score = fuzz.partial_ratio(c.lower(), alias.lower())
-                    if score > best_score:
-                        best_score = score
-                        best_name = canonical
-            if best_name is not None and best_score >= self.cfg.fuzzy_threshold:
-                game = best_name
+            cand = (game or text).strip().lower()
+            if cand in self._alias_to_name:
+                game = self._alias_to_name[cand]
         if game:
-            # 短时去重，避免连续多次相同触发
-            now = time.time()
-            if self._last_launch_name == game and (now - self._last_launch_ts) < self.cfg.dedupe_window_sec:
-                print(f"[intent] skip duplicate LAUNCH_GAME '{game}'")
-                return
-
             out = {
                 "type": "LAUNCH_GAME",
                 "game_name": game,
@@ -271,8 +251,6 @@ class IntentService:
             }
             self.client.publish(self.cfg.topics.intent, json.dumps(out))
             print(f"[intent] -> LAUNCH_GAME '{game}' {self.cfg.topics.intent}")
-            self._last_launch_name = game
-            self._last_launch_ts = now
             return
 
         # default: dialog query

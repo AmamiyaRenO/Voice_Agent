@@ -273,6 +273,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if "PIPER_SERVER_URL" in env:
         env.pop("PIPER_SERVER_URL", None)
 
+    # IMPORTANT (AEC): Ensure dialog_service does NOT play audio locally via winsound.
+    # TTS must be played through Unity so the AudioListener render reference is available for echo cancellation.
+    env["DIALOG_SPEAK_AUDIO"] = "0"
+
     hub_handle = ProcessHandle("messaging hub", hub_command, hub_dir)
     voice_handle = ProcessHandle("voice service", voice_command, voice_dir)
     handles = [hub_handle, voice_handle]

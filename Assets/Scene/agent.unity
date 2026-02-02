@@ -498,7 +498,7 @@ MonoBehaviour:
   logDebugMessages: 1
   speechEnergyNoiseGate: 0.05
   noiseAverageLogProbThreshold: -0.6
-  duplicateSuppressionSeconds: 2
+  duplicateSuppressionSeconds: 0
   wakeWordPrompt: What can I help you?
   wakeWordPromptSource: {fileID: 893004982}
   wakeWordPromptClip: {fileID: 8300000, guid: bb93a05486640ed4183b45dc5dd81668, type: 3}
