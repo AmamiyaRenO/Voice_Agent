@@ -139,7 +139,17 @@ $env:VOICE_AGENT_PIPER_HTTP_CMD="uvicorn qwen_tts_http:app --host 0.0.0.0 --port
 $env:QWEN_TTS_MODEL="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 $env:QWEN_TTS_DEVICE_MAP="cpu"
 $env:QWEN_TTS_DTYPE="float32"
+$env:QWEN_TTS_CACHE_SIZE="8"
+$env:QWEN_TTS_NUM_THREADS="4"
+$env:QWEN_TTS_NUM_INTEROP="1"
 ```
+
+Performance knobs (optional):
+
+- `QWEN_TTS_CACHE_SIZE`: cache last N request results (set `0` to disable).
+- `QWEN_TTS_NUM_THREADS` / `QWEN_TTS_NUM_INTEROP`: control Torch CPU thread usage.
+- `QWEN_TTS_MATMUL_PRECISION`: e.g. `high`, `medium`, `highest` (Torch matmul precision).
+- `QWEN_TTS_TF32`: set to `1` to enable TF32 on CUDA GPUs.
 
 #### Important: Qwen TTS uses a separate venv (dependency conflict)
 
@@ -179,5 +189,3 @@ $env:VOICE_AGENT_PIPER_HTTP_CMD="$ttsPy -m uvicorn qwen_tts_http:app --host 0.0.
 ```powershell
 python python_voice_service/bench_tts_http.py --url "http://127.0.0.1:5005/speak" --runs 3
 ```
-
-

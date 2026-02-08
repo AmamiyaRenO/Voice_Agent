@@ -5,6 +5,7 @@ import base64
 import io
 import os
 import wave
+from collections import OrderedDict
 from typing import Optional, Tuple
 
 import numpy as np
@@ -76,9 +77,56 @@ def _to_wav_bytes(mono_float: np.ndarray, sample_rate: int) -> bytes:
 
 # Gate synthesis concurrency: CPU-only mini PCs will saturate easily.
 _SYNTH_SEM = asyncio.Semaphore(max(1, int(os.getenv("QWEN_TTS_MAX_CONCURRENCY", "1") or "1")))
+_CACHE_SIZE = max(0, int(os.getenv("QWEN_TTS_CACHE_SIZE", "0") or "0"))
+_CACHE: "OrderedDict[Tuple[str, str, str, str], Tuple[bytes, int]]" = OrderedDict()
+_CACHE_LOCK = asyncio.Lock()
+_TORCH_CONFIGURED = False
+
+
+def _configure_torch() -> None:
+    global _TORCH_CONFIGURED
+    if _TORCH_CONFIGURED:
+        return
+    try:
+        import torch  # type: ignore
+    except Exception:
+        _TORCH_CONFIGURED = True
+        return
+
+    threads = os.getenv("QWEN_TTS_NUM_THREADS")
+    if threads:
+        try:
+            torch.set_num_threads(int(threads))
+        except ValueError:
+            pass
+
+    interop = os.getenv("QWEN_TTS_NUM_INTEROP")
+    if interop:
+        try:
+            torch.set_num_interop_threads(int(interop))
+        except ValueError:
+            pass
+
+    precision = os.getenv("QWEN_TTS_MATMUL_PRECISION")
+    if precision:
+        try:
+            torch.set_float32_matmul_precision(precision)
+        except Exception:
+            pass
+
+    tf32 = os.getenv("QWEN_TTS_TF32", "").strip().lower()
+    if tf32 in {"1", "true", "yes", "on"}:
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        except Exception:
+            pass
+
+    _TORCH_CONFIGURED = True
 
 
 def _load_model():
+    _configure_torch()
     try:
         from qwen_tts import Qwen3TTSModel  # type: ignore
     except Exception as exc:  # pragma: no cover
@@ -116,21 +164,50 @@ async def _synthesize(text: str, speaker: str, instruct: str, language: str) -> 
     if _MODEL is None:
         _MODEL = await asyncio.to_thread(_load_model)
 
+    key = (text, speaker or "", instruct or "", language or "")
+    if _CACHE_SIZE > 0:
+        async with _CACHE_LOCK:
+            cached = _CACHE.get(key)
+            if cached:
+                _CACHE.move_to_end(key)
+                return cached
+
     async with _SYNTH_SEM:
         def _run():
-            wavs, sr = _MODEL.generate_custom_voice(
-                text=text,
-                language=language,
-                speaker=speaker if speaker else None,
-                instruct=instruct if instruct else None,
-            )
+            try:
+                import torch  # type: ignore
+            except Exception:
+                torch = None  # type: ignore[assignment]
+
+            if torch:
+                with torch.inference_mode():
+                    wavs, sr = _MODEL.generate_custom_voice(
+                        text=text,
+                        language=language,
+                        speaker=speaker if speaker else None,
+                        instruct=instruct if instruct else None,
+                    )
+            else:
+                wavs, sr = _MODEL.generate_custom_voice(
+                    text=text,
+                    language=language,
+                    speaker=speaker if speaker else None,
+                    instruct=instruct if instruct else None,
+                )
             if not wavs:
                 raise RuntimeError("Qwen3-TTS returned no waveforms")
             wav0 = wavs[0]
             return _to_wav_bytes(np.asarray(wav0), int(sr)), int(sr)
 
         try:
-            return await asyncio.to_thread(_run)
+            result = await asyncio.to_thread(_run)
+            if _CACHE_SIZE > 0:
+                async with _CACHE_LOCK:
+                    _CACHE[key] = result
+                    _CACHE.move_to_end(key)
+                    while len(_CACHE) > _CACHE_SIZE:
+                        _CACHE.popitem(last=False)
+            return result
         except HTTPException:
             raise
         except Exception as exc:
@@ -174,4 +251,3 @@ async def speak_post(payload: TtsRequest) -> TtsResponse:
     wav_bytes, sr = await _synthesize(t, spk, ins, lang)
     audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
     return TtsResponse(audio_wav_base64=audio_b64, sample_rate=sr)
-
