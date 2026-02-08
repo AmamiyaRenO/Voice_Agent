@@ -31,6 +31,8 @@ namespace RobotVoice
         [Header("Transcript Filtering")]
         [SerializeField, Tooltip("Normalized RMS level required to accept single-word transcripts"), Range(0f, 1f)]
         private float speechEnergyNoiseGate = 0.05f;
+        [SerializeField, Tooltip("Energy gate for common hallucinated short phrases (e.g., 'thank you') when user is not speaking.")]
+        private float speechEnergyNoisePhraseGate = 0.01f;
         [SerializeField, Tooltip("Drop transcripts whose average log probability is lower than this value")]
         private float noiseAverageLogProbThreshold = -0.6f;
         [SerializeField, Tooltip("Seconds to suppress repeated transcripts"), Min(0f)]
@@ -48,6 +50,17 @@ namespace RobotVoice
         private string wakeAcknowledgeUserText = "Wake word detected. Reply briefly that you are listening.";
         [SerializeField, Tooltip("Fallback: mute mic capture while TTS is playing (prevents echo if AEC is not active).")]
         private bool muteMicDuringTtsWhenAecInactive = true;
+        [Header("TTS Pseudo-Streaming (CPU-friendly)")]
+        [SerializeField, Tooltip("If true, split long TTS into sentence chunks and prefetch the next chunk while playing the current one.")]
+        private bool enableTtsPseudoStreaming = true;
+        [SerializeField, Tooltip("Only split when text length exceeds this many characters.")]
+        [Range(0, 2000)]
+        private int ttsStreamSplitMinChars = 180;
+        [SerializeField, Tooltip("Maximum characters per chunk (roughly). Smaller chunks reduce time-to-first-audio.")]
+        [Range(60, 600)]
+        private int ttsStreamChunkMaxChars = 220;
+        [SerializeField, Tooltip("If true, start downloading the next chunk while the current chunk is playing.")]
+        private bool ttsStreamPrefetchNext = true;
         [Header("Backend Voice Pipeline")]
         [SerializeField, Tooltip("Auto-enable MQTT publishing on the MqttIntentPublisher so speech can reach intent_service/dialog_service.")]
         private bool autoEnableMqttPublishing = true;
@@ -111,6 +124,13 @@ namespace RobotVoice
             "um",
             "yeah",
             "hmm",
+        };
+
+        private static readonly HashSet<string> NoisePhrases = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "thank you",
+            "thanks",
+            "thankyou",
         };
 
         private static readonly Regex CommandKeywordRegex = new Regex(
@@ -352,8 +372,16 @@ namespace RobotVoice
             var candidateText = SelectCandidateText(rawRecognised, recognised, masked, metadata.Text);
             var normalizedCandidate = NormalizeTranscript(candidateText);
 
-            // AEC test: disable similarity/echo suppression here.
-            // (No low-confidence/noise gate; no duplicate suppression.)
+            // Drop very likely hallucinations/noise before any intent/LLM routing.
+            if (ShouldIgnoreTranscriptAsNoise(candidateText, metadata))
+            {
+                if (logDebugMessages && !string.IsNullOrWhiteSpace(candidateText))
+                {
+                    Debug.Log($"[RobotVoice] Dropped low-signal transcript: \"{candidateText.Trim()}\" (rms={metadata.Rms:0.0000} amp={metadata.MaxAmplitude:0.0000} avg_logprob={metadata.AvgLogProb:0.000})");
+                }
+                return;
+            }
+
             if (dropTtsEchoWhileSpeaking && IsLikelyTtsEcho(candidateText, metadata))
             {
                 if (logDebugMessages && !string.IsNullOrWhiteSpace(candidateText))
@@ -426,7 +454,7 @@ namespace RobotVoice
             PublishExit(string.IsNullOrWhiteSpace(reason) ? "tester_panel" : reason.Trim());
         }
 
-        public void TriggerSpeakForTester(string text, string voiceCode = null, string modelPath = null)
+        public void TriggerSpeakForTester(string text, string voiceCode = null, string modelPath = null, string ttsInstruct = null)
         {
             var trimmed = string.IsNullOrWhiteSpace(text) ? string.Empty : text.Trim();
             if (string.IsNullOrWhiteSpace(trimmed))
@@ -444,7 +472,7 @@ namespace RobotVoice
 
             if (!string.IsNullOrWhiteSpace(piperSpeakUrl))
             {
-                StartCoroutine(PlayTtsFromPiper(trimmed, voiceCode, modelPath));
+                StartCoroutine(PlayTtsFromPiper(trimmed, voiceCode, modelPath, ttsInstruct));
             }
         }
 
@@ -528,7 +556,7 @@ namespace RobotVoice
             return false;
         }
 
-        public void PlayDialogAnswerFromService(string answerText, string corrId)
+        public void PlayDialogAnswerFromService(string answerText, string corrId, string ttsInstruct, string ttsSpeaker)
         {
             var trimmed = string.IsNullOrWhiteSpace(answerText) ? string.Empty : answerText.Trim();
             if (string.IsNullOrWhiteSpace(trimmed))
@@ -556,7 +584,7 @@ namespace RobotVoice
                 Debug.Log($"[RobotVoice] Playing answer corr_id={corrId} replying_to=\"{userText}\"");
             }
 
-            TriggerSpeakForTester(trimmed);
+            TriggerSpeakForTester(trimmed, voiceCode: string.IsNullOrWhiteSpace(ttsSpeaker) ? null : ttsSpeaker, modelPath: null, ttsInstruct: string.IsNullOrWhiteSpace(ttsInstruct) ? null : ttsInstruct);
         }
 
         // Wake-only flow removed
@@ -802,7 +830,7 @@ namespace RobotVoice
         }
 #endif
 
-        private IEnumerator PlayTtsFromPiper(string text, string voiceCode = null, string modelOverride = null)
+        private IEnumerator PlayTtsFromPiper(string text, string voiceCode = null, string modelOverride = null, string ttsInstruct = null)
         {
             if (string.IsNullOrWhiteSpace(text))
             {
@@ -822,20 +850,8 @@ namespace RobotVoice
                 _ = publisher.PublishRawAsync("robot/tts/state", payload);
             }
 
-            // 改用 GET 直取 WAV，避免 POST 卡住
-            var separator = url.Contains("?") ? "&" : "?";
-            var query = new List<string> { "text=" + UnityWebRequest.EscapeURL(text) };
-            if (!string.IsNullOrWhiteSpace(voiceCode))
-            {
-                query.Add("voice=" + UnityWebRequest.EscapeURL(voiceCode));
-            }
-            if (!string.IsNullOrWhiteSpace(modelOverride))
-            {
-                query.Add("model=" + UnityWebRequest.EscapeURL(modelOverride));
-            }
-            var fullUrl = url + separator + string.Join("&", query);
-
             // Track the text we are about to speak (for echo rejection).
+            // If we stream by sentences, we still want echo rejection to match the full message.
             pendingTtsText = text;
 
             var shouldMute = muteMicDuringTtsWhenAecInactive;
@@ -853,40 +869,116 @@ namespace RobotVoice
             {
                 speechToText.SendMessage("SetPlaybackMute", true, SendMessageOptions.DontRequireReceiver);
             }
-            using (var request = UnityWebRequestMultimedia.GetAudioClip(fullUrl, AudioType.WAV))
+
+            var segments = SplitTtsTextForStreaming(text);
+            if (segments == null || segments.Count == 0)
             {
-                request.timeout = 60;
-                yield return request.SendWebRequest();
-
-                if (request.result != UnityWebRequest.Result.Success)
+                if (shouldMute && speechToText != null)
                 {
-                    if (logDebugMessages)
-                    {
-                        Debug.LogWarning($"[RobotVoice] Piper TTS GET failed: {request.error}");
-                    }
-                    if (shouldMute && speechToText != null)
-                    {
-                        speechToText.SendMessage("SetPlaybackMute", false, SendMessageOptions.DontRequireReceiver);
-                    }
-                    yield break;
+                    speechToText.SendMessage("SetPlaybackMute", false, SendMessageOptions.DontRequireReceiver);
                 }
+                yield break;
+            }
 
-                var clip = DownloadHandlerAudioClip.GetContent(request);
-                PlayClipOnSource(clip);
+            UnityWebRequest nextRequest = null;
+            UnityWebRequestAsyncOperation nextOp = null;
 
-                // 等待播放结束后再解除采集静音，避免自我回录
-                if (clip != null)
+            try
+            {
+                for (int i = 0; i < segments.Count; i++)
                 {
-                    if (wakeWordPromptSource != null)
+                    var segText = segments[i];
+                    if (string.IsNullOrWhiteSpace(segText)) continue;
+
+                    // Use GET WAV (works for Piper and Qwen wrapper; extra params are ignored by Piper).
+                    UnityWebRequest request;
+                    UnityWebRequestAsyncOperation op;
+                    if (nextRequest != null)
                     {
-                        yield return new WaitWhile(() => wakeWordPromptSource.isPlaying);
+                        request = nextRequest;
+                        op = nextOp;
+                        nextRequest = null;
+                        nextOp = null;
+                        while (op != null && !op.isDone)
+                        {
+                            yield return null;
+                        }
                     }
                     else
                     {
-                        yield return new WaitForSeconds(Mathf.Max(0.05f, clip.length));
+                        var fullUrl = BuildSpeakUrl(url, segText, voiceCode, modelOverride, ttsInstruct);
+                        request = UnityWebRequestMultimedia.GetAudioClip(fullUrl, AudioType.WAV);
+                        request.timeout = 60;
+                        yield return request.SendWebRequest();
+                    }
+
+                    if (request.result != UnityWebRequest.Result.Success)
+                    {
+                        if (logDebugMessages)
+                        {
+                            Debug.LogWarning($"[RobotVoice] TTS GET failed: code={request.responseCode} err={request.error}");
+                        }
+                        request.Dispose();
+                        yield break;
+                    }
+
+                    // Kick off prefetch for next segment before starting playback of this clip.
+                    if (ttsStreamPrefetchNext && i + 1 < segments.Count)
+                    {
+                        var nextUrl = BuildSpeakUrl(url, segments[i + 1], voiceCode, modelOverride, ttsInstruct);
+                        nextRequest = UnityWebRequestMultimedia.GetAudioClip(nextUrl, AudioType.WAV);
+                        nextRequest.timeout = 60;
+                        nextOp = nextRequest.SendWebRequest();
+                    }
+
+                    var downloadedBytes = 0;
+                    try
+                    {
+                        downloadedBytes = request.downloadHandler != null && request.downloadHandler.data != null
+                            ? request.downloadHandler.data.Length
+                            : 0;
+                    }
+                    catch { }
+
+                    var clip = DownloadHandlerAudioClip.GetContent(request);
+                    request.Dispose();
+
+                    if (clip == null || clip.samples <= 0 || clip.length <= 0.001f)
+                    {
+                        if (logDebugMessages)
+                        {
+                            Debug.LogWarning(
+                                $"[RobotVoice] TTS returned empty/invalid AudioClip seg={i + 1}/{segments.Count} " +
+                                $"bytes={downloadedBytes} voice='{voiceCode}' instructLen={(string.IsNullOrWhiteSpace(ttsInstruct) ? 0 : ttsInstruct.Length)}");
+                        }
+                        yield break;
+                    }
+
+                    PlayClipOnSource(clip);
+
+                    // Wait for playback to end before continuing to the next segment.
+                    if (clip != null)
+                    {
+                        if (wakeWordPromptSource != null)
+                        {
+                            yield return new WaitWhile(() => wakeWordPromptSource.isPlaying);
+                        }
+                        else if (ttsFallbackSource != null)
+                        {
+                            yield return new WaitWhile(() => ttsFallbackSource.isPlaying);
+                        }
+                        else
+                        {
+                            yield return new WaitForSeconds(Mathf.Max(0.05f, clip.length));
+                        }
                     }
                 }
             }
+            finally
+            {
+                try { nextRequest?.Dispose(); } catch { }
+            }
+
             // 播放完毕后解除静音
             if (shouldMute && speechToText != null)
             {
@@ -901,6 +993,86 @@ namespace RobotVoice
             }
             // Mark TTS end for echo tail window
             lastTtsEndTime = Time.realtimeSinceStartup;
+        }
+
+        private static string BuildSpeakUrl(string baseUrl, string text, string voiceCode, string modelOverride, string ttsInstruct)
+        {
+            var url = string.IsNullOrWhiteSpace(baseUrl) ? string.Empty : baseUrl.Trim();
+            if (string.IsNullOrWhiteSpace(url)) return string.Empty;
+            var separator = url.Contains("?") ? "&" : "?";
+            var query = new List<string> { "text=" + UnityWebRequest.EscapeURL(text) };
+            if (!string.IsNullOrWhiteSpace(voiceCode))
+            {
+                query.Add("voice=" + UnityWebRequest.EscapeURL(voiceCode));
+            }
+            if (!string.IsNullOrWhiteSpace(modelOverride))
+            {
+                query.Add("model=" + UnityWebRequest.EscapeURL(modelOverride));
+            }
+            if (!string.IsNullOrWhiteSpace(ttsInstruct))
+            {
+                query.Add("instruct=" + UnityWebRequest.EscapeURL(ttsInstruct));
+            }
+            return url + separator + string.Join("&", query);
+        }
+
+        private List<string> SplitTtsTextForStreaming(string text)
+        {
+            var trimmed = string.IsNullOrWhiteSpace(text) ? string.Empty : text.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed)) return new List<string>();
+
+            // If it's already short, don't split.
+            // NOTE: this is pseudo-streaming (multiple short requests), not model-level streaming.
+            // It improves time-to-first-audio on slow CPU TTS backends.
+            if (!enableTtsPseudoStreaming) return new List<string> { trimmed };
+            var minChars = Mathf.Max(0, ttsStreamSplitMinChars);
+            if (trimmed.Length <= minChars) return new List<string> { trimmed };
+
+            // Sentence-ish splitting (English + Chinese punctuation + newlines).
+            var parts = new List<string>();
+            try
+            {
+                var matches = Regex.Matches(trimmed, @"[^\.!\?\n。！？]+[\.!\?。！？]?");
+                foreach (Match m in matches)
+                {
+                    var s = m.Value.Trim();
+                    if (!string.IsNullOrWhiteSpace(s))
+                    {
+                        parts.Add(s);
+                    }
+                }
+            }
+            catch
+            {
+                parts.Add(trimmed);
+            }
+
+            if (parts.Count <= 1) return new List<string> { trimmed };
+
+            // Group sentences into small chunks to reduce first audio latency.
+            var maxChars = Mathf.Clamp(ttsStreamChunkMaxChars, 60, 600);
+            var chunks = new List<string>();
+            var sb = new StringBuilder();
+            for (int i = 0; i < parts.Count; i++)
+            {
+                var p = parts[i];
+                if (sb.Length == 0)
+                {
+                    sb.Append(p);
+                }
+                else if (sb.Length + 1 + p.Length <= maxChars)
+                {
+                    sb.Append(' ').Append(p);
+                }
+                else
+                {
+                    chunks.Add(sb.ToString().Trim());
+                    sb.Length = 0;
+                    sb.Append(p);
+                }
+            }
+            if (sb.Length > 0) chunks.Add(sb.ToString().Trim());
+            return chunks.Count > 0 ? chunks : new List<string> { trimmed };
         }
 
         private AudioClip ParsePiperBase64ToClip(string json)
@@ -1645,10 +1817,16 @@ namespace RobotVoice
                 return true;
             }
 
-            var normalized = trimmed.ToLowerInvariant();
+            // Normalize punctuation/whitespace for phrase matching.
+            var normalized = NormalizeForEchoCompare(trimmed);
             var effectiveRms = metadata.Rms > 0f ? metadata.Rms : metadata.MaxAmplitude;
 
             if (NoiseSingles.Contains(normalized) && effectiveRms < speechEnergyNoiseGate)
+            {
+                return true;
+            }
+
+            if (NoisePhrases.Contains(normalized) && effectiveRms < Mathf.Max(0f, speechEnergyNoisePhraseGate))
             {
                 return true;
             }

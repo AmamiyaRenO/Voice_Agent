@@ -108,3 +108,76 @@ Unity client. The `VoiceGameLauncher` script forwards both launch/exit
 intents and general wake-word commands to `/respond`, so the coach can
 answer free-form questions alongside the existing keyword workflows.
 
+## TTS backends on port 5005 (Piper vs Qwen3-TTS)
+
+Unity fetches speech audio via `GET http://127.0.0.1:5005/speak?text=...` (WAV).
+This repo ships two compatible HTTP wrappers:
+
+- `piper_http.py`: wraps the Piper CLI (`piper.exe`) and ONNX voice models.
+- `qwen_tts_http.py`: wraps **Qwen3-TTS 0.6B** (`Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`) via the `qwen-tts` Python package.
+
+Both expose:
+
+- `GET /speak?text=...&voice=...&instruct=...` -> `audio/wav`
+- `POST /speak` -> base64 WAV JSON (optional)
+
+### Switching quickly (no Unity changes)
+
+The local launcher (`scripts/start_local_services.py`) reads `VOICE_AGENT_PIPER_HTTP_CMD`.
+Point it at whichever wrapper you want to run on port 5005.
+
+Piper:
+
+```powershell
+$env:VOICE_AGENT_PIPER_HTTP_CMD="uvicorn piper_http:app --host 0.0.0.0 --port 5005"
+```
+
+Qwen (CPU-only friendly):
+
+```powershell
+$env:VOICE_AGENT_PIPER_HTTP_CMD="uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5005"
+$env:QWEN_TTS_MODEL="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+$env:QWEN_TTS_DEVICE_MAP="cpu"
+$env:QWEN_TTS_DTYPE="float32"
+```
+
+#### Important: Qwen TTS uses a separate venv (dependency conflict)
+
+`qwen-tts` depends on a recent `transformers/tokenizers` stack, while `faster-whisper`
+pins an older `tokenizers` version. Install them into **separate virtual environments**:
+
+- **ASR/LLM venv** (port 8000): uses `requirements.txt`
+- **TTS venv** (port 5005): uses `requirements_qwen_tts.txt`
+
+Example:
+
+```powershell
+cd D:\unityproject\Voice_Agent\python_voice_service
+
+# ASR + /respond
+py -3.12 -m venv .venv_asr
+.\.venv_asr\Scripts\python.exe -m pip install -U pip
+.\.venv_asr\Scripts\python.exe -m pip install -r requirements.txt
+
+# Qwen TTS (/speak on 5005)
+py -3.12 -m venv .venv_tts
+.\.venv_tts\Scripts\python.exe -m pip install -U pip
+.\.venv_tts\Scripts\python.exe -m pip install -r requirements_qwen_tts.txt
+```
+
+Then point the launcher to the right Python executables:
+
+```powershell
+$asrPy="D:\unityproject\Voice_Agent\python_voice_service\.venv_asr\Scripts\python.exe"
+$ttsPy="D:\unityproject\Voice_Agent\python_voice_service\.venv_tts\Scripts\python.exe"
+$env:VOICE_AGENT_VOICE_CMD="$asrPy -m uvicorn main:app --host 0.0.0.0 --port 8000"
+$env:VOICE_AGENT_PIPER_HTTP_CMD="$ttsPy -m uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5005"
+```
+
+### Benchmark
+
+```powershell
+python python_voice_service/bench_tts_http.py --url "http://127.0.0.1:5005/speak" --runs 3
+```
+
+

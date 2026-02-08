@@ -66,6 +66,9 @@ seen in the project demos.
 * **Python transcription fallback** – Stream microphone audio to the
 `python_voice_service` FastAPI application if you prefer Faster-Whisper or
 need an offline alternative to Live Captions.
+* **Pluggable TTS on port 5005** – Unity fetches WAV from `GET /speak`. You can
+  run either the existing Piper wrapper or the Qwen3-TTS wrapper on the same
+  port and switch instantly via an environment variable (no Unity changes).
 * **One-command local tooling** – `helper.bat` (Windows) and
   `scripts/start_local_services.py` can boot the MQTT hub, Live Captions
   listener, Python voice service and optional orchestrators together.
@@ -192,6 +195,31 @@ panel tailored for therapist / patient trials.
 If you prefer to start/stop the listener manually, untick **Auto Start** on the
 component and call `StartServer`/`StopServer` from the inspector’s context menu
 or another script.
+
+## Switching TTS backends (Piper vs Qwen3-TTS) without Unity changes
+
+Unity requests speech audio via `http://127.0.0.1:5005/speak?text=...` (WAV).  
+You can decide what runs on port **5005** by setting `VOICE_AGENT_PIPER_HTTP_CMD`
+before launching `scripts/start_local_services.py` (or `helper.bat`).
+
+- **Piper (current default)**:
+
+```powershell
+$env:VOICE_AGENT_PIPER_HTTP_CMD="uvicorn piper_http:app --host 0.0.0.0 --port 5005"
+```
+
+- **Qwen3-TTS 0.6B (CPU-only)**:
+
+```powershell
+$ttsPy="D:\unityproject\Voice_Agent\python_voice_service\.venv_tts\Scripts\python.exe"
+$env:VOICE_AGENT_PIPER_HTTP_CMD="$ttsPy -m uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5005"
+$env:QWEN_TTS_MODEL="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+$env:QWEN_TTS_DEVICE_MAP="cpu"
+$env:QWEN_TTS_DTYPE="float32"
+```
+
+The Unity client can pass `instruct=` when available (LLM-generated style);
+Piper ignores it and Qwen uses it.
 
 ## Python SDK
 

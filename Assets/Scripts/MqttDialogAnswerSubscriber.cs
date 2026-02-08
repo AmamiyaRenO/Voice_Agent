@@ -141,6 +141,8 @@ namespace RobotVoice
                 var text = node?["text"]?.Value ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(text)) return;
                 var corrId = node?["corr_id"]?.Value ?? string.Empty;
+                var ttsInstruct = node?["tts_instruct"]?.Value ?? string.Empty;
+                var ttsSpeaker = node?["tts_speaker"]?.Value ?? string.Empty;
 
                 PostToMainThread(() =>
                 {
@@ -148,7 +150,7 @@ namespace RobotVoice
                     if (playAnswerInUnity && launcher != null)
                     {
                         // Play via Unity so RenderTap has a reference signal for AEC.
-                        launcher.PlayDialogAnswerFromService(text, corrId);
+                        launcher.PlayDialogAnswerFromService(text, corrId, ttsInstruct, ttsSpeaker);
                     }
                 });
             }

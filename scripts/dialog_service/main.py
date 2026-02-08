@@ -9,7 +9,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 import httpx
 import paho.mqtt.client as mqtt
@@ -123,12 +123,26 @@ class DialogService:
         print(f"[dialog] subscribed {self.cfg.topics.style}")
 
     def _publish_answer(self, text: str, corr_id: Optional[str]) -> None:
+        self._publish_answer_ex(text=text, corr_id=corr_id, tts_instruct=None, tts_speaker=None)
+
+    def _publish_answer_ex(
+        self,
+        *,
+        text: str,
+        corr_id: Optional[str],
+        tts_instruct: Optional[str],
+        tts_speaker: Optional[str],
+    ) -> None:
         payload = {
             "type": "ANSWER",
             "text": text,
             "source": self.cfg.source_label,
             "corr_id": corr_id or uuid.uuid4().hex,
         }
+        if tts_instruct:
+            payload["tts_instruct"] = tts_instruct
+        if tts_speaker:
+            payload["tts_speaker"] = tts_speaker
         self.client.publish(self.cfg.topics.dialog_answer, json.dumps(payload))
 
     def _publish_tts_state(self, speaking: bool, corr_id: Optional[str], text: Optional[str] = None) -> None:
@@ -182,9 +196,29 @@ class DialogService:
 
         try:
             url = f"{self.cfg.respond_api_url}{self.cfg.respond_endpoint}"
-            body = {"text": text}
-            if self.current_system_prompt:
-                body["system"] = self.current_system_prompt
+            system_prompt = self.current_system_prompt or None
+            # Require structured output so we can attach an emotion/style instruction for TTS.
+            # Keep it short to reduce LLM latency and avoid runaway JSON.
+            structured_rule = (
+                "Return ONLY valid JSON with keys: "
+                "\"text\" and \"tts_instruct\".\n"
+                "- text: what you say to the user (1-2 sentences, concise)\n"
+                "- tts_instruct: ONE short sentence describing speaking style/emotion/prosody "
+                "(e.g. \"Warm, encouraging coach tone; clear pauses; slightly upbeat.\")\n"
+                "No markdown, no extra keys, no extra commentary."
+            )
+            if system_prompt:
+                system_prompt = system_prompt.strip() + "\n\n" + structured_rule
+            else:
+                # Default persona if no style prompt was configured.
+                base = (
+                    "You are Rachel, a supportive rehabilitation and exercise coach. "
+                    "Be encouraging, concise, and proactive. Use simple sentences. "
+                    "Keep responses short (1–2 sentences) so they sound natural when spoken."
+                )
+                system_prompt = base + "\n\n" + structured_rule
+
+            body = {"text": text, "system": system_prompt}
             resp = self.http.post(url, json=body)
             resp.raise_for_status()
             data = resp.json()
@@ -196,9 +230,47 @@ class DialogService:
         if not reply_text:
             return
 
-        self._publish_answer(reply_text, corr_id)
+        answer_text, tts_instruct = self._try_parse_structured_reply(reply_text)
+        # Prefer the TTS speaker selected by the UI (tts_options topic), if any.
+        tts_speaker = self.tts_voice or None
+
+        self._publish_answer_ex(
+            text=answer_text,
+            corr_id=corr_id,
+            tts_instruct=tts_instruct,
+            tts_speaker=tts_speaker,
+        )
         if self.cfg.speak_audio:
             self._tts_and_play(reply_text, corr_id)
+
+    @staticmethod
+    def _try_parse_structured_reply(reply_text: str) -> Tuple[str, Optional[str]]:
+        raw = (reply_text or "").strip()
+        if not raw:
+            return "", None
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                text = str(obj.get("text") or "").strip()
+                instruct = str(obj.get("tts_instruct") or "").strip()
+                if text:
+                    return text, (instruct or None)
+        except Exception:
+            pass
+        # Common fallback when models output two JSON strings on separate lines:
+        # "Answer text...."
+        # "Warm, gentle style..."
+        try:
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            if len(lines) >= 2:
+                t0 = json.loads(lines[0]) if lines[0].startswith('"') else lines[0]
+                t1 = json.loads(lines[1]) if lines[1].startswith('"') else lines[1]
+                if isinstance(t0, str) and t0.strip():
+                    return t0.strip(), (t1.strip() if isinstance(t1, str) and t1.strip() else None)
+        except Exception:
+            pass
+        # Fallback: treat whole reply as text with no instruct.
+        return raw, None
 
 
 def main() -> int:

@@ -59,6 +59,8 @@ public class VoskSpeechToText : MonoBehaviour
         [Header("Diagnostics")]
         [Tooltip("If true, log record stop events (can be noisy because segmentation stops recording frequently).")]
         public bool VerboseStopLogging = false;
+        [Tooltip("If true, emit status messages for silent/empty ASR segments (can be noisy).")]
+        public bool LogNoSpeechStatusMessages = false;
 
         [Header("AEC (WebRTC APM/AEC3)")]
         [Tooltip("If enabled, microphone frames are processed through AEC before buffering/sending to ASR.")]
@@ -490,7 +492,10 @@ public class VoskSpeechToText : MonoBehaviour
                 if (IsPythonAudioSegmentSilent(samples, out maxAmplitude, out rms))
                 {
                         _pythonRequestInFlight = false;
-                        OnStatusUpdated?.Invoke("Python speech service skipped silent audio");
+                        if (LogNoSpeechStatusMessages)
+                        {
+                                OnStatusUpdated?.Invoke("Python speech service skipped silent audio");
+                        }
                         _pythonLastSegmentMaxAmplitude = 0f;
                         _pythonLastSegmentRms = 0f;
                         yield break;
@@ -540,7 +545,10 @@ public class VoskSpeechToText : MonoBehaviour
                                 }
                                 else
                                 {
-                                        OnStatusUpdated?.Invoke("Python speech service returned empty result");
+                                        if (LogNoSpeechStatusMessages)
+                                        {
+                                                OnStatusUpdated?.Invoke("Python speech service returned empty result");
+                                        }
                                 }
                         }
                 }

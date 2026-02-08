@@ -27,6 +27,22 @@ namespace RobotVoice
         private string defaultVoiceCode = "en_US";
         [SerializeField, Tooltip("Additional voice codes shown in the dropdown")]
         private string[] availableVoices = new[] { "en_US" };
+        [Header("Qwen TTS (Speakers)")]
+        [SerializeField, Tooltip("Default Qwen speaker name used by the tester UI")]
+        private string defaultQwenSpeaker = "Ryan";
+        [SerializeField, Tooltip("Speaker names shown in the Qwen dropdown (matches qwen-tts model card speaker ids)")]
+        private string[] qwenSpeakers = new[]
+        {
+            "Ryan",
+            "Aiden",
+            "Vivian",
+            "Serena",
+            "Uncle_Fu",
+            "Dylan",
+            "Eric",
+            "Ono_Anna",
+            "Sohee",
+        };
         [SerializeField, Tooltip("Default Piper/Coqui model identifier exposed in the tester UI")]
         private string defaultTtsModel = "piper-zh";
         [SerializeField, Tooltip("Additional model identifiers shown in the dropdown")]
@@ -69,6 +85,7 @@ namespace RobotVoice
         private Task listenLoopTask;
         private string activeVoiceCode;
         private string activeTtsModel;
+        private string activeQwenSpeaker;
         private static readonly HttpClient SharedHttpClient = new HttpClient();
         private const float DefaultFaceSeconds = 3f;
         private SynchronizationContext mainThreadContext;
@@ -86,6 +103,7 @@ namespace RobotVoice
             ApplyModelsDirectoryEnvironmentOverride();
             activeVoiceCode = DetermineInitialVoiceCode();
             activeTtsModel = DetermineInitialTtsModel();
+            activeQwenSpeaker = DetermineInitialQwenSpeaker();
             if (autoStart)
             {
                 StartServer();
@@ -261,11 +279,17 @@ namespace RobotVoice
                     case "/api/voice/options":
                         await HandleVoiceOptionsAsync(context).ConfigureAwait(false);
                         return;
+                    case "/api/qwen/options":
+                        await HandleQwenOptionsAsync(context).ConfigureAwait(false);
+                        return;
                     case "/api/logs":
                         await HandleLogsAsync(context).ConfigureAwait(false);
                         return;
                     case "/api/speak":
                         await HandleSpeakAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/qwen/speak":
+                        await HandleQwenSpeakAsync(context).ConfigureAwait(false);
                         return;
                     case "/api/llm/style":
                         await HandleLlmStyleAsync(context).ConfigureAwait(false);
@@ -401,8 +425,18 @@ namespace RobotVoice
             public string text;
             public string voice;
             public string model;
+            public string speaker;   // Qwen-style speaker id (alias of voice)
+            public string instruct;  // Qwen-style emotion/style instruction
             public float speed;
             public float volume;
+        }
+
+        [Serializable]
+        private struct QwenSpeakRequest
+        {
+            public string text;
+            public string speaker;
+            public string instruct;
         }
 
         [Serializable]
@@ -666,7 +700,8 @@ namespace RobotVoice
                 return;
             }
 
-            var requestedVoice = string.IsNullOrWhiteSpace(request.voice) ? activeVoiceCode : request.voice.Trim();
+            var requestedVoice = string.IsNullOrWhiteSpace(request.speaker) ? request.voice : request.speaker;
+            requestedVoice = string.IsNullOrWhiteSpace(requestedVoice) ? activeVoiceCode : requestedVoice.Trim();
             if (string.IsNullOrWhiteSpace(requestedVoice))
             {
                 requestedVoice = DetermineInitialVoiceCode();
@@ -680,6 +715,11 @@ namespace RobotVoice
 
             var requestedSpeed = request.speed > 0f ? request.speed : 1f;
             var requestedVolume = request.volume > 0f ? request.volume : 1f;
+            var requestedInstruct = string.IsNullOrWhiteSpace(request.instruct) ? string.Empty : request.instruct.Trim();
+            if (string.IsNullOrWhiteSpace(requestedInstruct))
+            {
+                requestedInstruct = string.Empty;
+            }
 
             // 优先让 Unity 侧直接播放（经由 VoiceGameLauncher → Piper /speak）
             if (voiceLauncher != null)
@@ -687,7 +727,7 @@ namespace RobotVoice
                 ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel");
                 var voiceToSend = requestedVoice;
                 var modelToSend = requestedModel;
-                PostToMainThread(() => voiceLauncher.TriggerSpeakForTester(text, voiceToSend, modelToSend));
+                PostToMainThread(() => voiceLauncher.TriggerSpeakForTester(text, voiceToSend, modelToSend, requestedInstruct));
                 await WriteJsonAsync(context.Response, 200, "ok", "playing locally").ConfigureAwait(false);
                 return;
             }
@@ -713,8 +753,75 @@ namespace RobotVoice
                         return;
                     }
                 }
-
                 ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel");
+                await WriteJsonAsync(context.Response, 200, "ok", "synthesis complete (no local playback)").ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                await WriteJsonAsync(context.Response, 500, "error", $"voice request failed: {ex.Message}").ConfigureAwait(false);
+            }
+        }
+
+        private async Task HandleQwenSpeakAsync(HttpListenerContext context)
+        {
+            var request = ParseJsonBody<QwenSpeakRequest>(context.Request);
+            var text = (request.text ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(text))
+            {
+                await WriteJsonAsync(context.Response, 400, "error", "text required").ConfigureAwait(false);
+                return;
+            }
+
+            // Speaker for Qwen (maps to `voice=` query param on /speak).
+            var speaker = string.IsNullOrWhiteSpace(request.speaker) ? activeQwenSpeaker : request.speaker.Trim();
+            if (string.IsNullOrWhiteSpace(speaker))
+            {
+                speaker = DetermineInitialQwenSpeaker();
+            }
+
+            activeQwenSpeaker = speaker;
+
+            var instruct = string.IsNullOrWhiteSpace(request.instruct) ? string.Empty : request.instruct.Trim();
+
+            // Always route through Unity playback so AEC/render tap works.
+            if (voiceLauncher != null)
+            {
+                ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel_qwen");
+                var speakerToSend = speaker;
+                PostToMainThread(() => voiceLauncher.TriggerSpeakForTester(text, speakerToSend, modelPath: null, ttsInstruct: instruct));
+                await WriteJsonAsync(context.Response, 200, "ok", "playing locally (qwen)").ConfigureAwait(false);
+                return;
+            }
+
+            // Fallback: send to voice service (won't play locally).
+            var url = (voiceServiceUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "voice service URL not configured").ConfigureAwait(false);
+                return;
+            }
+
+            try
+            {
+                // Use GET /speak for Qwen so we can pass instruct.
+                var query = new List<string>
+                {
+                    "text=" + Uri.EscapeDataString(text),
+                    "voice=" + Uri.EscapeDataString(speaker),
+                };
+                if (!string.IsNullOrWhiteSpace(instruct))
+                {
+                    query.Add("instruct=" + Uri.EscapeDataString(instruct));
+                }
+                var fullUrl = url + (url.Contains("?") ? "&" : "?") + string.Join("&", query);
+                var response = await SharedHttpClient.GetAsync(fullUrl).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    await WriteJsonAsync(context.Response, (int)response.StatusCode, "error", $"voice service error: {body}").ConfigureAwait(false);
+                    return;
+                }
+                ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel_qwen");
                 await WriteJsonAsync(context.Response, 200, "ok", "synthesis complete (no local playback)").ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -913,6 +1020,26 @@ namespace RobotVoice
             context.Response.Close();
         }
 
+        private async Task HandleQwenOptionsAsync(HttpListenerContext context)
+        {
+            var list = EnumerateQwenSpeakers().ToArray();
+            var current = string.IsNullOrWhiteSpace(activeQwenSpeaker) ? DetermineInitialQwenSpeaker() : activeQwenSpeaker;
+            var sb = new StringBuilder(256);
+            sb.Append("{\"speakers\":[");
+            for (int i = 0; i < list.Length; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append('\"').Append(EscapeJson(list[i])).Append('\"');
+            }
+            sb.Append("],\"current\":\"").Append(EscapeJson(current)).Append("\"}");
+            var payload = Encoding.UTF8.GetBytes(sb.ToString());
+            context.Response.StatusCode = 200;
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength64 = payload.Length;
+            await context.Response.OutputStream.WriteAsync(payload, 0, payload.Length).ConfigureAwait(false);
+            context.Response.Close();
+        }
+
         private async Task HandleLogsAsync(HttpListenerContext context)
         {
             var entries = ConversationLog.GetSnapshot();
@@ -1026,6 +1153,42 @@ namespace RobotVoice
             if (seen.Count == 0)
             {
                 yield return "en_US";
+            }
+        }
+
+        private string DetermineInitialQwenSpeaker()
+        {
+            if (!string.IsNullOrWhiteSpace(defaultQwenSpeaker))
+            {
+                return defaultQwenSpeaker.Trim();
+            }
+            var candidate = qwenSpeakers?.FirstOrDefault(s => !string.IsNullOrWhiteSpace(s));
+            return string.IsNullOrWhiteSpace(candidate) ? "Ryan" : candidate.Trim();
+        }
+
+        private IEnumerable<string> EnumerateQwenSpeakers()
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(defaultQwenSpeaker))
+            {
+                var trimmed = defaultQwenSpeaker.Trim();
+                if (seen.Add(trimmed))
+                {
+                    yield return trimmed;
+                }
+            }
+            if (qwenSpeakers != null)
+            {
+                foreach (var s in qwenSpeakers)
+                {
+                    var trimmed = (s ?? string.Empty).Trim();
+                    if (string.IsNullOrWhiteSpace(trimmed)) continue;
+                    if (seen.Add(trimmed)) yield return trimmed;
+                }
+            }
+            if (seen.Count == 0)
+            {
+                yield return "Ryan";
             }
         }
 
@@ -1313,6 +1476,22 @@ namespace RobotVoice
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"</section>");
+
+            sb.AppendLine(@"<section>");
+            sb.AppendLine(@"<h2>Qwen TTS (Speaker + Emotion)</h2>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<label for=""qwenSpeakerSelect"">Speaker</label>");
+            sb.AppendLine(@"<select id=""qwenSpeakerSelect""></select>");
+            sb.AppendLine(@"<label for=""qwenInstruct"">Emotion / Style</label>");
+            sb.AppendLine(@"<input id=""qwenInstruct"" type=""text"" placeholder=""e.g. Warm, gentle, reassuring; clear pauses."">");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:stretch;"">");
+            sb.AppendLine(@"<textarea id=""qwenSpeakText"" placeholder=""Text to synthesize with Qwen TTS""></textarea>");
+            sb.AppendLine(@"<div class=""controls"" style=""width:100%;"">");
+            sb.AppendLine(@"<button onclick=""qwenSpeakNow()"">Speak (Qwen)</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</section>");
             sb.AppendLine(@"<section>");
             sb.AppendLine(@"<h2>Game Control</h2>");
             sb.AppendLine(@"<div class=""controls"">");
@@ -1326,6 +1505,7 @@ namespace RobotVoice
             sb.AppendLine(@"const statusEl = document.getElementById('status');");
             sb.AppendLine(@"const voiceSelect = document.getElementById('voiceSelect');");
             sb.AppendLine(@"const modelSelect = document.getElementById('ttsModelSelect');");
+            sb.AppendLine(@"const qwenSpeakerSelect = document.getElementById('qwenSpeakerSelect');");
             sb.AppendLine(@"const logContainer = document.getElementById('transcriptLog');");
             sb.AppendLine(@"const cameraView = document.getElementById('cameraView');");
             sb.AppendLine(@"const logRoleStyles = {");
@@ -1460,6 +1640,13 @@ namespace RobotVoice
             sb.AppendLine(@"  const model = modelSelect ? modelSelect.value : '';");
             sb.AppendLine(@"  send('/api/speak',{text:text,voice:voiceSelect.value,model:model,speed:speed,volume:volume});");
             sb.AppendLine(@"}");
+            sb.AppendLine(@"function qwenSpeakNow(){");
+            sb.AppendLine(@"  const text = document.getElementById('qwenSpeakText').value;");
+            sb.AppendLine(@"  if(!text.trim()){ statusEl.textContent = 'error: enter text to speak'; return; }");
+            sb.AppendLine(@"  const speaker = qwenSpeakerSelect ? qwenSpeakerSelect.value : '';");
+            sb.AppendLine(@"  const instruct = (document.getElementById('qwenInstruct').value||'').trim();");
+            sb.AppendLine(@"  send('/api/qwen/speak',{text:text,speaker:speaker,instruct:instruct});");
+            sb.AppendLine(@"}");
             sb.AppendLine(@"function setLlmStyle(value){");
             sb.AppendLine(@"  if(!value) return;");
             sb.AppendLine(@"  send('/api/llm/style',{style:value});");
@@ -1498,10 +1685,24 @@ namespace RobotVoice
             sb.AppendLine(@"    console.warn('voice options failed', err);");
             sb.AppendLine(@"  }");
             sb.AppendLine(@"}");
+            sb.AppendLine(@"async function loadQwenOptions(){");
+            sb.AppendLine(@"  if(!qwenSpeakerSelect) return;");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/qwen/options');");
+            sb.AppendLine(@"    if(!resp.ok){ return; }");
+            sb.AppendLine(@"    const data = await resp.json();");
+            sb.AppendLine(@"    const speakers = Array.isArray(data.speakers) ? data.speakers : [];");
+            sb.AppendLine(@"    qwenSpeakerSelect.innerHTML = speakers.map(v => `<option value=""${v}"">${v}</option>`).join('');");
+            sb.AppendLine(@"    const current = typeof data.current === 'string' ? data.current : '';");
+            sb.AppendLine(@"    if(current && speakers.includes(current)){ qwenSpeakerSelect.value = current; }");
+            sb.AppendLine(@"    else if(speakers.length){ qwenSpeakerSelect.value = speakers[0]; }");
+            sb.AppendLine(@"  } catch(err) { console.warn('qwen options failed', err); }");
+            sb.AppendLine(@"}");
             sb.AppendLine(@"if(logContainer){ renderLog([]); }");
             sb.AppendLine(@"refreshLog();");
             sb.AppendLine(@"setInterval(refreshLog, 4000);");
             sb.AppendLine(@"loadVoiceOptions();");
+            sb.AppendLine(@"loadQwenOptions();");
             sb.AppendLine(@"let cameraPolling = false;");
             sb.AppendLine(@"function startPolling(){ if(cameraPolling) return; cameraPolling = true; setInterval(() => { if(cameraView){ cameraView.src = '/camera.jpg?t=' + Date.now(); } }, 200);}");
             sb.AppendLine(@"function initCamera(){ if(!cameraView) return; cameraView.src = '/camera.mjpg'; setTimeout(() => { if(!cameraPolling && (!cameraView.complete || cameraView.naturalWidth === 0)){ startPolling(); } }, 2000);}");

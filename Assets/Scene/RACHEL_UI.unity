@@ -1938,6 +1938,7 @@ MonoBehaviour:
   - bee
   - robot
   VerboseStopLogging: 0
+  LogNoSpeechStatusMessages: 0
   EnableAec: 1
   AecEngine: {fileID: 0}
   AecDumpWav: 1
@@ -1971,6 +1972,7 @@ MonoBehaviour:
   intentCooldownSeconds: 1.5
   logDebugMessages: 1
   speechEnergyNoiseGate: 0.05
+  speechEnergyNoisePhraseGate: 0.015
   noiseAverageLogProbThreshold: -0.6
   duplicateSuppressionSeconds: 0
   wakeWordPrompt: 
@@ -1982,9 +1984,22 @@ MonoBehaviour:
   piperSpeakUrl: http://127.0.0.1:5005/speak
   wakeAcknowledgeUserText: 
   muteMicDuringTtsWhenAecInactive: 1
+  enableTtsPseudoStreaming: 1
+  ttsStreamSplitMinChars: 180
+  ttsStreamChunkMaxChars: 220
+  ttsStreamPrefetchNext: 1
   autoEnableMqttPublishing: 1
   voiceTextTopic: robot/voice/text
   firstCommandListenSeconds: 3
+  dropTtsEchoWhileSpeaking: 1
+  ttsEchoTailSeconds: 0.6
+  ttsEchoTokenOverlapThreshold: 0.6
+  ttsEchoMinChars: 10
+  ttsEchoHardMatchThreshold: 0.85
+  ttsEchoHardMaxAmplitude: 0.25
+  ttsEchoHardMaxAgeSeconds: 45
+  corrHistorySize: 32
+  playedAnswerHistorySize: 64
 --- !u!114 &1489373252
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2045,6 +2060,17 @@ MonoBehaviour:
   - zh_CN
   - en_US
   - es_ES
+  defaultQwenSpeaker: Ryan
+  qwenSpeakers:
+  - Ryan
+  - Aiden
+  - Vivian
+  - Serena
+  - Uncle_Fu
+  - Dylan
+  - Eric
+  - Ono_Anna
+  - Sohee
   defaultTtsModel: piper-zh
   availableTtsModels:
   - piper-zh
@@ -2060,7 +2086,7 @@ MonoBehaviour:
   cameraWidth: 640
   cameraHeight: 480
   cameraJpegQuality: 30
-  cameraFps: 90
+  cameraFps: 30
   availableDialogStyles:
   - Supportive
   - Minimalist
@@ -2101,6 +2127,8 @@ MonoBehaviour:
   port: 1883
   topic: robot/dialog/answer
   autoStart: 1
+  playAnswerInUnity: 1
+  launcher: {fileID: 0}
   verboseLogging: 1
 --- !u!1 &1502453964
 GameObject:

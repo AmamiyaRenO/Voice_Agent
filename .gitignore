@@ -77,8 +77,14 @@ crashlytics-build.properties
 
 # Python virtual environments & caches
 python_voice_service/.venv/
+python_voice_service/.venv*/
 python_voice_service/__pycache__/
 python_voice_service/.pytest_cache/
+
+# Python caches (global)
+__pycache__/
+*.py[cod]
+.pytest_cache/
 
 # NuGet for Unity generated assets
 /[Aa]ssets/NuGetEditor/

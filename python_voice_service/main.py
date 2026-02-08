@@ -463,6 +463,7 @@ def _load_model() -> WhisperModel:
 
 class RespondRequest(BaseModel):
     text: str = Field(..., min_length=1, description="User transcript to send to the coach agent")
+    system: Optional[str] = Field(default=None, description="Optional system prompt override for the LLM.")
 
 
 class RespondResponse(BaseModel):
@@ -492,10 +493,10 @@ def _piper_http_base_url() -> str:
     return _environment("PIPER_HTTP_URL", "http://127.0.0.1:5005").rstrip("/")
 
 
-async def _generate_coach_reply(user_text: str) -> str:
+async def _generate_coach_reply(user_text: str, system_override: Optional[str] = None) -> str:
     payload = {
         "model": _ollama_model(),
-        "system": _ollama_system_prompt(),
+        "system": (system_override or "").strip() or _ollama_system_prompt(),
         "prompt": f"User: {user_text}\nCoach:",
         "stream": False,
         "options": {
@@ -1319,7 +1320,7 @@ async def respond(payload: RespondRequest) -> RespondResponse:
         raise HTTPException(status_code=400, detail="Empty text payload")
 
     try:
-        reply = await _generate_coach_reply(user_text)
+        reply = await _generate_coach_reply(user_text, system_override=(payload.system or None))
     except OllamaError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

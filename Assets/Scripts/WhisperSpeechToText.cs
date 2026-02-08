@@ -42,6 +42,10 @@ public class WhisperSpeechToText : MonoBehaviour
         public Action<string> OnStatusUpdated;
         public Action<string> OnTranscriptionResult;
 
+        [Header("Diagnostics")]
+        [Tooltip("If true, emit status messages for silent/empty ASR segments (can be noisy).")]
+        public bool LogNoSpeechStatusMessages = false;
+
         // Runtime state
         private bool _running;
         private readonly System.Collections.Concurrent.ConcurrentQueue<string> _threadedResultQueue = new System.Collections.Concurrent.ConcurrentQueue<string>();
@@ -266,7 +270,10 @@ public class WhisperSpeechToText : MonoBehaviour
                 if (IsPythonAudioSegmentSilent(samples, out maxAmplitude, out rms))
                 {
                         _pythonRequestInFlight = false;
-                        OnStatusUpdated?.Invoke("Python speech service skipped silent audio");
+                        if (LogNoSpeechStatusMessages)
+                        {
+                                OnStatusUpdated?.Invoke("Python speech service skipped silent audio");
+                        }
                         _pythonLastSegmentMaxAmplitude = 0f;
                         _pythonLastSegmentRms = 0f;
                         yield break;
@@ -316,7 +323,10 @@ public class WhisperSpeechToText : MonoBehaviour
                                 }
                                 else
                                 {
-                                        OnStatusUpdated?.Invoke("Python speech service returned empty result");
+                                        if (LogNoSpeechStatusMessages)
+                                        {
+                                                OnStatusUpdated?.Invoke("Python speech service returned empty result");
+                                        }
                                 }
                         }
                 }
