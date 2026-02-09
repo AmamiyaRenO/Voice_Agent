@@ -136,12 +136,25 @@ namespace Mediapipe.Unity
 
       if (availableSources != null && availableSources.Length > 0)
       {
-        // 优先选择 OBS 或 Virtual 类设备，找不到再回退第一个
-        var preferred = availableSources.FirstOrDefault(d =>
+        // Prefer physical USB webcams first; avoid virtual cameras when possible.
+        var usbPreferred = availableSources.FirstOrDefault(d =>
           !string.IsNullOrEmpty(d.name) &&
-          (d.name.IndexOf("obs", StringComparison.OrdinalIgnoreCase) >= 0 ||
-           d.name.IndexOf("virtual", StringComparison.OrdinalIgnoreCase) >= 0));
-        webCamDevice = string.IsNullOrEmpty(preferred.name) ? availableSources[0] : preferred;
+          d.name.IndexOf("obs", StringComparison.OrdinalIgnoreCase) < 0 &&
+          d.name.IndexOf("virtual", StringComparison.OrdinalIgnoreCase) < 0 &&
+          (d.name.IndexOf("c920", StringComparison.OrdinalIgnoreCase) >= 0 ||
+           d.name.IndexOf("logitech", StringComparison.OrdinalIgnoreCase) >= 0 ||
+           d.name.IndexOf("usb", StringComparison.OrdinalIgnoreCase) >= 0));
+        if (!string.IsNullOrEmpty(usbPreferred.name))
+        {
+          webCamDevice = usbPreferred;
+          yield break;
+        }
+
+        var physical = availableSources.FirstOrDefault(d =>
+          !string.IsNullOrEmpty(d.name) &&
+          d.name.IndexOf("obs", StringComparison.OrdinalIgnoreCase) < 0 &&
+          d.name.IndexOf("virtual", StringComparison.OrdinalIgnoreCase) < 0);
+        webCamDevice = string.IsNullOrEmpty(physical.name) ? availableSources[0] : physical;
       }
     }
 
@@ -314,27 +327,6 @@ namespace Mediapipe.Unity
       throw new InvalidOperationException("Cannot initialize WebCamTexture because WebCamDevice is not selected");
     }
 
-    private void LogWebCamDiagnostics(string prefix)
-    {
-      try
-      {
-        var selected = sourceName ?? "(null)";
-        var req = _shouldRequestExplicitWidthHeight
-          ? (_shouldRequestExplicitFrameRate
-            ? $"{resolution.width}x{resolution.height}@{resolution.frameRate}"
-            : $"{resolution.width}x{resolution.height}")
-          : "(device default)";
-        var candidates = (availableSources == null || availableSources.Length == 0)
-          ? "(none)"
-          : string.Join(", ", availableSources.Select(d => d.name));
-        Debug.Log($"{prefix} device='{selected}', request={req}, candidates=[{candidates}]");
-      }
-      catch
-      {
-        // ignore diagnostics failures
-      }
-    }
-
     private void RecreateWebCamTextureWithDefaults()
     {
       if (webCamDevice is not WebCamDevice valueOfWebCamDevice)
@@ -348,10 +340,8 @@ namespace Mediapipe.Unity
 
     private IEnumerator WaitForWebCamTexture()
     {
-      const int timeoutFrame = 2000;
+      const int timeoutFrame = 600;
       var count = 0;
-      Debug.Log("Waiting for WebCamTexture to start");
-      LogWebCamDiagnostics("[WebCamSource] Waiting for WebCamTexture to start:");
       yield return new WaitUntil(() => count++ > timeoutFrame || webCamTexture.width > 16);
 
       if (webCamTexture.width <= 16)
@@ -378,7 +368,6 @@ namespace Mediapipe.Unity
 
         if (webCamTexture == null || webCamTexture.width <= 16)
         {
-          LogWebCamDiagnostics("[WebCamSource] Failed to start WebCamTexture:");
           throw new TimeoutException("Failed to start WebCam (no frames received; camera may be busy, permission-blocked, or driver rejected the requested format)");
         }
       }

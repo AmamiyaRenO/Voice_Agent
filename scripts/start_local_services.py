@@ -101,6 +101,17 @@ def apply_env_file(path: Path, env: Dict[str, str]) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    repo_root = Path(__file__).resolve().parents[1]
+    tts_dir = repo_root / "python_voice_service"
+    tts_python_default = tts_dir / ".venv_tts" / "Scripts" / "python.exe"
+    tts_python = (
+        str(tts_python_default)
+        if tts_python_default.exists()
+        else os.environ.get("VOICE_AGENT_TTS_PYTHON", sys.executable)
+    )
+    default_piper_http_cmd = f"{tts_python} -m uvicorn piper_http:app --host 0.0.0.0 --port 5005"
+    default_qwen_http_cmd = f"{tts_python} -m uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5006"
+
     parser = argparse.ArgumentParser(
         description="Launch the messaging hub and local voice model in one command.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -129,7 +140,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--voice-dir",
         default=os.environ.get(
-            "VOICE_AGENT_VOICE_CWD", str(Path(__file__).resolve().parents[1] / "python_voice_service")
+            "VOICE_AGENT_VOICE_CWD", str(tts_dir)
         ),
         help="Working directory for the Python voice service command.",
     )
@@ -148,21 +159,33 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--piper-http-cmd",
-        default=os.environ.get(
-            "VOICE_AGENT_PIPER_HTTP_CMD",
-            "uvicorn piper_http:app --host 0.0.0.0 --port 5005",
-        ),
+        default=default_piper_http_cmd,
         help=(
             "Optional command used to start a lightweight Piper HTTP wrapper service. "
-            "Set VOICE_AGENT_PIPER_HTTP_CMD or pass --piper-http-cmd to enable it."
+            "Pass --piper-http-cmd to override."
         ),
     )
     parser.add_argument(
         "--piper-http-dir",
         default=os.environ.get(
-            "VOICE_AGENT_PIPER_HTTP_CWD", str(Path(__file__).resolve().parents[1] / "python_voice_service")
+            "VOICE_AGENT_PIPER_HTTP_CWD", str(tts_dir)
         ),
         help="Working directory for the Piper HTTP wrapper service.",
+    )
+    parser.add_argument(
+        "--qwen-http-cmd",
+        default=default_qwen_http_cmd,
+        help=(
+            "Optional command used to start a Qwen TTS HTTP wrapper service. "
+            "Pass --qwen-http-cmd to override."
+        ),
+    )
+    parser.add_argument(
+        "--qwen-http-dir",
+        default=os.environ.get(
+            "VOICE_AGENT_QWEN_HTTP_CWD", str(tts_dir)
+        ),
+        help="Working directory for the Qwen HTTP wrapper service.",
     )
     parser.add_argument(
         "--intent-cmd",
@@ -230,6 +253,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.piper_http_cmd
             else None
         )
+        qwen_http_command = (
+            parse_command(args.qwen_http_cmd, windows=windows)
+            if args.qwen_http_cmd
+            else None
+        )
         intent_command = (
             parse_command(args.intent_cmd, windows=windows)
             if args.intent_cmd
@@ -247,6 +275,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     voice_dir = Path(args.voice_dir).resolve()
     orchestrator_dir = Path(args.orchestrator_dir).resolve()
     piper_http_dir = Path(args.piper_http_dir).resolve()
+    qwen_http_dir = Path(args.qwen_http_dir).resolve()
     intent_dir = Path(args.intent_dir).resolve()
     dialog_dir = Path(args.dialog_dir).resolve()
 
@@ -258,6 +287,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error(f"Orchestrator directory does not exist: {orchestrator_dir}")
     if piper_http_command is not None and not piper_http_dir.exists():
         parser.error(f"Piper HTTP directory does not exist: {piper_http_dir}")
+    if qwen_http_command is not None and not qwen_http_dir.exists():
+        parser.error(f"Qwen HTTP directory does not exist: {qwen_http_dir}")
     if intent_command is not None and not intent_dir.exists():
         parser.error(f"Intent service directory does not exist: {intent_dir}")
     if dialog_command is not None and not dialog_dir.exists():
@@ -276,6 +307,33 @@ def main(argv: Optional[List[str]] = None) -> int:
     # IMPORTANT (AEC): Ensure dialog_service does NOT play audio locally via winsound.
     # TTS must be played through Unity so the AudioListener render reference is available for echo cancellation.
     env["DIALOG_SPEAK_AUDIO"] = "0"
+    # Latency-first defaults (can still be overridden by user env/.env).
+    env.setdefault("OLLAMA_MAX_TOKENS", "64")
+    env.setdefault("OLLAMA_KEEP_ALIVE", "30m")
+    # ASR defaults for NucBox M6 (no NVIDIA GPU): CPU-only faster-whisper tuning.
+    env.setdefault("WHISPER_DEVICE", "cpu")
+    env.setdefault("WHISPER_COMPUTE_TYPE", "int8")
+    env.setdefault("WHISPER_MODEL_PATH", "Systran/faster-whisper-large-v3-turbo")
+    env.setdefault("WHISPER_CPU_THREADS", "6")
+    env.setdefault("WHISPER_VAD_SILENCE_MS", "220")
+    env.setdefault("WHISPER_VAD_MIN_SPEECH_MS", "120")
+    env.setdefault("WHISPER_STREAM_OVERLAP_SECONDS", "0.4")
+    env.setdefault("WHISPER_STREAM_CONTEXT_CHARS", "120")
+    env.setdefault("WHISPER_LOW_CONFIDENCE_THRESHOLD", "-0.8")
+    env.setdefault("WHISPER_RETRY_BEAM_BONUS", "1")
+    env.setdefault("WHISPER_RETRY_MAX_BEAM", "6")
+    env.setdefault("WHISPER_RETRY_TEMPERATURES", "0.0,0.2")
+    env.setdefault("DIALOG_REPLY_COMPRESS", "1")
+    env.setdefault("DIALOG_MAX_REPLY_SENTENCES", "1")
+    env.setdefault("DIALOG_MAX_REPLY_CHARS", "0")
+    env.setdefault("DIALOG_MAX_REPLY_WORDS", "14")
+    env.setdefault("QWEN_TTS_SPEED_PROFILE", "fast")
+    env.setdefault("QWEN_TTS_SPEAKER", "Ryan")
+    env.setdefault("QWEN_TTS_INSTRUCT", "")
+    env.setdefault("QWEN_TTS_DO_SAMPLE", "0")
+    env.setdefault("QWEN_TTS_MAX_TEXT_CHARS", "90")
+    env.setdefault("QWEN_TTS_FAST_SHORT_MAX_NEW_TOKENS", "240")
+    env.setdefault("QWEN_TTS_WARMUP_TEXT", "Hello. I am ready.")
 
     hub_handle = ProcessHandle("messaging hub", hub_command, hub_dir)
     voice_handle = ProcessHandle("voice service", voice_command, voice_dir)
@@ -284,6 +342,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         handles.append(ProcessHandle("orchestrator", orchestrator_command, orchestrator_dir))
     if piper_http_command is not None:
         handles.append(ProcessHandle("piper-http", piper_http_command, piper_http_dir))
+    if qwen_http_command is not None:
+        handles.append(ProcessHandle("qwen-http", qwen_http_command, qwen_http_dir))
     if intent_command is not None:
         handles.append(ProcessHandle("intent-service", intent_command, intent_dir))
     if dialog_command is not None:

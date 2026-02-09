@@ -1982,16 +1982,34 @@ MonoBehaviour:
   wakeListeningProgressImage: {fileID: 0}
   wakeListeningCountdownText: {fileID: 0}
   piperSpeakUrl: http://127.0.0.1:5005/speak
+  qwenSpeakUrl: http://127.0.0.1:5006/speak
+  enableTrueStreamingTts: 1
+  piperSpeakStreamUrl: http://127.0.0.1:5005/speak_stream
+  ttsStreamSampleRate: 22050
+  ttsStreamStartBufferSeconds: 0.15
+  ttsStreamRingBufferSeconds: 20
+  fixedDialogTtsSpeaker: Ryan
+  fixedDialogTtsInstruct: friendly
+  forcePiperForDialogAnswers: 1
   wakeAcknowledgeUserText: 
   muteMicDuringTtsWhenAecInactive: 1
   enableTtsPseudoStreaming: 1
   ttsStreamSplitMinChars: 180
   ttsStreamChunkMaxChars: 220
   ttsStreamPrefetchNext: 1
+  qwenFirstChunkMaxChars: 70
+  qwenChunkMaxChars: 90
+  qwenTtsRequestTimeoutSeconds: 120
   autoEnableMqttPublishing: 1
   voiceTextTopic: robot/voice/text
   firstCommandListenSeconds: 3
   dropTtsEchoWhileSpeaking: 1
+  suppressAsrDuringTtsWindow: 1
+  allowCommandBargeInDuringTtsWindow: 0
+  muteMicDuringTtsEvenWithAec: 1
+  suppressAsrAfterTtsSeconds: 1.2
+  suppressAsrAfterManualTesterSpeak: 1
+  manualTesterSpeakSuppressSeconds: 8
   ttsEchoTailSeconds: 0.6
   ttsEchoTokenOverlapThreshold: 0.6
   ttsEchoMinChars: 10
@@ -2061,6 +2079,7 @@ MonoBehaviour:
   - en_US
   - es_ES
   defaultQwenSpeaker: Ryan
+  fixedQwenInstruct: friendly
   qwenSpeakers:
   - Ryan
   - Aiden
@@ -2080,11 +2099,13 @@ MonoBehaviour:
   httpPort: 8787
   autoStart: 1
   enableCameraPreview: 1
-  useExternalCameraTexture: 0
+  useExternalCameraTexture: 1
   externalCameraRawImage: {fileID: 2080068839}
   externalCameraRenderer: {fileID: 0}
   cameraWidth: 640
   cameraHeight: 480
+  preferredCameraDeviceName: 
+  preferredCameraDeviceIndex: -1
   cameraJpegQuality: 30
   cameraFps: 30
   availableDialogStyles:

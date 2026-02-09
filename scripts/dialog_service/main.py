@@ -4,15 +4,23 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import signal
 import sys
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Optional
 
 import httpx
 import paho.mqtt.client as mqtt
+
+_WHITESPACE_RE = re.compile(r"\s+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?])\s+")
+_TRAILING_CONNECTOR_RE = re.compile(
+    r"(?:\b(?:and|or|but|to|of|with|for|in|on|at|through|about|into|from)\b[\s,;:]*)+$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -61,6 +69,70 @@ def load_config() -> Config:
     return cfg
 
 
+def _env_int(key: str, default: int, floor: int = 0) -> int:
+    raw = os.environ.get(key)
+    if raw is None:
+        return max(floor, default)
+    try:
+        return max(floor, int(raw))
+    except Exception:
+        return max(floor, default)
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _compress_reply_for_latency(text: str, max_sentences: int, max_chars: int) -> str:
+    normalized = _WHITESPACE_RE.sub(" ", (text or "").strip())
+    if not normalized:
+        return ""
+
+    compact = normalized
+    if max_sentences > 0:
+        parts = [p.strip() for p in _SENTENCE_SPLIT_RE.split(compact) if p and p.strip()]
+        if parts:
+            compact = " ".join(parts[:max_sentences]).strip()
+
+    if max_chars > 0 and len(compact) > max_chars:
+        search_start = max(16, max_chars - 20)
+        split = -1
+        punctuation = ".!?;: "
+        for i in range(max_chars, search_start - 1, -1):
+            if compact[i] in punctuation:
+                split = i + 1
+                break
+        if split <= 0:
+            split = max_chars
+        compact = compact[:split].strip()
+
+    return compact
+
+
+def _trim_trailing_connectors(text: str) -> str:
+    if not text:
+        return ""
+    trimmed = _TRAILING_CONNECTOR_RE.sub("", text).strip()
+    return trimmed if trimmed else text.strip()
+
+
+def _compress_reply_by_words(text: str, max_words: int) -> str:
+    if max_words <= 0:
+        return (text or "").strip()
+    words = [w for w in (text or "").strip().split(" ") if w]
+    if len(words) <= max_words:
+        return (text or "").strip()
+    return " ".join(words[:max_words]).strip()
+
+
 class DialogService:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -72,6 +144,10 @@ class DialogService:
         self.tts_model: Optional[str] = None
         self.current_style: Optional[str] = None
         self.current_system_prompt: Optional[str] = None
+        self.reply_compress = _env_bool("DIALOG_REPLY_COMPRESS", True)
+        self.reply_max_sentences = _env_int("DIALOG_MAX_REPLY_SENTENCES", 1, floor=0)
+        self.reply_max_chars = _env_int("DIALOG_MAX_REPLY_CHARS", 0, floor=0)
+        self.reply_max_words = _env_int("DIALOG_MAX_REPLY_WORDS", 14, floor=0)
         if os.environ.get("DIALOG_SPEAK_AUDIO"):
             print("[dialog] NOTE: DIALOG_SPEAK_AUDIO is set but will be ignored (forced off for AEC).")
 
@@ -123,14 +199,13 @@ class DialogService:
         print(f"[dialog] subscribed {self.cfg.topics.style}")
 
     def _publish_answer(self, text: str, corr_id: Optional[str]) -> None:
-        self._publish_answer_ex(text=text, corr_id=corr_id, tts_instruct=None, tts_speaker=None)
+        self._publish_answer_ex(text=text, corr_id=corr_id, tts_speaker=None)
 
     def _publish_answer_ex(
         self,
         *,
         text: str,
         corr_id: Optional[str],
-        tts_instruct: Optional[str],
         tts_speaker: Optional[str],
     ) -> None:
         payload = {
@@ -139,8 +214,6 @@ class DialogService:
             "source": self.cfg.source_label,
             "corr_id": corr_id or uuid.uuid4().hex,
         }
-        if tts_instruct:
-            payload["tts_instruct"] = tts_instruct
         if tts_speaker:
             payload["tts_speaker"] = tts_speaker
         self.client.publish(self.cfg.topics.dialog_answer, json.dumps(payload))
@@ -172,7 +245,7 @@ class DialogService:
 
         topic = msg.topic or ""
 
-        # TTS 选项更新
+        # TTS 閫夐」鏇存柊
         if topic == self.cfg.topics.tts_options:
             voice = str(payload.get("voice") or "").strip()
             model = str(payload.get("model") or "").strip()
@@ -180,7 +253,7 @@ class DialogService:
             self.tts_model = model or None
             print(f"[dialog] tts options updated voice='{self.tts_voice}' model='{self.tts_model}'")
             return
-        # 风格/提示词更新
+        # Style prompt update
         if topic == self.cfg.topics.style:
             style = str(payload.get("style") or payload.get("value") or payload or "").strip()
             prompt = self._style_to_prompt(style)
@@ -197,26 +270,15 @@ class DialogService:
         try:
             url = f"{self.cfg.respond_api_url}{self.cfg.respond_endpoint}"
             system_prompt = self.current_system_prompt or None
-            # Require structured output so we can attach an emotion/style instruction for TTS.
-            # Keep it short to reduce LLM latency and avoid runaway JSON.
-            structured_rule = (
-                "Return ONLY valid JSON with keys: "
-                "\"text\" and \"tts_instruct\".\n"
-                "- text: what you say to the user (1-2 sentences, concise)\n"
-                "- tts_instruct: ONE short sentence describing speaking style/emotion/prosody "
-                "(e.g. \"Warm, encouraging coach tone; clear pauses; slightly upbeat.\")\n"
-                "No markdown, no extra keys, no extra commentary."
-            )
             if system_prompt:
-                system_prompt = system_prompt.strip() + "\n\n" + structured_rule
+                system_prompt = system_prompt.strip()
             else:
                 # Default persona if no style prompt was configured.
-                base = (
+                system_prompt = (
                     "You are Rachel, a supportive rehabilitation and exercise coach. "
                     "Be encouraging, concise, and proactive. Use simple sentences. "
-                    "Keep responses short (1–2 sentences) so they sound natural when spoken."
+                    "Prefer one short sentence (under 20 words) so speech starts quickly."
                 )
-                system_prompt = base + "\n\n" + structured_rule
 
             body = {"text": text, "system": system_prompt}
             resp = self.http.post(url, json=body)
@@ -230,47 +292,51 @@ class DialogService:
         if not reply_text:
             return
 
-        answer_text, tts_instruct = self._try_parse_structured_reply(reply_text)
+        answer_text = self._extract_answer_text(reply_text)
+        if self.reply_compress:
+            answer_text = _compress_reply_for_latency(
+                answer_text,
+                max_sentences=self.reply_max_sentences,
+                max_chars=self.reply_max_chars,
+            )
+            answer_text = _compress_reply_by_words(answer_text, self.reply_max_words)
+            answer_text = _trim_trailing_connectors(answer_text)
+        if not answer_text:
+            return
         # Prefer the TTS speaker selected by the UI (tts_options topic), if any.
         tts_speaker = self.tts_voice or None
 
         self._publish_answer_ex(
             text=answer_text,
             corr_id=corr_id,
-            tts_instruct=tts_instruct,
             tts_speaker=tts_speaker,
         )
         if self.cfg.speak_audio:
             self._tts_and_play(reply_text, corr_id)
 
     @staticmethod
-    def _try_parse_structured_reply(reply_text: str) -> Tuple[str, Optional[str]]:
+    def _extract_answer_text(reply_text: str) -> str:
         raw = (reply_text or "").strip()
         if not raw:
-            return "", None
+            return ""
         try:
             obj = json.loads(raw)
             if isinstance(obj, dict):
                 text = str(obj.get("text") or "").strip()
-                instruct = str(obj.get("tts_instruct") or "").strip()
                 if text:
-                    return text, (instruct or None)
+                    return text
         except Exception:
             pass
-        # Common fallback when models output two JSON strings on separate lines:
-        # "Answer text...."
-        # "Warm, gentle style..."
+        # Common fallback when models output a quoted answer as first line.
         try:
             lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-            if len(lines) >= 2:
+            if len(lines) >= 1:
                 t0 = json.loads(lines[0]) if lines[0].startswith('"') else lines[0]
-                t1 = json.loads(lines[1]) if lines[1].startswith('"') else lines[1]
                 if isinstance(t0, str) and t0.strip():
-                    return t0.strip(), (t1.strip() if isinstance(t1, str) and t1.strip() else None)
+                    return t0.strip()
         except Exception:
             pass
-        # Fallback: treat whole reply as text with no instruct.
-        return raw, None
+        return raw
 
 
 def main() -> int:

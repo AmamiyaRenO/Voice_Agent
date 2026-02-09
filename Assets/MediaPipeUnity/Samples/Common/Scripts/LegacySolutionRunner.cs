@@ -20,6 +20,8 @@ namespace Mediapipe.Unity.Sample
     private Coroutine _coroutine;
 
     public RunningMode runningMode;
+    [SerializeField, Tooltip("If true, stop webcam when app loses focus. Keep false when a background HTTP panel needs live frames.")]
+    private bool releaseWebCamWhenAppNotVisible = false;
 
     private bool _webCamReleasedForBackground;
     private Coroutine _webCamResumeCoroutine;
@@ -82,6 +84,11 @@ namespace Mediapipe.Unity.Sample
 
     private void HandleApplicationVisibilityChange(bool isVisible)
     {
+      if (!releaseWebCamWhenAppNotVisible)
+      {
+        return;
+      }
+
       if (!isActiveAndEnabled)
       {
         return;

@@ -8,6 +8,7 @@ using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.UI;
 using PiHub = global::PiMessageHub;
@@ -30,6 +31,8 @@ namespace RobotVoice
         [Header("Qwen TTS (Speakers)")]
         [SerializeField, Tooltip("Default Qwen speaker name used by the tester UI")]
         private string defaultQwenSpeaker = "Ryan";
+        [SerializeField, Tooltip("Fixed Qwen speaking style used for all Qwen speak requests.")]
+        private string fixedQwenInstruct = "friendly";
         [SerializeField, Tooltip("Speaker names shown in the Qwen dropdown (matches qwen-tts model card speaker ids)")]
         private string[] qwenSpeakers = new[]
         {
@@ -71,10 +74,24 @@ namespace RobotVoice
         private int cameraWidth = 640;
         [SerializeField, Tooltip("Requested camera height for preview")]
         private int cameraHeight = 480;
+        [SerializeField, Tooltip("Preferred camera device name (partial match, case-insensitive). Example: OBS Virtual Camera")]
+        private string preferredCameraDeviceName = "OBS Virtual Camera";
+        [SerializeField, Tooltip("Force camera by device index. -1 means auto-select.")]
+        private int preferredCameraDeviceIndex = -1;
         [SerializeField, Tooltip("JPEG quality (1-100) for /camera.jpg")]
-        private int cameraJpegQuality = 70;
+        private int cameraJpegQuality = 60;
         [SerializeField, Tooltip("Target frames per second for snapshot encoding")]
         private int cameraFps = 30;
+        [SerializeField, Tooltip("Keep Unity running when window is not focused so panel camera snapshots keep updating.")]
+        private bool forceRunInBackground = true;
+        [SerializeField, Tooltip("Reduce panel camera cost when using external texture so MediaPipe tracking remains smooth.")]
+        private bool optimizeExternalPreviewForTracking = true;
+        [SerializeField, Tooltip("Max FPS for external-texture preview when optimization is enabled.")]
+        private int externalPreviewMaxFps = 1;
+        [SerializeField, Tooltip("Max width for external-texture JPEG snapshots when optimization is enabled.")]
+        private int externalPreviewMaxWidth = 256;
+        [SerializeField, Tooltip("Only keep encoding frames for this many seconds after a panel camera request.")]
+        private float cameraClientActiveWindowSeconds = 3f;
 
         [Header("Dialogue")]
         [SerializeField, Tooltip("Available LLM dialogue styles exposed in the tester UI")]
@@ -96,14 +113,32 @@ namespace RobotVoice
         private byte[] _latestJpeg;
         private readonly object _cameraLock = new object();
         private float _nextCaptureRealtime;
+        private int _cameraFrameCount;
+        private float _cameraLastFrameTs = -1f;
+        private float _externalTextureSearchTs = -10f;
+        private int _lastExternalTextureWidth;
+        private int _lastExternalTextureHeight;
+        private string _lastExternalTextureType = string.Empty;
+        private long _cameraLastFrameUtcTicks;
+        private bool _hasExternalRawImageBinding;
+        private bool _hasExternalRendererBinding;
+        private bool _runInBackgroundEnabled;
+        private long _lastCameraClientRequestUtcTicks;
 
         private void Awake()
         {
             mainThreadContext = SynchronizationContext.Current;
+            if (forceRunInBackground && !Application.runInBackground)
+            {
+                Application.runInBackground = true;
+            }
+            _runInBackgroundEnabled = Application.runInBackground;
             ApplyModelsDirectoryEnvironmentOverride();
             activeVoiceCode = DetermineInitialVoiceCode();
             activeTtsModel = DetermineInitialTtsModel();
             activeQwenSpeaker = DetermineInitialQwenSpeaker();
+            _hasExternalRawImageBinding = externalCameraRawImage != null;
+            _hasExternalRendererBinding = externalCameraRenderer != null;
             if (autoStart)
             {
                 StartServer();
@@ -124,7 +159,6 @@ namespace RobotVoice
                     {
                         var expanded = System.Environment.ExpandEnvironmentVariables(value.Trim());
                         modelsDirectory = expanded;
-                        Debug.Log($"[UserTestPanel] modelsDirectory overridden by %{key}% = {expanded}");
                         break;
                     }
                 }
@@ -258,6 +292,10 @@ namespace RobotVoice
                     case "/index.html":
                         await RespondWithHtmlAsync(context.Response).ConfigureAwait(false);
                         return;
+                    case "/sdk":
+                    case "/sdk.html":
+                        await RespondWithSdkHtmlAsync(context.Response).ConfigureAwait(false);
+                        return;
                     case "/camera.mjpg":
                         await HandleCameraMjpegAsync(context).ConfigureAwait(false);
                         return;
@@ -300,6 +338,12 @@ namespace RobotVoice
                     case "/camera.jpg":
                         await HandleCameraJpegAsync(context).ConfigureAwait(false);
                         return;
+                    case "/api/camera/status":
+                        await HandleCameraStatusAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/camera/ping":
+                        await HandleCameraPingAsync(context).ConfigureAwait(false);
+                        return;
                     default:
                         context.Response.StatusCode = 404;
                         await WriteJsonAsync(context.Response, 404, "error", "not found").ConfigureAwait(false);
@@ -326,9 +370,18 @@ namespace RobotVoice
                 return;
             }
 
+            if (optimizeExternalPreviewForTracking && !IsCameraClientActive())
+            {
+                // No active viewer: skip camera encoding to avoid stealing CPU from tracking.
+                return;
+            }
+
             // Choose source: external texture (e.g., MediaPipe) or local webcam
             if (useExternalCameraTexture)
             {
+                var effectiveFps = optimizeExternalPreviewForTracking
+                    ? Mathf.Max(1, Mathf.Min(cameraFps, Mathf.Max(1, externalPreviewMaxFps)))
+                    : Mathf.Max(1, cameraFps);
                 if (Time.realtimeSinceStartup < _nextCaptureRealtime)
             {
                     return;
@@ -336,10 +389,26 @@ namespace RobotVoice
                 var tex = GetExternalCameraTexture();
                 if (tex == null)
                 {
+                    lock (_cameraLock)
+                    {
+                        _lastExternalTextureWidth = 0;
+                        _lastExternalTextureHeight = 0;
+                        _lastExternalTextureType = string.Empty;
+                    }
                     return;
                 }
+                if (tex is WebCamTexture extCam && !extCam.isPlaying)
+                {
+                    try { extCam.Play(); } catch { }
+                }
+                lock (_cameraLock)
+                {
+                    _lastExternalTextureWidth = tex.width;
+                    _lastExternalTextureHeight = tex.height;
+                    _lastExternalTextureType = tex.GetType().Name;
+                }
                 CaptureTextureToJpeg(tex);
-                _nextCaptureRealtime = Time.realtimeSinceStartup + Mathf.Max(0.01f, 1f / Mathf.Max(1, cameraFps));
+                _nextCaptureRealtime = Time.realtimeSinceStartup + Mathf.Max(0.01f, 1f / effectiveFps);
                 return;
             }
 
@@ -373,10 +442,17 @@ namespace RobotVoice
                 _cameraTexture.SetPixels32(_webcam.GetPixels32());
                 _cameraTexture.Apply(false, false);
                 var quality = Mathf.Clamp(cameraJpegQuality, 1, 100);
+                if (useExternalCameraTexture && optimizeExternalPreviewForTracking)
+                {
+                    quality = Mathf.Min(quality, 45);
+                }
                 var jpg = _cameraTexture.EncodeToJPG(quality);
                 lock (_cameraLock)
                 {
                     _latestJpeg = jpg;
+                    _cameraFrameCount++;
+                    _cameraLastFrameTs = Time.realtimeSinceStartup;
+                    _cameraLastFrameUtcTicks = DateTime.UtcNow.Ticks;
                 }
             }
             catch (System.Exception) { }
@@ -436,6 +512,7 @@ namespace RobotVoice
         {
             public string text;
             public string speaker;
+            public string voice;   // compatibility alias of speaker
             public string instruct;
         }
 
@@ -727,7 +804,7 @@ namespace RobotVoice
                 ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel");
                 var voiceToSend = requestedVoice;
                 var modelToSend = requestedModel;
-                PostToMainThread(() => voiceLauncher.TriggerSpeakForTester(text, voiceToSend, modelToSend, requestedInstruct));
+                PostToMainThread(() => voiceLauncher.TriggerManualTesterSpeak(text, voiceToSend, modelToSend, requestedInstruct));
                 await WriteJsonAsync(context.Response, 200, "ok", "playing locally").ConfigureAwait(false);
                 return;
             }
@@ -772,23 +849,27 @@ namespace RobotVoice
                 return;
             }
 
-            // Speaker for Qwen (maps to `voice=` query param on /speak).
-            var speaker = string.IsNullOrWhiteSpace(request.speaker) ? activeQwenSpeaker : request.speaker.Trim();
+            // Respect tester-selected speaker first, then fall back to remembered/default values.
+            var speaker = string.IsNullOrWhiteSpace(request.speaker) ? request.voice : request.speaker;
+            speaker = string.IsNullOrWhiteSpace(speaker) ? activeQwenSpeaker : speaker.Trim();
+            speaker = string.IsNullOrWhiteSpace(speaker) ? defaultQwenSpeaker : speaker;
             if (string.IsNullOrWhiteSpace(speaker))
             {
                 speaker = DetermineInitialQwenSpeaker();
             }
+            speaker = string.IsNullOrWhiteSpace(speaker) ? string.Empty : speaker.Trim();
 
             activeQwenSpeaker = speaker;
 
-            var instruct = string.IsNullOrWhiteSpace(request.instruct) ? string.Empty : request.instruct.Trim();
+            // Force a fixed style prompt for Qwen requests.
+            var instruct = string.IsNullOrWhiteSpace(fixedQwenInstruct) ? "friendly" : fixedQwenInstruct.Trim();
 
             // Always route through Unity playback so AEC/render tap works.
             if (voiceLauncher != null)
             {
                 ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel_qwen");
                 var speakerToSend = speaker;
-                PostToMainThread(() => voiceLauncher.TriggerSpeakForTester(text, speakerToSend, modelPath: null, ttsInstruct: instruct));
+                PostToMainThread(() => voiceLauncher.TriggerManualTesterSpeak(text, speakerToSend, modelPath: null, ttsInstruct: instruct));
                 await WriteJsonAsync(context.Response, 200, "ok", "playing locally (qwen)").ConfigureAwait(false);
                 return;
             }
@@ -884,8 +965,32 @@ namespace RobotVoice
             }
         }
 
+        private bool IsCameraClientActive()
+        {
+            var lastTicks = Interlocked.Read(ref _lastCameraClientRequestUtcTicks);
+            if (lastTicks <= 0)
+            {
+                return false;
+            }
+
+            var age = (DateTime.UtcNow.Ticks - lastTicks) / (double)TimeSpan.TicksPerSecond;
+            return age <= Mathf.Max(0.25f, cameraClientActiveWindowSeconds);
+        }
+
+        private void TouchCameraClientHeartbeat()
+        {
+            Interlocked.Exchange(ref _lastCameraClientRequestUtcTicks, DateTime.UtcNow.Ticks);
+        }
+
+        private async Task HandleCameraPingAsync(HttpListenerContext context)
+        {
+            TouchCameraClientHeartbeat();
+            await WriteJsonAsync(context.Response, 200, "ok", "camera heartbeat").ConfigureAwait(false);
+        }
+
         private async Task HandleCameraJpegAsync(HttpListenerContext context)
         {
+            TouchCameraClientHeartbeat();
             if (!enableCameraPreview)
             {
                 await WriteJsonAsync(context.Response, 503, "error", "camera preview disabled").ConfigureAwait(false);
@@ -924,8 +1029,59 @@ namespace RobotVoice
             }
         }
 
+        private async Task HandleCameraStatusAsync(HttpListenerContext context)
+        {
+            int texW;
+            int texH;
+            string texType;
+            bool hasRaw;
+            bool hasRenderer;
+            int bytes = 0;
+            int frameCount = 0;
+            long frameTicks = 0;
+            lock (_cameraLock)
+            {
+                bytes = _latestJpeg != null ? _latestJpeg.Length : 0;
+                texW = _lastExternalTextureWidth;
+                texH = _lastExternalTextureHeight;
+                texType = _lastExternalTextureType ?? string.Empty;
+                hasRaw = _hasExternalRawImageBinding;
+                hasRenderer = _hasExternalRendererBinding;
+                frameCount = _cameraFrameCount;
+                frameTicks = _cameraLastFrameUtcTicks;
+            }
+            var age = frameTicks <= 0 ? -1f : (float)TimeSpan.FromTicks(DateTime.UtcNow.Ticks - frameTicks).TotalSeconds;
+            var lastClientTicks = Interlocked.Read(ref _lastCameraClientRequestUtcTicks);
+            var clientAgeSec = lastClientTicks <= 0
+                ? -1f
+                : (float)TimeSpan.FromTicks(DateTime.UtcNow.Ticks - lastClientTicks).TotalSeconds;
+            var payload = new StringBuilder(256)
+                .Append("{\"status\":\"ok\"")
+                .Append(",\"mode\":\"").Append(useExternalCameraTexture ? "external" : "webcam").Append('"')
+                .Append(",\"has_external_raw_image\":").Append(hasRaw ? "true" : "false")
+                .Append(",\"has_external_renderer\":").Append(hasRenderer ? "true" : "false")
+                .Append(",\"run_in_background\":").Append(_runInBackgroundEnabled ? "true" : "false")
+                .Append(",\"client_active\":").Append(IsCameraClientActive() ? "true" : "false")
+                .Append(",\"texture_type\":\"").Append(EscapeJson(texType)).Append('"')
+                .Append(",\"texture_width\":").Append(texW)
+                .Append(",\"texture_height\":").Append(texH)
+                .Append(",\"frame_count\":").Append(frameCount)
+                .Append(",\"jpeg_bytes\":").Append(bytes)
+                .Append(",\"client_age_s\":").Append(clientAgeSec.ToString("0.00", CultureInfo.InvariantCulture))
+                .Append(",\"frame_age_s\":").Append(age.ToString("0.00", CultureInfo.InvariantCulture))
+                .Append('}')
+                .ToString();
+            var buffer = Encoding.UTF8.GetBytes(payload);
+            context.Response.StatusCode = 200;
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength64 = buffer.Length;
+            await context.Response.OutputStream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            context.Response.Close();
+        }
+
         private async Task HandleCameraMjpegAsync(HttpListenerContext context)
         {
+            TouchCameraClientHeartbeat();
             if (!enableCameraPreview)
             {
                 await WriteJsonAsync(context.Response, 503, "error", "camera preview disabled").ConfigureAwait(false);
@@ -945,6 +1101,7 @@ namespace RobotVoice
 
                 while (listener != null && context.Response.OutputStream != null)
                 {
+                    TouchCameraClientHeartbeat();
                     byte[] jpeg = null;
                     lock (_cameraLock)
                     {
@@ -1307,6 +1464,17 @@ namespace RobotVoice
             response.Close();
         }
 
+        private static async Task RespondWithSdkHtmlAsync(HttpListenerResponse response)
+        {
+            var html = BuildSdkPanelHtml();
+            var buffer = Encoding.UTF8.GetBytes(html);
+            response.StatusCode = 200;
+            response.ContentType = "text/html; charset=utf-8";
+            response.ContentLength64 = buffer.Length;
+            await response.OutputStream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            response.Close();
+        }
+
 
         private static string BuildPanelHtml()
         {
@@ -1351,6 +1519,7 @@ namespace RobotVoice
             sb.AppendLine(@"<body>");
             sb.AppendLine(@"<h1>Robot User Test Panel</h1>");
             sb.AppendLine(@"<p>Connect to the same Wi-Fi network as the host running Unity and open this page from any browser.</p>");
+            sb.AppendLine(@"<p><a href=""/sdk.html"" style=""color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;"">Open SDK Visualizer</a></p>");
             sb.AppendLine(@"<div class=""transcript-card"">");
             sb.AppendLine(@"<div class=""transcript-header"">");
             sb.AppendLine(@"<div>");
@@ -1422,7 +1591,11 @@ namespace RobotVoice
             sb.AppendLine(@"<section>");
             sb.AppendLine(@"<h2>Camera</h2>");
             sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:flex-start"">");
-            sb.AppendLine(@"<img id=""cameraView"" src=""/camera.mjpg"" alt=""camera"" style=""max-width:100%;width:640px;height:auto;border-radius:12px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 12px 36px rgba(0,0,0,0.35)""/>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<button onclick=""startCameraPreview()"">Start Preview</button>");
+            sb.AppendLine(@"<button onclick=""stopCameraPreview()"">Stop Preview</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<img id=""cameraView"" src=""/camera.jpg"" alt=""camera"" style=""max-width:100%;width:640px;height:auto;border-radius:12px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 12px 36px rgba(0,0,0,0.35)""/>");
             sb.AppendLine(@"<small style=""opacity:0.7"">If the image does not update, ensure the camera is available and enabled.</small>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"</section>");
@@ -1483,7 +1656,7 @@ namespace RobotVoice
             sb.AppendLine(@"<label for=""qwenSpeakerSelect"">Speaker</label>");
             sb.AppendLine(@"<select id=""qwenSpeakerSelect""></select>");
             sb.AppendLine(@"<label for=""qwenInstruct"">Emotion / Style</label>");
-            sb.AppendLine(@"<input id=""qwenInstruct"" type=""text"" placeholder=""e.g. Warm, gentle, reassuring; clear pauses."">");
+            sb.AppendLine(@"<input id=""qwenInstruct"" type=""text"" value=""friendly"" placeholder=""fixed by server"">");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:stretch;"">");
             sb.AppendLine(@"<textarea id=""qwenSpeakText"" placeholder=""Text to synthesize with Qwen TTS""></textarea>");
@@ -1704,9 +1877,167 @@ namespace RobotVoice
             sb.AppendLine(@"loadVoiceOptions();");
             sb.AppendLine(@"loadQwenOptions();");
             sb.AppendLine(@"let cameraPolling = false;");
-            sb.AppendLine(@"function startPolling(){ if(cameraPolling) return; cameraPolling = true; setInterval(() => { if(cameraView){ cameraView.src = '/camera.jpg?t=' + Date.now(); } }, 200);}");
-            sb.AppendLine(@"function initCamera(){ if(!cameraView) return; cameraView.src = '/camera.mjpg'; setTimeout(() => { if(!cameraPolling && (!cameraView.complete || cameraView.naturalWidth === 0)){ startPolling(); } }, 2000);}");
+            sb.AppendLine(@"let cameraSeq = 0;");
+            sb.AppendLine(@"let cameraLastLoadAt = 0;");
+            sb.AppendLine(@"let cameraLastSetAt = 0;");
+            sb.AppendLine(@"let cameraPullTimer = null;");
+            sb.AppendLine(@"let cameraWatchdogTimer = null;");
+            sb.AppendLine(@"let cameraHeartbeatTimer = null;");
+            sb.AppendLine(@"let cameraAutoStart = false;");
+            sb.AppendLine(@"function cameraHeartbeat(){");
+            sb.AppendLine(@"  fetch('/api/camera/ping',{method:'POST',cache:'no-store'}).catch(()=>{});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function pullCameraFrame(){");
+            sb.AppendLine(@"  if(!cameraView) return;");
+            sb.AppendLine(@"  cameraSeq++;");
+            sb.AppendLine(@"  cameraLastSetAt = Date.now();");
+            sb.AppendLine(@"  cameraView.src = '/camera.jpg?t=' + cameraLastSetAt + '&n=' + cameraSeq;");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function cameraWatchdog(){");
+            sb.AppendLine(@"  if(!cameraView) return;");
+            sb.AppendLine(@"  const now = Date.now();");
+            sb.AppendLine(@"  if(cameraLastSetAt > 0 && (now - cameraLastSetAt) > 2200 && (now - cameraLastLoadAt) > 2200){");
+            sb.AppendLine(@"    pullCameraFrame();");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function startPolling(){");
+            sb.AppendLine(@"  if(cameraPolling) return;");
+            sb.AppendLine(@"  cameraPolling = true;");
+            sb.AppendLine(@"  cameraView.onload = () => { cameraLastLoadAt = Date.now(); };");
+            sb.AppendLine(@"  cameraView.onerror = () => { setTimeout(pullCameraFrame, 250); };");
+            sb.AppendLine(@"  cameraHeartbeat();");
+            sb.AppendLine(@"  pullCameraFrame();");
+            sb.AppendLine(@"  cameraPullTimer = setInterval(pullCameraFrame, 1000);");
+            sb.AppendLine(@"  cameraWatchdogTimer = setInterval(cameraWatchdog, 1000);");
+            sb.AppendLine(@"  cameraHeartbeatTimer = setInterval(cameraHeartbeat, 1000);");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function stopPolling(){");
+            sb.AppendLine(@"  cameraPolling = false;");
+            sb.AppendLine(@"  if(cameraPullTimer){ clearInterval(cameraPullTimer); cameraPullTimer = null; }");
+            sb.AppendLine(@"  if(cameraWatchdogTimer){ clearInterval(cameraWatchdogTimer); cameraWatchdogTimer = null; }");
+            sb.AppendLine(@"  if(cameraHeartbeatTimer){ clearInterval(cameraHeartbeatTimer); cameraHeartbeatTimer = null; }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function startCameraPreview(){");
+            sb.AppendLine(@"  cameraAutoStart = true;");
+            sb.AppendLine(@"  startPolling();");
+            sb.AppendLine(@"  pullCameraFrame();");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function stopCameraPreview(){");
+            sb.AppendLine(@"  cameraAutoStart = false;");
+            sb.AppendLine(@"  stopPolling();");
+            sb.AppendLine(@"  if(cameraView){ cameraView.removeAttribute('src'); }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"document.addEventListener('visibilitychange', () => {");
+            sb.AppendLine(@"  if(document.hidden){");
+            sb.AppendLine(@"    stopPolling();");
+            sb.AppendLine(@"    return;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  if(cameraAutoStart){");
+            sb.AppendLine(@"    startPolling();");
+            sb.AppendLine(@"    setTimeout(pullCameraFrame, 30);");
+            sb.AppendLine(@"    setTimeout(pullCameraFrame, 200);");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"});");
+            sb.AppendLine(@"window.addEventListener('beforeunload', stopPolling);");
+            sb.AppendLine(@"function initCamera(){ if(!cameraView) return; if(!document.hidden && cameraAutoStart){ startPolling(); } }");
             sb.AppendLine(@"initCamera();");
+            sb.AppendLine(@"</script>");
+            sb.AppendLine(@"</body>");
+            sb.AppendLine(@"</html>");
+            return sb.ToString();
+        }
+
+        private static string BuildSdkPanelHtml()
+        {
+            var sb = new StringBuilder(4096);
+            sb.AppendLine(@"<!DOCTYPE html>");
+            sb.AppendLine(@"<html lang=""en"">");
+            sb.AppendLine(@"<head>");
+            sb.AppendLine(@"<meta charset=""utf-8"">");
+            sb.AppendLine(@"<title>Voice Agent SDK Visualizer</title>");
+            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
+            sb.AppendLine(@"<style>");
+            sb.AppendLine(@"body{font-family:'Segoe UI',sans-serif;margin:0;background:#0b1220;color:#e2e8f0;padding:1.25rem;}");
+            sb.AppendLine(@"h1{margin:.25rem 0 .5rem 0;font-size:1.35rem;} p{opacity:.9;}");
+            sb.AppendLine(@".wrap{display:grid;grid-template-columns:320px 1fr;gap:1rem;}");
+            sb.AppendLine(@".card{background:#111a2e;border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:1rem;}");
+            sb.AppendLine(@"label{display:block;font-size:.82rem;opacity:.85;margin:.35rem 0;}");
+            sb.AppendLine(@"select,input,textarea,button{width:100%;box-sizing:border-box;border-radius:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;padding:.6rem;}");
+            sb.AppendLine(@"textarea{min-height:240px;font-family:Consolas,monospace;font-size:.85rem;}");
+            sb.AppendLine(@"button{background:#2563eb;border:none;font-weight:700;cursor:pointer;margin-top:.6rem;}");
+            sb.AppendLine(@"button.secondary{background:#334155;}");
+            sb.AppendLine(@"pre{background:#020617;border:1px solid rgba(148,163,184,.25);padding:.75rem;border-radius:8px;overflow:auto;min-height:260px;}");
+            sb.AppendLine(@".mono{font-family:Consolas,monospace;font-size:.82rem;}");
+            sb.AppendLine(@"@media(max-width:900px){.wrap{grid-template-columns:1fr;}}");
+            sb.AppendLine(@"</style>");
+            sb.AppendLine(@"</head>");
+            sb.AppendLine(@"<body>");
+            sb.AppendLine(@"<h1>SDK Visualizer</h1>");
+            sb.AppendLine(@"<p>This page calls the same <span class=""mono"">/api/*</span> routes as <span class=""mono"">python_sdk/voice_agent_sdk/client.py</span>.</p>");
+            sb.AppendLine(@"<p><a href=""/index.html"" style=""color:#93c5fd;"">Back to User Panel</a></p>");
+            sb.AppendLine(@"<div class=""wrap"">");
+            sb.AppendLine(@"<div class=""card"">");
+            sb.AppendLine(@"<label for=""sdkMethod"">SDK Method</label>");
+            sb.AppendLine(@"<select id=""sdkMethod""></select>");
+            sb.AppendLine(@"<label for=""sdkEndpoint"">HTTP Endpoint</label>");
+            sb.AppendLine(@"<input id=""sdkEndpoint"" readonly>");
+            sb.AppendLine(@"<label for=""sdkPayload"">JSON Payload</label>");
+            sb.AppendLine(@"<textarea id=""sdkPayload""></textarea>");
+            sb.AppendLine(@"<button onclick=""invokeSdk()"">Invoke</button>");
+            sb.AppendLine(@"<button class=""secondary"" onclick=""resetPayload()"">Reset Payload</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""card"">");
+            sb.AppendLine(@"<div class=""mono"" id=""sdkStatus"">Ready.</div>");
+            sb.AppendLine(@"<h3>Response</h3>");
+            sb.AppendLine(@"<pre id=""sdkResp""></pre>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<script>");
+            sb.AppendLine(@"const sdkMap = {");
+            sb.AppendLine(@"  'speak(text,voice,model,speed,volume)': { endpoint:'/api/speak', payload:{ text:'Hello from SDK visualizer', voice:'en_US', model:'', speed:1.0, volume:1.0 } },");
+            sb.AppendLine(@"  'qwen_speak(text,speaker,instruct)': { endpoint:'/api/qwen/speak', payload:{ text:'Hello from Qwen', speaker:'Ryan', instruct:'friendly' } },");
+            sb.AppendLine(@"  'set_tts_options(voice,model)': { endpoint:'/api/voice', payload:{ action:'set', voice:'en_US' } },");
+            sb.AppendLine(@"  'set_tts_model(model)': { endpoint:'/api/voice', payload:{ action:'set_model', model:'' } },");
+            sb.AppendLine(@"  'set_dialog_style(style)': { endpoint:'/api/llm/style', payload:{ style:'Supportive' } },");
+            sb.AppendLine(@"  'launch_game(name)': { endpoint:'/api/game', payload:{ action:'launch', name:'cornhole' } },");
+            sb.AppendLine(@"  'exit_game()': { endpoint:'/api/game', payload:{ action:'exit' } },");
+            sb.AppendLine(@"  'face_preset(mode,seconds)': { endpoint:'/api/face', payload:{ mode:'happy', seconds:3 } },");
+            sb.AppendLine(@"  'flower_open()': { endpoint:'/api/flower', payload:{ action:'open' } },");
+            sb.AppendLine(@"  'led_breathe(color,brightness,period,duration)': { endpoint:'/api/led', payload:{ mode:'breathe', color:'#00BFFF', brightness:0.8, period:2, duration:2 } }");
+            sb.AppendLine(@"};");
+            sb.AppendLine(@"const methodEl = document.getElementById('sdkMethod');");
+            sb.AppendLine(@"const endpointEl = document.getElementById('sdkEndpoint');");
+            sb.AppendLine(@"const payloadEl = document.getElementById('sdkPayload');");
+            sb.AppendLine(@"const statusEl = document.getElementById('sdkStatus');");
+            sb.AppendLine(@"const respEl = document.getElementById('sdkResp');");
+            sb.AppendLine(@"const methods = Object.keys(sdkMap);");
+            sb.AppendLine(@"methodEl.innerHTML = methods.map(m => `<option value=""${m}"">${m}</option>`).join('');");
+            sb.AppendLine(@"function syncMethod(){");
+            sb.AppendLine(@"  const m = methodEl.value;");
+            sb.AppendLine(@"  const cfg = sdkMap[m];");
+            sb.AppendLine(@"  endpointEl.value = cfg.endpoint;");
+            sb.AppendLine(@"  payloadEl.value = JSON.stringify(cfg.payload, null, 2);");
+            sb.AppendLine(@"  respEl.textContent = '';");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function resetPayload(){ syncMethod(); }");
+            sb.AppendLine(@"async function invokeSdk(){");
+            sb.AppendLine(@"  const endpoint = endpointEl.value;");
+            sb.AppendLine(@"  let payload = {};");
+            sb.AppendLine(@"  try { payload = JSON.parse(payloadEl.value || '{}'); }");
+            sb.AppendLine(@"  catch(err){ statusEl.textContent = 'Invalid JSON: ' + err; return; }");
+            sb.AppendLine(@"  statusEl.textContent = 'POST ' + endpoint + ' ...';");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch(endpoint,{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });");
+            sb.AppendLine(@"    const txt = await resp.text();");
+            sb.AppendLine(@"    statusEl.textContent = `HTTP ${resp.status} ${resp.statusText}`;");
+            sb.AppendLine(@"    try { respEl.textContent = JSON.stringify(JSON.parse(txt), null, 2); }");
+            sb.AppendLine(@"    catch { respEl.textContent = txt; }");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'Request failed: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"methodEl.addEventListener('change', syncMethod);");
+            sb.AppendLine(@"syncMethod();");
             sb.AppendLine(@"</script>");
             sb.AppendLine(@"</body>");
             sb.AppendLine(@"</html>");
@@ -1791,10 +2122,25 @@ namespace RobotVoice
                 {
                     dev = availableSources[0];
                 }
+
+                if (preferredCameraDeviceIndex >= 0 && preferredCameraDeviceIndex < availableSources.Length)
+                {
+                    dev = availableSources[preferredCameraDeviceIndex];
+                }
+                else if (!string.IsNullOrWhiteSpace(preferredCameraDeviceName))
+                {
+                    var preferredName = preferredCameraDeviceName.Trim();
+                    var preferred = availableSources.FirstOrDefault(d =>
+                        !string.IsNullOrEmpty(d.name) &&
+                        d.name.IndexOf(preferredName, StringComparison.OrdinalIgnoreCase) >= 0);
+                    if (!string.IsNullOrEmpty(preferred.name))
+                    {
+                        dev = preferred;
+                    }
+                }
                 _webcam = new WebCamTexture(dev.name, Mathf.Max(16, cameraWidth), Mathf.Max(16, cameraHeight), Mathf.Max(1, cameraFps));
                 _webcam.Play();
                 _nextCaptureRealtime = Time.realtimeSinceStartup;
-                Debug.Log($"[UserTestPanel] Camera started: {dev.name} {cameraWidth}x{cameraHeight}@{cameraFps}");
             }
             catch (System.Exception ex)
             {
@@ -1834,6 +2180,77 @@ namespace RobotVoice
                 var tex = externalCameraRenderer.material.mainTexture;
                 if (tex != null) return tex;
             }
+            if (Time.realtimeSinceStartup - _externalTextureSearchTs > 1f)
+            {
+                _externalTextureSearchTs = Time.realtimeSinceStartup;
+                var allRawImages = Resources.FindObjectsOfTypeAll<RawImage>();
+                if (allRawImages != null && allRawImages.Length > 0)
+                {
+                    RawImage preferred = null;
+                    foreach (var ri in allRawImages)
+                    {
+                        if (ri == null || ri.texture == null) continue;
+                        var go = ri.gameObject;
+                        if (go == null || !go.activeInHierarchy) continue;
+                        var n = (go.name ?? string.Empty).ToLowerInvariant();
+                        if (n.Contains("annotatable") || n.Contains("mediapipe") || n.Contains("screen"))
+                        {
+                            preferred = ri;
+                            break;
+                        }
+                        if (preferred == null)
+                        {
+                            preferred = ri;
+                        }
+                    }
+                    if (preferred != null)
+                    {
+                        externalCameraRawImage = preferred;
+                        _hasExternalRawImageBinding = true;
+                        return preferred.texture;
+                    }
+                }
+
+                // Reflection fallback: read texture from MediaPipe image source directly.
+                try
+                {
+                    Texture mpTex = TryGetMediaPipeImageSourceTexture();
+                    if (mpTex != null)
+                    {
+                        return mpTex;
+                    }
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        private static Texture TryGetMediaPipeImageSourceTexture()
+        {
+            var providerType = FindType("Mediapipe.Unity.Sample.ImageSourceProvider");
+            if (providerType == null) return null;
+            var imageSourceProp = providerType.GetProperty("ImageSource", BindingFlags.Public | BindingFlags.Static);
+            if (imageSourceProp == null) return null;
+            var imageSourceObj = imageSourceProp.GetValue(null, null);
+            if (imageSourceObj == null) return null;
+            var m = imageSourceObj.GetType().GetMethod("GetCurrentTexture", BindingFlags.Public | BindingFlags.Instance);
+            if (m == null) return null;
+            return m.Invoke(imageSourceObj, null) as Texture;
+        }
+
+        private static Type FindType(string fullName)
+        {
+            if (string.IsNullOrWhiteSpace(fullName)) return null;
+            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            foreach (var asm in assemblies)
+            {
+                try
+                {
+                    var t = asm.GetType(fullName, false);
+                    if (t != null) return t;
+                }
+                catch { }
+            }
             return null;
         }
 
@@ -1843,27 +2260,56 @@ namespace RobotVoice
             {
                 var width = Mathf.Max(2, source.width);
                 var height = Mathf.Max(2, source.height);
-                if (_cameraTexture == null || _cameraTexture.width != width || _cameraTexture.height != height)
+                var targetWidth = width;
+                var targetHeight = height;
+                var isWebCamSource = source is WebCamTexture;
+                if (useExternalCameraTexture && optimizeExternalPreviewForTracking && !isWebCamSource)
                 {
-                    if (_cameraTexture != null) Destroy(_cameraTexture);
-                    _cameraTexture = new Texture2D(width, height, TextureFormat.RGB24, false);
+                    var maxWidth = Mathf.Max(64, externalPreviewMaxWidth);
+                    if (targetWidth > maxWidth)
+                    {
+                        var scale = maxWidth / (float)targetWidth;
+                        targetWidth = maxWidth;
+                        targetHeight = Mathf.Max(2, Mathf.RoundToInt(targetHeight * scale));
+                    }
                 }
 
-                // Blit to a temporary RenderTexture then ReadPixels to CPU
-                var tmp = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
-                Graphics.Blit(source, tmp);
-                var prev = RenderTexture.active;
-                RenderTexture.active = tmp;
-                _cameraTexture.ReadPixels(new Rect(0, 0, width, height), 0, 0, false);
-                _cameraTexture.Apply(false, false);
-                RenderTexture.active = prev;
-                RenderTexture.ReleaseTemporary(tmp);
+                if (_cameraTexture == null || _cameraTexture.width != targetWidth || _cameraTexture.height != targetHeight)
+                {
+                    if (_cameraTexture != null) Destroy(_cameraTexture);
+                    _cameraTexture = new Texture2D(targetWidth, targetHeight, TextureFormat.RGB24, false);
+                }
+
+                if (source is WebCamTexture webcamTexture && targetWidth == width && targetHeight == height)
+                {
+                    _cameraTexture.SetPixels32(webcamTexture.GetPixels32());
+                    _cameraTexture.Apply(false, false);
+                }
+                else
+                {
+                    // Blit to a temporary RenderTexture then ReadPixels to CPU.
+                    var tmp = RenderTexture.GetTemporary(targetWidth, targetHeight, 0, RenderTextureFormat.ARGB32);
+                    Graphics.Blit(source, tmp);
+                    var prev = RenderTexture.active;
+                    RenderTexture.active = tmp;
+                    _cameraTexture.ReadPixels(new Rect(0, 0, targetWidth, targetHeight), 0, 0, false);
+                    _cameraTexture.Apply(false, false);
+                    RenderTexture.active = prev;
+                    RenderTexture.ReleaseTemporary(tmp);
+                }
 
                 var quality = Mathf.Clamp(cameraJpegQuality, 1, 100);
+                if (useExternalCameraTexture && optimizeExternalPreviewForTracking)
+                {
+                    quality = Mathf.Min(quality, 45);
+                }
                 var jpg = _cameraTexture.EncodeToJPG(quality);
                 lock (_cameraLock)
                 {
                     _latestJpeg = jpg;
+                    _cameraFrameCount++;
+                    _cameraLastFrameTs = Time.realtimeSinceStartup;
+                    _cameraLastFrameUtcTicks = DateTime.UtcNow.Ticks;
                 }
             }
             catch (System.Exception) { }

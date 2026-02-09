@@ -17,8 +17,8 @@ namespace RobotVoice.Audio
         public float bufferSeconds = 2.0f;
 
         [Header("Diagnostics")]
-        [Tooltip("If true, logs periodic render stats (RMS/max).")]
-        public bool verboseLogging = true;
+        [Tooltip("If true, logs render stats (RMS/max).")]
+        public bool verboseLogging = false;
 
         private readonly object _lock = new object();
         private float[] _ring;
@@ -28,7 +28,6 @@ namespace RobotVoice.Audio
         private int _channels;
         private int _sampleRate;
         private float _lastLogTime;
-        private bool _loggedFirstCallback;
         private volatile float _lastRms;
         private volatile float _lastPeak;
         private volatile int _lastChannels;
@@ -183,19 +182,7 @@ namespace RobotVoice.Audio
             {
                 return;
             }
-
-            var now = Time.realtimeSinceStartup;
-            if (!_loggedFirstCallback)
-            {
-                _loggedFirstCallback = true;
-                Debug.Log($"[RenderTap] First audio callback on '{gameObject.name}'. sr={_lastSampleRate} ch={_lastChannels} rms={_lastRms:0.0000} max={_lastPeak:0.0000}");
-            }
-
-            if (now - _lastLogTime > 2.0f)
-            {
-                _lastLogTime = now;
-                Debug.Log($"[RenderTap] '{gameObject.name}' sr={_lastSampleRate} ch={_lastChannels} rms={_lastRms:0.0000} max={_lastPeak:0.0000} bufferedSamples={AvailableSamples}");
-            }
+            _lastLogTime = Time.realtimeSinceStartup;
         }
     }
 }

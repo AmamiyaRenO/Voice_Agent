@@ -14,6 +14,7 @@ import re
 import asyncio
 import logging
 import time
+from collections import deque
 from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -269,6 +270,14 @@ def _environment_bool(key: str, default: bool) -> bool:
     return default
 
 
+RESPOND_METRICS_SIZE = max(10, _environment_int("RESPOND_METRICS_SIZE", 200))
+RESPOND_METRICS = deque(maxlen=RESPOND_METRICS_SIZE)
+RESPOND_METRICS_LOCK = asyncio.Lock()
+RESPOND_METRICS_STARTED_AT = time.perf_counter()
+RESPOND_METRICS_TOTAL = 0
+RESPOND_METRICS_ERRORS = 0
+
+
 WHISPER_NO_REPEAT_NGRAM_SIZE = _positive_or_zero(
     _environment_int("WHISPER_NO_REPEAT_NGRAM_SIZE", 4)
 )
@@ -494,6 +503,7 @@ def _piper_http_base_url() -> str:
 
 
 async def _generate_coach_reply(user_text: str, system_override: Optional[str] = None) -> str:
+    keep_alive = _environment("OLLAMA_KEEP_ALIVE", "30m")
     payload = {
         "model": _ollama_model(),
         "system": (system_override or "").strip() or _ollama_system_prompt(),
@@ -503,10 +513,12 @@ async def _generate_coach_reply(user_text: str, system_override: Optional[str] =
             "temperature": _environment_float("OLLAMA_TEMPERATURE", 0.6),
             "top_p": _environment_float("OLLAMA_TOP_P", 0.9),
             "top_k": _environment_int("OLLAMA_TOP_K", 40),
-            "num_predict": _environment_int("OLLAMA_MAX_TOKENS", 128),
+            "num_predict": _environment_int("OLLAMA_MAX_TOKENS", 80),
             "repeat_penalty": _environment_float("OLLAMA_REPEAT_PENALTY", 1.1),
         },
     }
+    if keep_alive:
+        payload["keep_alive"] = keep_alive
 
     url = f"{_ollama_base_url()}/api/generate"
 
@@ -1312,6 +1324,29 @@ async def transcribe(
     return JSONResponse(response)
 
 
+async def _record_respond_metric(
+    *,
+    user_chars: int,
+    reply_chars: int,
+    elapsed_ms: float,
+    ok: bool,
+) -> None:
+    global RESPOND_METRICS_TOTAL, RESPOND_METRICS_ERRORS
+    async with RESPOND_METRICS_LOCK:
+        RESPOND_METRICS_TOTAL += 1
+        if not ok:
+            RESPOND_METRICS_ERRORS += 1
+        RESPOND_METRICS.append(
+            {
+                "ts": time.time(),
+                "user_chars": int(user_chars),
+                "reply_chars": int(reply_chars),
+                "elapsed_ms": round(float(elapsed_ms), 2),
+                "ok": bool(ok),
+            }
+        )
+
+
 @app.post("/respond", response_model=RespondResponse)
 async def respond(payload: RespondRequest) -> RespondResponse:
     start_time = time.perf_counter()
@@ -1322,12 +1357,63 @@ async def respond(payload: RespondRequest) -> RespondResponse:
     try:
         reply = await _generate_coach_reply(user_text, system_override=(payload.system or None))
     except OllamaError as exc:
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        await _record_respond_metric(
+            user_chars=len(user_text),
+            reply_chars=0,
+            elapsed_ms=elapsed_ms,
+            ok=False,
+        )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     generation_seconds = round(time.perf_counter() - start_time, 4)
     logger.info("LLM response generated in %.3fs", generation_seconds)
+    await _record_respond_metric(
+        user_chars=len(user_text),
+        reply_chars=len(reply),
+        elapsed_ms=generation_seconds * 1000.0,
+        ok=True,
+    )
 
     return RespondResponse(text=reply, generation_seconds=generation_seconds)
+
+
+@app.get("/respond/metrics")
+async def respond_metrics() -> dict:
+    async with RESPOND_METRICS_LOCK:
+        entries = list(RESPOND_METRICS)
+        total = RESPOND_METRICS_TOTAL
+        errors = RESPOND_METRICS_ERRORS
+
+    elapsed_values = [float(e.get("elapsed_ms", 0.0)) for e in entries]
+    elapsed_sorted = sorted(elapsed_values)
+    count = len(elapsed_sorted)
+
+    def _percentile(p: float) -> float:
+        if count == 0:
+            return 0.0
+        idx = int(round((count - 1) * p))
+        idx = max(0, min(count - 1, idx))
+        return float(elapsed_sorted[idx])
+
+    avg_ms = (sum(elapsed_values) / len(elapsed_values)) if elapsed_values else 0.0
+    uptime = time.perf_counter() - RESPOND_METRICS_STARTED_AT
+    return {
+        "status": "ok",
+        "uptime_seconds": round(float(uptime), 2),
+        "totals": {
+            "requests": int(total),
+            "errors": int(errors),
+            "error_ratio": round((errors / total), 4) if total > 0 else 0.0,
+        },
+        "recent": {
+            "window_size": int(count),
+            "avg_ms": round(float(avg_ms), 2),
+            "p50_ms": round(_percentile(0.50), 2),
+            "p95_ms": round(_percentile(0.95), 2),
+            "last": entries[-20:],
+        },
+    }
 
 
 

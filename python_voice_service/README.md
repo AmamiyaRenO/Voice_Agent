@@ -108,9 +108,12 @@ Unity client. The `VoiceGameLauncher` script forwards both launch/exit
 intents and general wake-word commands to `/respond`, so the coach can
 answer free-form questions alongside the existing keyword workflows.
 
-## TTS backends on port 5005 (Piper vs Qwen3-TTS)
+## TTS backends (Piper main + Qwen test)
 
-Unity fetches speech audio via `GET http://127.0.0.1:5005/speak?text=...` (WAV).
+Unity can fetch speech from:
+
+- Piper main: `GET http://127.0.0.1:5005/speak?text=...`
+- Qwen test: `GET http://127.0.0.1:5006/speak?text=...`
 This repo ships two compatible HTTP wrappers:
 
 - `piper_http.py`: wraps the Piper CLI (`piper.exe`) and ONNX voice models.
@@ -121,27 +124,41 @@ Both expose:
 - `GET /speak?text=...&voice=...&instruct=...` -> `audio/wav`
 - `POST /speak` -> base64 WAV JSON (optional)
 
-### Switching quickly (no Unity changes)
+Piper wrapper additionally exposes true streaming:
 
-The local launcher (`scripts/start_local_services.py`) reads `VOICE_AGENT_PIPER_HTTP_CMD`.
-Point it at whichever wrapper you want to run on port 5005.
+- `GET /speak_stream?text=...&voice=...` -> chunked `audio/L16` (PCM s16le mono) with `X-Audio-Sample-Rate` header.
 
-Piper:
+### Start both backends together (recommended)
+
+The local launcher now supports two independent commands:
+
+- `VOICE_AGENT_PIPER_HTTP_CMD` -> Piper on `5005`
+- `VOICE_AGENT_QWEN_HTTP_CMD` -> Qwen on `5006`
+
+Example:
 
 ```powershell
 $env:VOICE_AGENT_PIPER_HTTP_CMD="uvicorn piper_http:app --host 0.0.0.0 --port 5005"
-```
-
-Qwen (CPU-only friendly):
-
-```powershell
-$env:VOICE_AGENT_PIPER_HTTP_CMD="uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5005"
+$env:VOICE_AGENT_QWEN_HTTP_CMD="uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5006"
 $env:QWEN_TTS_MODEL="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 $env:QWEN_TTS_DEVICE_MAP="cpu"
 $env:QWEN_TTS_DTYPE="float32"
 $env:QWEN_TTS_CACHE_SIZE="8"
 $env:QWEN_TTS_NUM_THREADS="4"
 $env:QWEN_TTS_NUM_INTEROP="1"
+$env:QWEN_TTS_SPEED_PROFILE="fast"
+$env:QWEN_TTS_MAX_TEXT_CHARS="90"
+$env:QWEN_TTS_FAST_SHORT_MAX_NEW_TOKENS="240"
+python scripts/start_local_services.py
+```
+
+ASR on NucBox M6 (no NVIDIA, CPU-only recommended):
+
+```powershell
+$env:WHISPER_DEVICE="cpu"
+$env:WHISPER_COMPUTE_TYPE="int8"
+$env:WHISPER_MODEL_PATH="Systran/faster-whisper-large-v3-turbo"
+$env:WHISPER_CPU_THREADS="6"
 ```
 
 Performance knobs (optional):
@@ -150,6 +167,27 @@ Performance knobs (optional):
 - `QWEN_TTS_NUM_THREADS` / `QWEN_TTS_NUM_INTEROP`: control Torch CPU thread usage.
 - `QWEN_TTS_MATMUL_PRECISION`: e.g. `high`, `medium`, `highest` (Torch matmul precision).
 - `QWEN_TTS_TF32`: set to `1` to enable TF32 on CUDA GPUs.
+- `QWEN_TTS_WARMUP_TEXT`: optional startup warmup sentence (reduces first-request latency).
+- `QWEN_TTS_MIN_NEW_TOKENS` / `QWEN_TTS_MAX_NEW_TOKENS`: clamp generation length.
+- `QWEN_TTS_NEW_TOKENS_BASE` / `QWEN_TTS_NEW_TOKENS_PER_CHAR`: dynamic token cap by text length.
+- `QWEN_TTS_DO_SAMPLE`: `0` (faster, deterministic) or `1` (more expressive, usually slower).
+- `QWEN_TTS_TOP_P` / `QWEN_TTS_TOP_K` / `QWEN_TTS_TEMPERATURE`: used when sampling is enabled.
+- `QWEN_TTS_SPEED_PROFILE`: `fast` / `balanced` / `quality` (changes token budget defaults).
+- `QWEN_TTS_MAX_TEXT_CHARS`: truncate overly long text before synthesis (latency guardrail, `0` disables).
+- `QWEN_TTS_FAST_SHORT_TEXT_LIMIT` / `QWEN_TTS_FAST_SHORT_MAX_NEW_TOKENS`: extra token cap for short texts in `fast` profile.
+
+Metrics:
+
+- `GET /metrics` on port `5005` returns recent latency stats (`avg/p50/p95`) plus
+  `avg_sem_wait_ms` and `avg_synth_ms` to distinguish queue wait vs model time.
+- `GET /respond/metrics` on port `8000` returns LLM `/respond` latency stats.
+
+Dialog latency knobs (dialog_service):
+
+- `DIALOG_REPLY_COMPRESS`: `1`/`0`
+- `DIALOG_MAX_REPLY_SENTENCES`: default `1`
+- `DIALOG_MAX_REPLY_WORDS`: default `14`
+- `DIALOG_MAX_REPLY_CHARS`: default `0` (disable hard char truncation to avoid cut-off endings)
 
 #### Important: Qwen TTS uses a separate venv (dependency conflict)
 
