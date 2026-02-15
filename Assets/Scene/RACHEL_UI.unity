@@ -1354,6 +1354,7 @@ MonoBehaviour:
   _bootstrapPrefab: {fileID: 968918444066301895, guid: 1146a9de09159a948b683e94fb3d3c95, type: 3}
   screen: {fileID: 2080068843}
   runningMode: 0
+  releaseWebCamWhenAppNotVisible: 1
   _poseLandmarkerResultAnnotationController: {fileID: 2080068844}
 --- !u!1 &1297632026
 GameObject:

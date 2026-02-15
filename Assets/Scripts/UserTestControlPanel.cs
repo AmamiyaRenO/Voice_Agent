@@ -93,9 +93,8 @@ namespace RobotVoice
         [SerializeField, Tooltip("Only keep encoding frames for this many seconds after a panel camera request.")]
         private float cameraClientActiveWindowSeconds = 3f;
 
-        [Header("Dialogue")]
-        [SerializeField, Tooltip("Available LLM dialogue styles exposed in the tester UI")]
-        private string[] availableDialogStyles = new[] { "Supportive", "Minimalist", "Energetic" };
+        [SerializeField, Tooltip("Python voice service base URL used to get/set runtime LLM system prompt.")]
+        private string llmServiceBaseUrl = "http://127.0.0.1:8000";
 
         private HttpListener listener;
         private CancellationTokenSource shutdownToken;
@@ -124,6 +123,7 @@ namespace RobotVoice
         private bool _hasExternalRendererBinding;
         private bool _runInBackgroundEnabled;
         private long _lastCameraClientRequestUtcTicks;
+        private bool _appIsVisible = true;
 
         private void Awake()
         {
@@ -173,6 +173,16 @@ namespace RobotVoice
         {
             StopServer();
             StopCamera();
+        }
+
+        private void OnApplicationFocus(bool hasFocus)
+        {
+            _appIsVisible = hasFocus;
+        }
+
+        private void OnApplicationPause(bool pauseStatus)
+        {
+            _appIsVisible = !pauseStatus;
         }
 
         public void StartServer()
@@ -329,8 +339,8 @@ namespace RobotVoice
                     case "/api/qwen/speak":
                         await HandleQwenSpeakAsync(context).ConfigureAwait(false);
                         return;
-                    case "/api/llm/style":
-                        await HandleLlmStyleAsync(context).ConfigureAwait(false);
+                    case "/api/llm/prompt":
+                        await HandleLlmPromptAsync(context).ConfigureAwait(false);
                         return;
                     case "/api/game":
                         await HandleGameAsync(context).ConfigureAwait(false);
@@ -397,7 +407,7 @@ namespace RobotVoice
                     }
                     return;
                 }
-                if (tex is WebCamTexture extCam && !extCam.isPlaying)
+                if (tex is WebCamTexture extCam && !extCam.isPlaying && _appIsVisible)
                 {
                     try { extCam.Play(); } catch { }
                 }
@@ -517,9 +527,20 @@ namespace RobotVoice
         }
 
         [Serializable]
-        private struct LlmStyleRequest
+        private struct LlmPromptRequest
         {
-            public string style;
+            public string prompt;
+            public bool reset;
+        }
+
+        [Serializable]
+        private struct LlmPromptConfigResponse
+        {
+            public string status;
+            public string system_prompt;
+            public bool runtime_override_active;
+            public string source;
+            public string detail;
         }
 
         [Serializable]
@@ -911,24 +932,101 @@ namespace RobotVoice
             }
         }
 
-        private async Task HandleLlmStyleAsync(HttpListenerContext context)
+        private string ResolveLlmServiceBaseUrl()
         {
-            var request = ParseJsonBody<LlmStyleRequest>(context.Request);
-            var style = (request.style ?? string.Empty).Trim();
-            if (string.IsNullOrEmpty(style))
+            var url = (llmServiceBaseUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(url))
             {
-                await WriteJsonAsync(context.Response, 400, "error", "style required").ConfigureAwait(false);
-                return;
+                url = "http://127.0.0.1:8000";
             }
-            if (voiceLauncher == null)
+            return url.TrimEnd('/');
+        }
+
+        private static async Task WriteRawJsonAsync(HttpListenerResponse response, int statusCode, string json)
+        {
+            var payload = string.IsNullOrWhiteSpace(json)
+                ? "{\"status\":\"error\",\"message\":\"empty response\"}"
+                : json;
+            var bytes = Encoding.UTF8.GetBytes(payload);
+            response.StatusCode = statusCode;
+            response.ContentType = "application/json";
+            response.ContentLength64 = bytes.Length;
+            await response.OutputStream.WriteAsync(bytes, 0, bytes.Length).ConfigureAwait(false);
+            response.Close();
+        }
+
+        private async Task HandleLlmPromptAsync(HttpListenerContext context)
+        {
+            var method = (context.Request.HttpMethod ?? string.Empty).Trim().ToUpperInvariant();
+            if (method == "GET")
             {
-                await WriteJsonAsync(context.Response, 503, "error", "VoiceGameLauncher not assigned").ConfigureAwait(false);
+                try
+                {
+                    var getUrl = ResolveLlmServiceBaseUrl() + "/respond/config";
+                    var response = await SharedHttpClient.GetAsync(getUrl).ConfigureAwait(false);
+                    var getBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        await WriteJsonAsync(context.Response, (int)response.StatusCode, "error", $"failed to load llm prompt: {getBody}").ConfigureAwait(false);
+                        return;
+                    }
+                    await WriteRawJsonAsync(context.Response, 200, getBody).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    await WriteJsonAsync(context.Response, 502, "error", $"failed to load llm prompt: {ex.Message}").ConfigureAwait(false);
+                }
                 return;
             }
 
-            var toSend = style;
-            PostToMainThread(() => voiceLauncher.SetDialogStyleForTester(toSend));
-            await WriteJsonAsync(context.Response, 200, "ok", $"dialog style set: {style}").ConfigureAwait(false);
+            if (method != "POST")
+            {
+                context.Response.StatusCode = 405;
+                context.Response.Headers["Allow"] = "GET,POST,OPTIONS";
+                await WriteJsonAsync(context.Response, 405, "error", "method not allowed").ConfigureAwait(false);
+                return;
+            }
+
+            var request = ParseJsonBody<LlmPromptRequest>(context.Request);
+            var reset = request.reset;
+            var prompt = (request.prompt ?? string.Empty).Trim();
+            if (!reset && string.IsNullOrEmpty(prompt))
+            {
+                await WriteJsonAsync(context.Response, 400, "error", "prompt required unless reset=true").ConfigureAwait(false);
+                return;
+            }
+
+            var url = ResolveLlmServiceBaseUrl() + "/respond/config";
+            var body = reset
+                ? "{\"reset\":true}"
+                : "{\"system_prompt\":\"" + EscapeJson(prompt) + "\"}";
+
+            try
+            {
+                using (var content = new StringContent(body, Encoding.UTF8, "application/json"))
+                {
+                    var response = await SharedHttpClient.PostAsync(url, content).ConfigureAwait(false);
+                    var raw = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        await WriteJsonAsync(context.Response, (int)response.StatusCode, "error", $"failed to update llm prompt: {raw}").ConfigureAwait(false);
+                        return;
+                    }
+                }
+
+                var latest = await SharedHttpClient.GetAsync(url).ConfigureAwait(false);
+                var latestBody = await latest.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (!latest.IsSuccessStatusCode)
+                {
+                    await WriteJsonAsync(context.Response, (int)latest.StatusCode, "error", $"failed to load updated llm prompt: {latestBody}").ConfigureAwait(false);
+                    return;
+                }
+                await WriteRawJsonAsync(context.Response, 200, latestBody).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                await WriteJsonAsync(context.Response, 502, "error", $"failed to update llm prompt: {ex.Message}").ConfigureAwait(false);
+            }
         }
 
         private async Task HandleGameAsync(HttpListenerContext context)
@@ -1450,7 +1548,48 @@ namespace RobotVoice
                 return string.Empty;
             }
 
-            return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            var sb = new StringBuilder(value.Length + 16);
+            for (int i = 0; i < value.Length; i++)
+            {
+                var c = value[i];
+                switch (c)
+                {
+                    case '\\':
+                        sb.Append("\\\\");
+                        break;
+                    case '"':
+                        sb.Append("\\\"");
+                        break;
+                    case '\n':
+                        sb.Append("\\n");
+                        break;
+                    case '\r':
+                        sb.Append("\\r");
+                        break;
+                    case '\t':
+                        sb.Append("\\t");
+                        break;
+                    case '\b':
+                        sb.Append("\\b");
+                        break;
+                    case '\f':
+                        sb.Append("\\f");
+                        break;
+                    default:
+                        if (c < 32)
+                        {
+                            sb.Append("\\u");
+                            sb.Append(((int)c).ToString("x4"));
+                        }
+                        else
+                        {
+                            sb.Append(c);
+                        }
+                        break;
+                }
+            }
+
+            return sb.ToString();
         }
 
         private static async Task RespondWithHtmlAsync(HttpListenerResponse response)
@@ -1478,7 +1617,7 @@ namespace RobotVoice
 
         private static string BuildPanelHtml()
         {
-            var sb = new StringBuilder(4096);
+            var sb = new StringBuilder(8192);
             sb.AppendLine(@"<!DOCTYPE html>");
             sb.AppendLine(@"<html lang=""en"">");
             sb.AppendLine(@"<head>");
@@ -1531,11 +1670,15 @@ namespace RobotVoice
             sb.AppendLine(@"<div id=""transcriptLog"" class=""log-list""></div>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"<section>");
-            sb.AppendLine(@"<h2>Dialogue Style</h2>");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<button onclick=""setLlmStyle('Supportive')"">Supportive</button>");
-            sb.AppendLine(@"<button onclick=""setLlmStyle('Minimalist')"">Minimalist</button>");
-            sb.AppendLine(@"<button onclick=""setLlmStyle('Energetic')"">Energetic</button>");
+            sb.AppendLine(@"<h2>LLM System Prompt</h2>");
+            sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:stretch;"">");
+            sb.AppendLine(@"<textarea id=""llmPromptText"" placeholder=""Edit runtime system prompt for /respond...""></textarea>");
+            sb.AppendLine(@"<div class=""controls"" style=""width:100%;"">");
+            sb.AppendLine(@"<button onclick=""loadLlmPrompt()"">Load Prompt</button>");
+            sb.AppendLine(@"<button onclick=""saveLlmPrompt()"">Save Prompt</button>");
+            sb.AppendLine(@"<button onclick=""resetLlmPrompt()"">Reset Prompt</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<small style=""opacity:0.75"">Applied in real time by python_voice_service /respond/config.</small>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"</section>");
             sb.AppendLine(@"<section>");
@@ -1679,6 +1822,7 @@ namespace RobotVoice
             sb.AppendLine(@"const voiceSelect = document.getElementById('voiceSelect');");
             sb.AppendLine(@"const modelSelect = document.getElementById('ttsModelSelect');");
             sb.AppendLine(@"const qwenSpeakerSelect = document.getElementById('qwenSpeakerSelect');");
+            sb.AppendLine(@"const llmPromptEl = document.getElementById('llmPromptText');");
             sb.AppendLine(@"const logContainer = document.getElementById('transcriptLog');");
             sb.AppendLine(@"const cameraView = document.getElementById('cameraView');");
             sb.AppendLine(@"const logRoleStyles = {");
@@ -1753,8 +1897,10 @@ namespace RobotVoice
             sb.AppendLine(@"    const resp = await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});");
             sb.AppendLine(@"    const data = await resp.json();");
             sb.AppendLine(@"    statusEl.textContent = data.status + ': ' + data.message;");
+            sb.AppendLine(@"    return data;");
             sb.AppendLine(@"  } catch(err){");
             sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"    return null;");
             sb.AppendLine(@"  }");
             sb.AppendLine(@"}");
             sb.AppendLine(@"function parseSeconds(){");
@@ -1820,9 +1966,35 @@ namespace RobotVoice
             sb.AppendLine(@"  const instruct = (document.getElementById('qwenInstruct').value||'').trim();");
             sb.AppendLine(@"  send('/api/qwen/speak',{text:text,speaker:speaker,instruct:instruct});");
             sb.AppendLine(@"}");
-            sb.AppendLine(@"function setLlmStyle(value){");
-            sb.AppendLine(@"  if(!value) return;");
-            sb.AppendLine(@"  send('/api/llm/style',{style:value});");
+            sb.AppendLine(@"async function loadLlmPrompt(){");
+            sb.AppendLine(@"  if(!llmPromptEl) return;");
+            sb.AppendLine(@"  statusEl.textContent = 'Loading /api/llm/prompt ...';");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/llm/prompt');");
+            sb.AppendLine(@"    const data = await resp.json();");
+            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){");
+            sb.AppendLine(@"      const msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);");
+            sb.AppendLine(@"      statusEl.textContent = 'error: ' + msg;");
+            sb.AppendLine(@"      return;");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    const promptText = (typeof data.prompt === 'string') ? data.prompt : ((typeof data.system_prompt === 'string') ? data.system_prompt : '');");
+            sb.AppendLine(@"    llmPromptEl.value = promptText;");
+            sb.AppendLine(@"    const source = data.runtime_override_active ? 'runtime' : (data.source || 'env_or_default');");
+            sb.AppendLine(@"    statusEl.textContent = 'ok: llm prompt loaded (' + source + ')';");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function saveLlmPrompt(){");
+            sb.AppendLine(@"  if(!llmPromptEl) return;");
+            sb.AppendLine(@"  const prompt = (llmPromptEl.value || '').trim();");
+            sb.AppendLine(@"  if(!prompt){ statusEl.textContent = 'error: prompt required'; return; }");
+            sb.AppendLine(@"  await send('/api/llm/prompt',{prompt:prompt});");
+            sb.AppendLine(@"  await loadLlmPrompt();");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function resetLlmPrompt(){");
+            sb.AppendLine(@"  await send('/api/llm/prompt',{reset:true});");
+            sb.AppendLine(@"  await loadLlmPrompt();");
             sb.AppendLine(@"}");
             sb.AppendLine(@"function launchGame(){");
             sb.AppendLine(@"  const name = document.getElementById('gameName').value||'';");
@@ -1876,6 +2048,7 @@ namespace RobotVoice
             sb.AppendLine(@"setInterval(refreshLog, 4000);");
             sb.AppendLine(@"loadVoiceOptions();");
             sb.AppendLine(@"loadQwenOptions();");
+            sb.AppendLine(@"loadLlmPrompt();");
             sb.AppendLine(@"let cameraPolling = false;");
             sb.AppendLine(@"let cameraSeq = 0;");
             sb.AppendLine(@"let cameraLastLoadAt = 0;");
@@ -1968,7 +2141,37 @@ namespace RobotVoice
             sb.AppendLine(@"button.secondary{background:#334155;}");
             sb.AppendLine(@"pre{background:#020617;border:1px solid rgba(148,163,184,.25);padding:.75rem;border-radius:8px;overflow:auto;min-height:260px;}");
             sb.AppendLine(@".mono{font-family:Consolas,monospace;font-size:.82rem;}");
+            sb.AppendLine(@".flow-grid{display:grid;grid-template-columns:280px 1fr 1fr;gap:1rem;margin-top:1rem;}");
+            sb.AppendLine(@".template-list{display:flex;flex-direction:column;gap:.5rem;max-height:360px;overflow:auto;padding-right:.2rem;}");
+            sb.AppendLine(@".template-item{border:1px dashed rgba(125,211,252,.45);border-radius:8px;padding:.55rem .6rem;background:rgba(15,23,42,.55);cursor:grab;font-size:.82rem;}");
+            sb.AppendLine(@".template-item.utility{border-color:rgba(251,191,36,.55);}");
+            sb.AppendLine(@".flow-canvas{min-height:380px;border:1px dashed rgba(148,163,184,.4);border-radius:12px;padding:.7rem;background:rgba(2,6,23,.45);display:flex;flex-direction:column;gap:.65rem;}");
+            sb.AppendLine(@".flow-empty{opacity:.75;border:1px dashed rgba(148,163,184,.35);border-radius:8px;padding:.8rem;text-align:center;}");
+            sb.AppendLine(@".flow-step{border:1px solid rgba(148,163,184,.35);border-radius:10px;padding:.6rem;background:#0f172a;}");
+            sb.AppendLine(@".flow-step.selected{border-color:#60a5fa;}");
+            sb.AppendLine(@".flow-step.running{border-color:#f59e0b;box-shadow:0 0 0 1px rgba(245,158,11,.35) inset;}");
+            sb.AppendLine(@".flow-step.ok{border-color:#10b981;}");
+            sb.AppendLine(@".flow-step.error{border-color:#ef4444;}");
+            sb.AppendLine(@".flow-head{display:flex;align-items:center;gap:.5rem;justify-content:space-between;margin-bottom:.4rem;}");
+            sb.AppendLine(@".flow-title{font-weight:700;font-size:.83rem;}");
+            sb.AppendLine(@".flow-body{display:flex;flex-direction:column;gap:.45rem;}");
+            sb.AppendLine(@".flow-row{display:flex;gap:.5rem;align-items:center;}");
+            sb.AppendLine(@".flow-row > *{margin-top:0;}");
+            sb.AppendLine(@".flow-small{font-size:.78rem;opacity:.82;}");
+            sb.AppendLine(@".flow-chip{display:inline-block;padding:.15rem .45rem;border-radius:999px;font-size:.72rem;border:1px solid rgba(148,163,184,.35);}");
+            sb.AppendLine(@".flow-chip.api{color:#93c5fd;border-color:rgba(147,197,253,.5);}");
+            sb.AppendLine(@".flow-chip.delay{color:#fcd34d;border-color:rgba(252,211,77,.55);}");
+            sb.AppendLine(@".flow-chip.cond{color:#86efac;border-color:rgba(134,239,172,.55);}");
+            sb.AppendLine(@".flow-chip.keyword{color:#f9a8d4;border-color:rgba(249,168,212,.55);}");
+            sb.AppendLine(@".flow-actions{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.3rem;}");
+            sb.AppendLine(@".flow-actions button{width:auto;padding:.45rem .65rem;font-size:.8rem;margin-top:0;}");
+            sb.AppendLine(@".flow-step button{width:auto;padding:.32rem .5rem;font-size:.76rem;margin-top:0;background:#1e293b;border:1px solid rgba(148,163,184,.35);}");
+            sb.AppendLine(@".flow-editor{border:1px solid rgba(148,163,184,.3);border-radius:10px;padding:.65rem;background:#0b1326;}");
+            sb.AppendLine(@".flow-editor textarea{min-height:130px;}");
+            sb.AppendLine(@".flow-inline{display:flex;gap:.5rem;align-items:center;}");
+            sb.AppendLine(@".flow-inline input[type=""checkbox""]{width:auto;}");
             sb.AppendLine(@"@media(max-width:900px){.wrap{grid-template-columns:1fr;}}");
+            sb.AppendLine(@"@media(max-width:1200px){.flow-grid{grid-template-columns:1fr;}}");
             sb.AppendLine(@"</style>");
             sb.AppendLine(@"</head>");
             sb.AppendLine(@"<body>");
@@ -1992,13 +2195,46 @@ namespace RobotVoice
             sb.AppendLine(@"<pre id=""sdkResp""></pre>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""card"" style=""margin-top:1rem;"">");
+            sb.AppendLine(@"<h2 style=""margin:.1rem 0 .45rem 0;font-size:1.12rem;"">Flow Builder (Phase 1)</h2>");
+            sb.AppendLine(@"<p class=""flow-small"">Drag templates into canvas, edit step params, then run sequentially.</p>");
+            sb.AppendLine(@"<div class=""flow-grid"">");
+            sb.AppendLine(@"<div>");
+            sb.AppendLine(@"<h3 style=""margin:.2rem 0 .45rem 0;"">Templates</h3>");
+            sb.AppendLine(@"<div id=""flowTemplates"" class=""template-list""></div>");
+            sb.AppendLine(@"<div class=""flow-small"">Includes all SDK API methods plus utility Delay/Condition nodes.</div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div>");
+            sb.AppendLine(@"<h3 style=""margin:.2rem 0 .45rem 0;"">Canvas</h3>");
+            sb.AppendLine(@"<div class=""flow-actions"">");
+            sb.AppendLine(@"<button id=""flowRunBtn"" type=""button"">Run Flow</button>");
+            sb.AppendLine(@"<button id=""flowStopBtn"" class=""secondary"" type=""button"">Stop</button>");
+            sb.AppendLine(@"<button id=""flowClearBtn"" class=""secondary"" type=""button"">Clear</button>");
+            sb.AppendLine(@"<button id=""flowExportBtn"" class=""secondary"" type=""button"">Export</button>");
+            sb.AppendLine(@"<button id=""flowImportBtn"" class=""secondary"" type=""button"">Import</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div id=""flowCanvas"" class=""flow-canvas""></div>");
+            sb.AppendLine(@"<label for=""flowJson"">Flow JSON</label>");
+            sb.AppendLine(@"<textarea id=""flowJson"" style=""min-height:135px;""></textarea>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div>");
+            sb.AppendLine(@"<h3 style=""margin:.2rem 0 .45rem 0;"">Step Editor</h3>");
+            sb.AppendLine(@"<div id=""flowEditor"" class=""flow-empty"">Select a step to edit.</div>");
+            sb.AppendLine(@"<h3 style=""margin:.8rem 0 .45rem 0;"">Run Log</h3>");
+            sb.AppendLine(@"<pre id=""flowLog"" style=""min-height:210px;""></pre>");
+            sb.AppendLine(@"<div id=""flowStatus"" class=""mono"">Idle.</div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</div>");
             sb.AppendLine(@"<script>");
             sb.AppendLine(@"const sdkMap = {");
             sb.AppendLine(@"  'speak(text,voice,model,speed,volume)': { endpoint:'/api/speak', payload:{ text:'Hello from SDK visualizer', voice:'en_US', model:'', speed:1.0, volume:1.0 } },");
             sb.AppendLine(@"  'qwen_speak(text,speaker,instruct)': { endpoint:'/api/qwen/speak', payload:{ text:'Hello from Qwen', speaker:'Ryan', instruct:'friendly' } },");
             sb.AppendLine(@"  'set_tts_options(voice,model)': { endpoint:'/api/voice', payload:{ action:'set', voice:'en_US' } },");
             sb.AppendLine(@"  'set_tts_model(model)': { endpoint:'/api/voice', payload:{ action:'set_model', model:'' } },");
-            sb.AppendLine(@"  'set_dialog_style(style)': { endpoint:'/api/llm/style', payload:{ style:'Supportive' } },");
+            sb.AppendLine(@"  'get_llm_prompt()': { endpoint:'/api/llm/prompt', method:'GET', payload:{} },");
+            sb.AppendLine(@"  'set_llm_prompt(prompt)': { endpoint:'/api/llm/prompt', payload:{ prompt:'You are a concise coach. Keep replies under 2 sentences.' } },");
+            sb.AppendLine(@"  'reset_llm_prompt()': { endpoint:'/api/llm/prompt', payload:{ reset:true } },");
             sb.AppendLine(@"  'launch_game(name)': { endpoint:'/api/game', payload:{ action:'launch', name:'cornhole' } },");
             sb.AppendLine(@"  'exit_game()': { endpoint:'/api/game', payload:{ action:'exit' } },");
             sb.AppendLine(@"  'face_preset(mode,seconds)': { endpoint:'/api/face', payload:{ mode:'happy', seconds:3 } },");
@@ -2011,6 +2247,23 @@ namespace RobotVoice
             sb.AppendLine(@"const statusEl = document.getElementById('sdkStatus');");
             sb.AppendLine(@"const respEl = document.getElementById('sdkResp');");
             sb.AppendLine(@"const methods = Object.keys(sdkMap);");
+            sb.AppendLine(@"const flowTemplatesEl = document.getElementById('flowTemplates');");
+            sb.AppendLine(@"const flowCanvasEl = document.getElementById('flowCanvas');");
+            sb.AppendLine(@"const flowEditorEl = document.getElementById('flowEditor');");
+            sb.AppendLine(@"const flowLogEl = document.getElementById('flowLog');");
+            sb.AppendLine(@"const flowJsonEl = document.getElementById('flowJson');");
+            sb.AppendLine(@"const flowStatusEl = document.getElementById('flowStatus');");
+            sb.AppendLine(@"const flowRunBtn = document.getElementById('flowRunBtn');");
+            sb.AppendLine(@"const flowStopBtn = document.getElementById('flowStopBtn');");
+            sb.AppendLine(@"const flowClearBtn = document.getElementById('flowClearBtn');");
+            sb.AppendLine(@"const flowExportBtn = document.getElementById('flowExportBtn');");
+            sb.AppendLine(@"const flowImportBtn = document.getElementById('flowImportBtn');");
+            sb.AppendLine(@"let flowSteps = [];");
+            sb.AppendLine(@"let flowSelectedId = '';");
+            sb.AppendLine(@"let flowRunToken = 0;");
+            sb.AppendLine(@"let flowRunning = false;");
+            sb.AppendLine(@"let dragTemplateKey = '';");
+            sb.AppendLine(@"let dragStepId = '';");
             sb.AppendLine(@"methodEl.innerHTML = methods.map(m => `<option value=""${m}"">${m}</option>`).join('');");
             sb.AppendLine(@"function syncMethod(){");
             sb.AppendLine(@"  const m = methodEl.value;");
@@ -2020,14 +2273,29 @@ namespace RobotVoice
             sb.AppendLine(@"  respEl.textContent = '';");
             sb.AppendLine(@"}");
             sb.AppendLine(@"function resetPayload(){ syncMethod(); }");
+            sb.AppendLine(@"function cloneValue(v){ return JSON.parse(JSON.stringify(v)); }");
+            sb.AppendLine(@"function makeStepId(){ return 'step_' + Math.random().toString(36).slice(2, 10); }");
+            sb.AppendLine(@"function escapeHtml(value){");
+            sb.AppendLine(@"  return String(value || '')");
+            sb.AppendLine(@"    .replace(/&/g, '&amp;')");
+            sb.AppendLine(@"    .replace(/</g, '&lt;')");
+            sb.AppendLine(@"    .replace(/>/g, '&gt;')");
+            sb.AppendLine(@"    .replace(/""/g, '&quot;')");
+            sb.AppendLine(@"    .replace(/'/g, '&#39;');");
+            sb.AppendLine(@"}");
             sb.AppendLine(@"async function invokeSdk(){");
+            sb.AppendLine(@"  const cfg = sdkMap[methodEl.value] || { endpoint:endpointEl.value, payload:{} };");
             sb.AppendLine(@"  const endpoint = endpointEl.value;");
+            sb.AppendLine(@"  const httpMethod = String(cfg.method || 'POST').toUpperCase();");
             sb.AppendLine(@"  let payload = {};");
             sb.AppendLine(@"  try { payload = JSON.parse(payloadEl.value || '{}'); }");
             sb.AppendLine(@"  catch(err){ statusEl.textContent = 'Invalid JSON: ' + err; return; }");
-            sb.AppendLine(@"  statusEl.textContent = 'POST ' + endpoint + ' ...';");
+            sb.AppendLine(@"  statusEl.textContent = httpMethod + ' ' + endpoint + ' ...';");
             sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch(endpoint,{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });");
+            sb.AppendLine(@"    const req = httpMethod === 'GET'");
+            sb.AppendLine(@"      ? { method:'GET' }");
+            sb.AppendLine(@"      : { method:httpMethod, headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) };");
+            sb.AppendLine(@"    const resp = await fetch(endpoint, req);");
             sb.AppendLine(@"    const txt = await resp.text();");
             sb.AppendLine(@"    statusEl.textContent = `HTTP ${resp.status} ${resp.statusText}`;");
             sb.AppendLine(@"    try { respEl.textContent = JSON.stringify(JSON.parse(txt), null, 2); }");
@@ -2036,8 +2304,494 @@ namespace RobotVoice
             sb.AppendLine(@"    statusEl.textContent = 'Request failed: ' + err;");
             sb.AppendLine(@"  }");
             sb.AppendLine(@"}");
+            sb.AppendLine(@"async function callEndpoint(endpoint, httpMethod, payload){");
+            sb.AppendLine(@"  const method = String(httpMethod || 'POST').toUpperCase();");
+            sb.AppendLine(@"  const req = method === 'GET'");
+            sb.AppendLine(@"    ? { method:'GET' }");
+            sb.AppendLine(@"    : { method:method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload || {}) };");
+            sb.AppendLine(@"  const resp = await fetch(endpoint, req);");
+            sb.AppendLine(@"  const raw = await resp.text();");
+            sb.AppendLine(@"  let json = null;");
+            sb.AppendLine(@"  try { json = JSON.parse(raw); } catch (err) { }");
+            sb.AppendLine(@"  return { ok:resp.ok, status:resp.status, statusText:resp.statusText, raw:raw, json:json };");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function buildTemplateCatalog(){");
+            sb.AppendLine(@"  const apiTemplates = methods.map(m => ({ key:'api:' + m, label:m, kind:'api' }));");
+            sb.AppendLine(@"  apiTemplates.push({ key:'util:delay', label:'delay(ms)', kind:'delay' });");
+            sb.AppendLine(@"  apiTemplates.push({ key:'util:condition', label:'condition(expr)', kind:'condition' });");
+            sb.AppendLine(@"  apiTemplates.push({ key:'util:keyword_wait', label:'wait_keyword(keyword)', kind:'condition' });");
+            sb.AppendLine(@"  return apiTemplates;");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"const templateCatalog = buildTemplateCatalog();");
+            sb.AppendLine(@"function createStepFromTemplate(key){");
+            sb.AppendLine(@"  if(!key) return null;");
+            sb.AppendLine(@"  if(key.startsWith('api:')){");
+            sb.AppendLine(@"    const methodName = key.slice(4);");
+            sb.AppendLine(@"    const cfg = sdkMap[methodName];");
+            sb.AppendLine(@"    if(!cfg) return null;");
+            sb.AppendLine(@"    return {");
+            sb.AppendLine(@"      id: makeStepId(),");
+            sb.AppendLine(@"      type: 'api',");
+            sb.AppendLine(@"      name: methodName,");
+            sb.AppendLine(@"      endpoint: cfg.endpoint,");
+            sb.AppendLine(@"      method: String(cfg.method || 'POST').toUpperCase(),");
+            sb.AppendLine(@"      payload: cloneValue(cfg.payload || {}),");
+            sb.AppendLine(@"      continueOnError: false");
+            sb.AppendLine(@"    };");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  if(key === 'util:delay'){");
+            sb.AppendLine(@"    return { id: makeStepId(), type:'delay', name:'delay(ms)', delayMs:600 };");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  if(key === 'util:condition'){");
+            sb.AppendLine(@"    return { id: makeStepId(), type:'condition', name:'condition(expr)', expression:'ctx.lastStatus >= 200 && ctx.lastStatus < 300' };");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  if(key === 'util:keyword_wait'){");
+            sb.AppendLine(@"    return { id: makeStepId(), type:'keyword_wait', name:'wait_keyword', keyword:'thanks', timeoutMs:12000, pollMs:350, source:'user', caseSensitive:false, onlyNew:true };");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  return null;");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function exportFlowData(){");
+            sb.AppendLine(@"  return flowSteps.map(step => {");
+            sb.AppendLine(@"    if(step.type === 'api'){");
+            sb.AppendLine(@"      return { type:'api', name:step.name || '', endpoint:step.endpoint || '', method:step.method || 'POST', payload:cloneValue(step.payload || {}), continueOnError:!!step.continueOnError };");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    if(step.type === 'delay'){");
+            sb.AppendLine(@"      return { type:'delay', name:step.name || 'delay(ms)', delayMs:Math.max(0, Number(step.delayMs) || 0) };");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    if(step.type === 'condition'){");
+            sb.AppendLine(@"      return { type:'condition', name:step.name || 'condition(expr)', expression:String(step.expression || '').trim() };");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    if(step.type === 'keyword_wait'){");
+            sb.AppendLine(@"      return { type:'keyword_wait', name:step.name || 'wait_keyword', keyword:String(step.keyword || ''), timeoutMs:Math.max(100, Number(step.timeoutMs) || 12000), pollMs:Math.max(100, Number(step.pollMs) || 350), source:String(step.source || 'user'), caseSensitive:!!step.caseSensitive, onlyNew:step.onlyNew !== false };");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    return { type:'unknown' };");
+            sb.AppendLine(@"  });");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function syncFlowJson(){ flowJsonEl.value = JSON.stringify(exportFlowData(), null, 2); }");
+            sb.AppendLine(@"function appendFlowLog(line){");
+            sb.AppendLine(@"  const ts = new Date().toLocaleTimeString();");
+            sb.AppendLine(@"  const nextLine = `[${ts}] ${line}`;");
+            sb.AppendLine(@"  if(!flowLogEl.textContent){ flowLogEl.textContent = nextLine; }");
+            sb.AppendLine(@"  else { flowLogEl.textContent += '\n' + nextLine; }");
+            sb.AppendLine(@"  flowLogEl.scrollTop = flowLogEl.scrollHeight;");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function moveStepBefore(stepId, targetId){");
+            sb.AppendLine(@"  const srcIndex = flowSteps.findIndex(s => s.id === stepId);");
+            sb.AppendLine(@"  const targetIndex = flowSteps.findIndex(s => s.id === targetId);");
+            sb.AppendLine(@"  if(srcIndex < 0 || targetIndex < 0 || srcIndex === targetIndex) return;");
+            sb.AppendLine(@"  const src = flowSteps[srcIndex];");
+            sb.AppendLine(@"  flowSteps.splice(srcIndex, 1);");
+            sb.AppendLine(@"  const nextTargetIndex = flowSteps.findIndex(s => s.id === targetId);");
+            sb.AppendLine(@"  flowSteps.splice(nextTargetIndex, 0, src);");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function moveStepToEnd(stepId){");
+            sb.AppendLine(@"  const idx = flowSteps.findIndex(s => s.id === stepId);");
+            sb.AppendLine(@"  if(idx < 0) return;");
+            sb.AppendLine(@"  const src = flowSteps[idx];");
+            sb.AppendLine(@"  flowSteps.splice(idx, 1);");
+            sb.AppendLine(@"  flowSteps.push(src);");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function keywordMatch(text, keyword, caseSensitive){");
+            sb.AppendLine(@"  const src = String(text || '');");
+            sb.AppendLine(@"  const kw = String(keyword || '').trim();");
+            sb.AppendLine(@"  if(!kw) return false;");
+            sb.AppendLine(@"  if(caseSensitive) return src.includes(kw);");
+            sb.AppendLine(@"  return src.toLowerCase().includes(kw.toLowerCase());");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function fetchLatestLogEntry(sourceMode){");
+            sb.AppendLine(@"  const resp = await fetch('/api/logs');");
+            sb.AppendLine(@"  if(!resp.ok) return null;");
+            sb.AppendLine(@"  const data = await resp.json();");
+            sb.AppendLine(@"  const entries = Array.isArray(data.entries) ? data.entries : [];");
+            sb.AppendLine(@"  const mode = String(sourceMode || 'user').toLowerCase();");
+            sb.AppendLine(@"  for(let i = entries.length - 1; i >= 0; i--){");
+            sb.AppendLine(@"    const e = entries[i] || {};");
+            sb.AppendLine(@"    const role = String(e.role || '').toLowerCase();");
+            sb.AppendLine(@"    const source = String(e.source || '').toLowerCase();");
+            sb.AppendLine(@"    const message = String(e.message || e.text || '').trim();");
+            sb.AppendLine(@"    if(!message) continue;");
+            sb.AppendLine(@"    if(mode === 'user'){");
+            sb.AppendLine(@"      const isUserLike = role === 'user' || source.includes('whisper') || source.includes('voice');");
+            sb.AppendLine(@"      if(!isUserLike) continue;");
+            sb.AppendLine(@"    } else if(mode === 'coach'){");
+            sb.AppendLine(@"      const isCoachLike = role === 'coach' || source.includes('dialog');");
+            sb.AppendLine(@"      if(!isCoachLike) continue;");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    const ts = String(e.timestamp || '');");
+            sb.AppendLine(@"    return { text:message, role:role, source:source, timestamp:ts, key:ts + '|' + message };");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  return null;");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function renderTemplates(){");
+            sb.AppendLine(@"  flowTemplatesEl.innerHTML = templateCatalog.map(t => `<div class=""template-item ${t.kind === 'api' ? '' : 'utility'}"" draggable=""true"" data-template=""${t.key}"">${escapeHtml(t.label)}</div>`).join('');");
+            sb.AppendLine(@"  flowTemplatesEl.querySelectorAll('.template-item').forEach(el => {");
+            sb.AppendLine(@"    el.addEventListener('dragstart', ev => {");
+            sb.AppendLine(@"      dragTemplateKey = ev.currentTarget.getAttribute('data-template') || '';");
+            sb.AppendLine(@"      dragStepId = '';");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"  });");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function renderFlowCanvas(){");
+            sb.AppendLine(@"  if(!flowSteps.length){");
+            sb.AppendLine(@"    flowCanvasEl.innerHTML = '<div class=""flow-empty"">Drop templates here to build a flow.</div>';");
+            sb.AppendLine(@"    syncFlowJson();");
+            sb.AppendLine(@"    renderStepEditor();");
+            sb.AppendLine(@"    return;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  flowCanvasEl.innerHTML = flowSteps.map((step, index) => {");
+            sb.AppendLine(@"    const cls = ['flow-step'];");
+            sb.AppendLine(@"    if(step.id === flowSelectedId) cls.push('selected');");
+            sb.AppendLine(@"    if(step._state === 'ok') cls.push('ok');");
+            sb.AppendLine(@"    if(step._state === 'error') cls.push('error');");
+            sb.AppendLine(@"    if(step._state === 'running') cls.push('running');");
+            sb.AppendLine(@"    const chipClass = step.type === 'api' ? 'api' : (step.type === 'delay' ? 'delay' : (step.type === 'keyword_wait' ? 'keyword' : 'cond'));");
+            sb.AppendLine(@"    const title = step.type === 'api' ? step.name : (step.name || step.type);");
+            sb.AppendLine(@"    const summary = step.type === 'api' ? (step.endpoint || '') : (step.type === 'condition' ? (step.expression || '') : (step.type === 'keyword_wait' ? (`keyword=""${step.keyword || ''}"" timeout=${Number(step.timeoutMs || 12000)}ms`) : (String(step.delayMs || 0) + ' ms')));");
+            sb.AppendLine(@"    return `<div class=""${cls.join(' ')}"" draggable=""true"" data-step-id=""${step.id}""><div class=""flow-head""><div><span class=""flow-chip ${chipClass}"">${step.type}</span> <span class=""flow-title"">${index + 1}. ${escapeHtml(title)}</span></div><div class=""flow-actions""><button type=""button"" data-action=""select"" data-id=""${step.id}"">Edit</button><button type=""button"" data-action=""up"" data-id=""${step.id}"">Up</button><button type=""button"" data-action=""down"" data-id=""${step.id}"">Down</button><button type=""button"" data-action=""delete"" data-id=""${step.id}"">Delete</button></div></div><div class=""flow-small"">${escapeHtml(summary)}</div></div>`;");
+            sb.AppendLine(@"  }).join('');");
+            sb.AppendLine(@"  flowCanvasEl.querySelectorAll('.flow-step').forEach(el => {");
+            sb.AppendLine(@"    el.addEventListener('dragstart', ev => {");
+            sb.AppendLine(@"      dragStepId = ev.currentTarget.getAttribute('data-step-id') || '';");
+            sb.AppendLine(@"      dragTemplateKey = '';");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    el.addEventListener('dragover', ev => ev.preventDefault());");
+            sb.AppendLine(@"    el.addEventListener('drop', ev => {");
+            sb.AppendLine(@"      ev.preventDefault();");
+            sb.AppendLine(@"      ev.stopPropagation();");
+            sb.AppendLine(@"      const targetId = ev.currentTarget.getAttribute('data-step-id');");
+            sb.AppendLine(@"      if(dragTemplateKey){");
+            sb.AppendLine(@"        const step = createStepFromTemplate(dragTemplateKey);");
+            sb.AppendLine(@"        if(step){");
+            sb.AppendLine(@"          const idx = flowSteps.findIndex(s => s.id === targetId);");
+            sb.AppendLine(@"          const insertAt = idx < 0 ? flowSteps.length : idx;");
+            sb.AppendLine(@"          flowSteps.splice(insertAt, 0, step);");
+            sb.AppendLine(@"          flowSelectedId = step.id;");
+            sb.AppendLine(@"          renderFlowCanvas();");
+            sb.AppendLine(@"        }");
+            sb.AppendLine(@"      } else if(dragStepId && dragStepId !== targetId){");
+            sb.AppendLine(@"        moveStepBefore(dragStepId, targetId);");
+            sb.AppendLine(@"        renderFlowCanvas();");
+            sb.AppendLine(@"      }");
+            sb.AppendLine(@"      dragTemplateKey = '';");
+            sb.AppendLine(@"      dragStepId = '';");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"  });");
+            sb.AppendLine(@"  syncFlowJson();");
+            sb.AppendLine(@"  renderStepEditor();");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function renderStepEditor(){");
+            sb.AppendLine(@"  const step = flowSteps.find(s => s.id === flowSelectedId);");
+            sb.AppendLine(@"  if(!step){");
+            sb.AppendLine(@"    flowEditorEl.innerHTML = '<div class=""flow-empty"">Select a step to edit.</div>';");
+            sb.AppendLine(@"    return;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  if(step.type === 'api'){");
+            sb.AppendLine(@"    flowEditorEl.innerHTML = `<div class=""flow-editor""><div class=""flow-small"">Type: API</div><label>Step Name</label><input id=""editName"" value=""${escapeHtml(step.name || '')}""><label>Endpoint</label><input id=""editEndpoint"" value=""${escapeHtml(step.endpoint || '')}""><label>HTTP Method</label><select id=""editMethod""><option value=""POST"">POST</option><option value=""GET"">GET</option></select><div class=""flow-inline""><input type=""checkbox"" id=""editContinue""><label for=""editContinue"" style=""margin:0;"">Continue on error</label></div><label>Payload JSON</label><textarea id=""editPayload""></textarea><div id=""editMsg"" class=""flow-small mono""></div></div>`;");
+            sb.AppendLine(@"    const nameEl = document.getElementById('editName');");
+            sb.AppendLine(@"    const endpointEditEl = document.getElementById('editEndpoint');");
+            sb.AppendLine(@"    const methodEditEl = document.getElementById('editMethod');");
+            sb.AppendLine(@"    const continueEl = document.getElementById('editContinue');");
+            sb.AppendLine(@"    const payloadEditEl = document.getElementById('editPayload');");
+            sb.AppendLine(@"    const msgEl = document.getElementById('editMsg');");
+            sb.AppendLine(@"    methodEditEl.value = String(step.method || 'POST').toUpperCase();");
+            sb.AppendLine(@"    continueEl.checked = !!step.continueOnError;");
+            sb.AppendLine(@"    payloadEditEl.value = JSON.stringify(step.payload || {}, null, 2);");
+            sb.AppendLine(@"    nameEl.addEventListener('input', () => { step.name = nameEl.value; renderFlowCanvas(); });");
+            sb.AppendLine(@"    endpointEditEl.addEventListener('input', () => { step.endpoint = endpointEditEl.value; syncFlowJson(); renderFlowCanvas(); });");
+            sb.AppendLine(@"    methodEditEl.addEventListener('change', () => { step.method = methodEditEl.value; syncFlowJson(); renderFlowCanvas(); });");
+            sb.AppendLine(@"    continueEl.addEventListener('change', () => { step.continueOnError = continueEl.checked; syncFlowJson(); });");
+            sb.AppendLine(@"    payloadEditEl.addEventListener('change', () => {");
+            sb.AppendLine(@"      try {");
+            sb.AppendLine(@"        step.payload = JSON.parse(payloadEditEl.value || '{}');");
+            sb.AppendLine(@"        msgEl.textContent = 'Payload JSON valid.';");
+            sb.AppendLine(@"        syncFlowJson();");
+            sb.AppendLine(@"      } catch(err){");
+            sb.AppendLine(@"        msgEl.textContent = 'Invalid JSON: ' + err;");
+            sb.AppendLine(@"      }");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    return;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  if(step.type === 'delay'){");
+            sb.AppendLine(@"    flowEditorEl.innerHTML = `<div class=""flow-editor""><div class=""flow-small"">Type: Delay</div><label>Step Name</label><input id=""editDelayName"" value=""${escapeHtml(step.name || 'delay(ms)')}""><label>Delay (ms)</label><input id=""editDelayMs"" type=""number"" min=""0"" step=""10"" value=""${Number(step.delayMs || 0)}""></div>`;");
+            sb.AppendLine(@"    const delayNameEl = document.getElementById('editDelayName');");
+            sb.AppendLine(@"    const delayMsEl = document.getElementById('editDelayMs');");
+            sb.AppendLine(@"    delayNameEl.addEventListener('input', () => { step.name = delayNameEl.value; renderFlowCanvas(); });");
+            sb.AppendLine(@"    delayMsEl.addEventListener('input', () => { step.delayMs = Math.max(0, Number(delayMsEl.value) || 0); syncFlowJson(); renderFlowCanvas(); });");
+            sb.AppendLine(@"    return;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  if(step.type === 'keyword_wait'){");
+            sb.AppendLine(@"    flowEditorEl.innerHTML = `<div class=""flow-editor""><div class=""flow-small"">Type: Wait Keyword</div><label>Step Name</label><input id=""editKeywordName"" value=""${escapeHtml(step.name || 'wait_keyword')}""><label>Keyword</label><input id=""editKeywordValue"" value=""${escapeHtml(step.keyword || '')}""><label>Source</label><select id=""editKeywordSource""><option value=""user"">User Speech</option><option value=""coach"">Coach Reply</option><option value=""any"">Any Message</option></select><label>Timeout (ms)</label><input id=""editKeywordTimeout"" type=""number"" min=""100"" step=""100"" value=""${Number(step.timeoutMs || 12000)}""><label>Poll Interval (ms)</label><input id=""editKeywordPoll"" type=""number"" min=""100"" step=""50"" value=""${Number(step.pollMs || 350)}""><div class=""flow-inline""><input type=""checkbox"" id=""editKeywordCase""><label for=""editKeywordCase"" style=""margin:0;"">Case sensitive</label></div><div class=""flow-inline""><input type=""checkbox"" id=""editKeywordOnlyNew""><label for=""editKeywordOnlyNew"" style=""margin:0;"">Only match new recognized text</label></div></div>`;");
+            sb.AppendLine(@"    const nameEl = document.getElementById('editKeywordName');");
+            sb.AppendLine(@"    const valueEl = document.getElementById('editKeywordValue');");
+            sb.AppendLine(@"    const sourceEl = document.getElementById('editKeywordSource');");
+            sb.AppendLine(@"    const timeoutEl = document.getElementById('editKeywordTimeout');");
+            sb.AppendLine(@"    const pollEl = document.getElementById('editKeywordPoll');");
+            sb.AppendLine(@"    const caseEl = document.getElementById('editKeywordCase');");
+            sb.AppendLine(@"    const onlyNewEl = document.getElementById('editKeywordOnlyNew');");
+            sb.AppendLine(@"    sourceEl.value = String(step.source || 'user').toLowerCase();");
+            sb.AppendLine(@"    caseEl.checked = !!step.caseSensitive;");
+            sb.AppendLine(@"    onlyNewEl.checked = step.onlyNew !== false;");
+            sb.AppendLine(@"    nameEl.addEventListener('input', () => { step.name = nameEl.value; renderFlowCanvas(); });");
+            sb.AppendLine(@"    valueEl.addEventListener('input', () => { step.keyword = valueEl.value; syncFlowJson(); renderFlowCanvas(); });");
+            sb.AppendLine(@"    sourceEl.addEventListener('change', () => { step.source = sourceEl.value; syncFlowJson(); renderFlowCanvas(); });");
+            sb.AppendLine(@"    timeoutEl.addEventListener('input', () => { step.timeoutMs = Math.max(100, Number(timeoutEl.value) || 12000); syncFlowJson(); renderFlowCanvas(); });");
+            sb.AppendLine(@"    pollEl.addEventListener('input', () => { step.pollMs = Math.max(100, Number(pollEl.value) || 350); syncFlowJson(); renderFlowCanvas(); });");
+            sb.AppendLine(@"    caseEl.addEventListener('change', () => { step.caseSensitive = caseEl.checked; syncFlowJson(); });");
+            sb.AppendLine(@"    onlyNewEl.addEventListener('change', () => { step.onlyNew = onlyNewEl.checked; syncFlowJson(); });");
+            sb.AppendLine(@"    return;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  flowEditorEl.innerHTML = `<div class=""flow-editor""><div class=""flow-small"">Type: Condition</div><label>Step Name</label><input id=""editCondName"" value=""${escapeHtml(step.name || 'condition(expr)')}""><label>Expression (JS)</label><textarea id=""editConditionExpr"">${escapeHtml(step.expression || '')}</textarea><div class=""flow-small"">Use <span class=""mono"">ctx.lastStatus</span>, <span class=""mono"">ctx.lastJson</span>, <span class=""mono"">ctx.lastRaw</span>, <span class=""mono"">ctx.lastRecognized</span>.</div></div>`;");
+            sb.AppendLine(@"  const condNameEl = document.getElementById('editCondName');");
+            sb.AppendLine(@"  const condExprEl = document.getElementById('editConditionExpr');");
+            sb.AppendLine(@"  condNameEl.addEventListener('input', () => { step.name = condNameEl.value; renderFlowCanvas(); });");
+            sb.AppendLine(@"  condExprEl.addEventListener('change', () => { step.expression = condExprEl.value; syncFlowJson(); renderFlowCanvas(); });");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function evaluateCondition(expr, ctx){");
+            sb.AppendLine(@"  const source = String(expr || '').trim();");
+            sb.AppendLine(@"  if(!source){ return true; }");
+            sb.AppendLine(@"  const body = source.includes('return') ? source : `return (${source});`;");
+            sb.AppendLine(@"  const fn = new Function('ctx', body);");
+            sb.AppendLine(@"  return !!fn(ctx);");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function runFlow(){");
+            sb.AppendLine(@"  if(flowRunning){ flowStatusEl.textContent = 'Flow already running.'; return; }");
+            sb.AppendLine(@"  if(!flowSteps.length){ flowStatusEl.textContent = 'No steps in flow.'; return; }");
+            sb.AppendLine(@"  flowRunning = true;");
+            sb.AppendLine(@"  flowRunToken += 1;");
+            sb.AppendLine(@"  const token = flowRunToken;");
+            sb.AppendLine(@"  flowStatusEl.textContent = 'Running...';");
+            sb.AppendLine(@"  appendFlowLog('Flow started with ' + flowSteps.length + ' steps.');");
+            sb.AppendLine(@"  flowSteps.forEach(s => { s._state = ''; });");
+            sb.AppendLine(@"  const ctx = { lastStatus:0, lastJson:null, lastRaw:'', lastRecognized:'', lastRecognizedEntry:null };");
+            sb.AppendLine(@"  for(let i = 0; i < flowSteps.length; i++){");
+            sb.AppendLine(@"    if(token !== flowRunToken){");
+            sb.AppendLine(@"      flowStatusEl.textContent = 'Stopped.';");
+            sb.AppendLine(@"      appendFlowLog('Flow stopped.');");
+            sb.AppendLine(@"      flowRunning = false;");
+            sb.AppendLine(@"      renderFlowCanvas();");
+            sb.AppendLine(@"      return;");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    const step = flowSteps[i];");
+            sb.AppendLine(@"    step._state = 'running';");
+            sb.AppendLine(@"    flowSelectedId = step.id;");
+            sb.AppendLine(@"    renderFlowCanvas();");
+            sb.AppendLine(@"    try {");
+            sb.AppendLine(@"      if(step.type === 'api'){");
+            sb.AppendLine(@"        const result = await callEndpoint(step.endpoint, step.method, step.payload);");
+            sb.AppendLine(@"        ctx.lastStatus = result.status;");
+            sb.AppendLine(@"        ctx.lastJson = result.json;");
+            sb.AppendLine(@"        ctx.lastRaw = result.raw;");
+            sb.AppendLine(@"        if(result.ok){");
+            sb.AppendLine(@"          step._state = 'ok';");
+            sb.AppendLine(@"          appendFlowLog(`Step ${i + 1} OK: ${step.method} ${step.endpoint} -> HTTP ${result.status}`);");
+            sb.AppendLine(@"        } else if(step.continueOnError){");
+            sb.AppendLine(@"          step._state = 'error';");
+            sb.AppendLine(@"          appendFlowLog(`Step ${i + 1} HTTP ${result.status} but continueOnError=true.`);");
+            sb.AppendLine(@"        } else {");
+            sb.AppendLine(@"          throw new Error(`HTTP ${result.status} ${result.statusText}`);");
+            sb.AppendLine(@"        }");
+            sb.AppendLine(@"      } else if(step.type === 'delay'){");
+            sb.AppendLine(@"        const ms = Math.max(0, Number(step.delayMs) || 0);");
+            sb.AppendLine(@"        await new Promise(resolve => setTimeout(resolve, ms));");
+            sb.AppendLine(@"        if(token !== flowRunToken){ throw new Error('Stopped'); }");
+            sb.AppendLine(@"        step._state = 'ok';");
+            sb.AppendLine(@"        appendFlowLog(`Step ${i + 1} OK: delay ${ms}ms`);");
+            sb.AppendLine(@"      } else if(step.type === 'keyword_wait'){");
+            sb.AppendLine(@"        const keyword = String(step.keyword || '').trim();");
+            sb.AppendLine(@"        const timeoutMs = Math.max(100, Number(step.timeoutMs) || 12000);");
+            sb.AppendLine(@"        const pollMs = Math.max(100, Number(step.pollMs) || 350);");
+            sb.AppendLine(@"        const source = String(step.source || 'user').toLowerCase();");
+            sb.AppendLine(@"        const caseSensitive = !!step.caseSensitive;");
+            sb.AppendLine(@"        const onlyNew = step.onlyNew !== false;");
+            sb.AppendLine(@"        if(!keyword){ throw new Error('keyword required'); }");
+            sb.AppendLine(@"        let baselineKey = '';");
+            sb.AppendLine(@"        try {");
+            sb.AppendLine(@"          const baseline = await fetchLatestLogEntry(source);");
+            sb.AppendLine(@"          baselineKey = baseline ? baseline.key : '';");
+            sb.AppendLine(@"        } catch(err) { }");
+            sb.AppendLine(@"        const waitStart = Date.now();");
+            sb.AppendLine(@"        let matched = null;");
+            sb.AppendLine(@"        appendFlowLog(`Step ${i + 1} waiting keyword: ${keyword}`);");
+            sb.AppendLine(@"        while((Date.now() - waitStart) <= timeoutMs){");
+            sb.AppendLine(@"          if(token !== flowRunToken){ throw new Error('Stopped'); }");
+            sb.AppendLine(@"          try {");
+            sb.AppendLine(@"            const latest = await fetchLatestLogEntry(source);");
+            sb.AppendLine(@"            if(latest){");
+            sb.AppendLine(@"              const isFresh = !onlyNew || latest.key !== baselineKey;");
+            sb.AppendLine(@"              if(isFresh && keywordMatch(latest.text, keyword, caseSensitive)){");
+            sb.AppendLine(@"                matched = latest;");
+            sb.AppendLine(@"                break;");
+            sb.AppendLine(@"              }");
+            sb.AppendLine(@"            }");
+            sb.AppendLine(@"          } catch(err) { }");
+            sb.AppendLine(@"          await new Promise(resolve => setTimeout(resolve, pollMs));");
+            sb.AppendLine(@"        }");
+            sb.AppendLine(@"        if(!matched){ throw new Error(`Keyword not detected within ${timeoutMs}ms: ${keyword}`); }");
+            sb.AppendLine(@"        ctx.lastRecognized = matched.text;");
+            sb.AppendLine(@"        ctx.lastRecognizedEntry = matched;");
+            sb.AppendLine(@"        step._state = 'ok';");
+            sb.AppendLine(@"        appendFlowLog(`Step ${i + 1} OK: keyword matched -> ${matched.text}`);");
+            sb.AppendLine(@"      } else if(step.type === 'condition'){");
+            sb.AppendLine(@"        const pass = evaluateCondition(step.expression, ctx);");
+            sb.AppendLine(@"        if(!pass){ throw new Error('Condition returned false'); }");
+            sb.AppendLine(@"        step._state = 'ok';");
+            sb.AppendLine(@"        appendFlowLog(`Step ${i + 1} OK: condition true`);");
+            sb.AppendLine(@"      } else {");
+            sb.AppendLine(@"        throw new Error('Unknown step type: ' + step.type);");
+            sb.AppendLine(@"      }");
+            sb.AppendLine(@"    } catch(err){");
+            sb.AppendLine(@"      if(String(err) === 'Error: Stopped'){");
+            sb.AppendLine(@"        flowStatusEl.textContent = 'Stopped.';");
+            sb.AppendLine(@"        flowRunning = false;");
+            sb.AppendLine(@"        renderFlowCanvas();");
+            sb.AppendLine(@"        return;");
+            sb.AppendLine(@"      }");
+            sb.AppendLine(@"      if(step.type === 'api' && step.continueOnError){");
+            sb.AppendLine(@"        step._state = 'error';");
+            sb.AppendLine(@"        appendFlowLog(`Step ${i + 1} error ignored: ${err}`);");
+            sb.AppendLine(@"      } else {");
+            sb.AppendLine(@"        step._state = 'error';");
+            sb.AppendLine(@"        flowStatusEl.textContent = `Failed at step ${i + 1}: ${err}`;");
+            sb.AppendLine(@"        appendFlowLog(`Flow failed at step ${i + 1}: ${err}`);");
+            sb.AppendLine(@"        flowRunning = false;");
+            sb.AppendLine(@"        renderFlowCanvas();");
+            sb.AppendLine(@"        return;");
+            sb.AppendLine(@"      }");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    renderFlowCanvas();");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  flowStatusEl.textContent = 'Completed.';");
+            sb.AppendLine(@"  appendFlowLog('Flow completed.');");
+            sb.AppendLine(@"  flowRunning = false;");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function stopFlow(){");
+            sb.AppendLine(@"  if(!flowRunning){ flowStatusEl.textContent = 'Flow is not running.'; return; }");
+            sb.AppendLine(@"  flowRunToken += 1;");
+            sb.AppendLine(@"  flowRunning = false;");
+            sb.AppendLine(@"  flowStatusEl.textContent = 'Stop requested...';");
+            sb.AppendLine(@"  appendFlowLog('Stop requested.');");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function clearFlow(){");
+            sb.AppendLine(@"  if(flowRunning){ flowStatusEl.textContent = 'Stop flow first.'; return; }");
+            sb.AppendLine(@"  flowSteps = [];");
+            sb.AppendLine(@"  flowSelectedId = '';");
+            sb.AppendLine(@"  flowLogEl.textContent = '';");
+            sb.AppendLine(@"  flowStatusEl.textContent = 'Flow cleared.';");
+            sb.AppendLine(@"  renderFlowCanvas();");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function exportFlow(){");
+            sb.AppendLine(@"  syncFlowJson();");
+            sb.AppendLine(@"  flowStatusEl.textContent = 'Flow exported to JSON box.';");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function importFlow(){");
+            sb.AppendLine(@"  if(flowRunning){ flowStatusEl.textContent = 'Stop flow first.'; return; }");
+            sb.AppendLine(@"  let data;");
+            sb.AppendLine(@"  try { data = JSON.parse(flowJsonEl.value || '[]'); }");
+            sb.AppendLine(@"  catch(err){ flowStatusEl.textContent = 'Import failed: invalid JSON'; return; }");
+            sb.AppendLine(@"  if(!Array.isArray(data)){ flowStatusEl.textContent = 'Import failed: JSON root must be array'; return; }");
+            sb.AppendLine(@"  const nextSteps = [];");
+            sb.AppendLine(@"  for(let i = 0; i < data.length; i++){");
+            sb.AppendLine(@"    const raw = data[i] || {};");
+            sb.AppendLine(@"    if(raw.type === 'api'){");
+            sb.AppendLine(@"      nextSteps.push({");
+            sb.AppendLine(@"        id: makeStepId(),");
+            sb.AppendLine(@"        type: 'api',");
+            sb.AppendLine(@"        name: String(raw.name || 'api'),");
+            sb.AppendLine(@"        endpoint: String(raw.endpoint || ''),");
+            sb.AppendLine(@"        method: String(raw.method || 'POST').toUpperCase(),");
+            sb.AppendLine(@"        payload: (raw.payload && typeof raw.payload === 'object') ? raw.payload : {},");
+            sb.AppendLine(@"        continueOnError: !!raw.continueOnError");
+            sb.AppendLine(@"      });");
+            sb.AppendLine(@"      continue;");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    if(raw.type === 'delay'){");
+            sb.AppendLine(@"      nextSteps.push({ id: makeStepId(), type:'delay', name:String(raw.name || 'delay(ms)'), delayMs:Math.max(0, Number(raw.delayMs) || 0) });");
+            sb.AppendLine(@"      continue;");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    if(raw.type === 'condition'){");
+            sb.AppendLine(@"      nextSteps.push({ id: makeStepId(), type:'condition', name:String(raw.name || 'condition(expr)'), expression:String(raw.expression || '') });");
+            sb.AppendLine(@"      continue;");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    if(raw.type === 'keyword_wait'){");
+            sb.AppendLine(@"      nextSteps.push({");
+            sb.AppendLine(@"        id: makeStepId(),");
+            sb.AppendLine(@"        type:'keyword_wait',");
+            sb.AppendLine(@"        name:String(raw.name || 'wait_keyword'),");
+            sb.AppendLine(@"        keyword:String(raw.keyword || ''),");
+            sb.AppendLine(@"        timeoutMs:Math.max(100, Number(raw.timeoutMs) || 12000),");
+            sb.AppendLine(@"        pollMs:Math.max(100, Number(raw.pollMs) || 350),");
+            sb.AppendLine(@"        source:String(raw.source || 'user').toLowerCase(),");
+            sb.AppendLine(@"        caseSensitive:!!raw.caseSensitive,");
+            sb.AppendLine(@"        onlyNew:raw.onlyNew !== false");
+            sb.AppendLine(@"      });");
+            sb.AppendLine(@"      continue;");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    flowStatusEl.textContent = `Import warning: skipped unknown type at index ${i}`;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  flowSteps = nextSteps;");
+            sb.AppendLine(@"  flowSelectedId = flowSteps.length ? flowSteps[0].id : '';");
+            sb.AppendLine(@"  flowStatusEl.textContent = `Imported ${flowSteps.length} steps.`;");
+            sb.AppendLine(@"  renderFlowCanvas();");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"flowCanvasEl.addEventListener('dragover', ev => ev.preventDefault());");
+            sb.AppendLine(@"flowCanvasEl.addEventListener('drop', ev => {");
+            sb.AppendLine(@"  ev.preventDefault();");
+            sb.AppendLine(@"  if(dragTemplateKey){");
+            sb.AppendLine(@"    const step = createStepFromTemplate(dragTemplateKey);");
+            sb.AppendLine(@"    if(step){");
+            sb.AppendLine(@"      flowSteps.push(step);");
+            sb.AppendLine(@"      flowSelectedId = step.id;");
+            sb.AppendLine(@"      renderFlowCanvas();");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"  } else if(dragStepId){");
+            sb.AppendLine(@"    moveStepToEnd(dragStepId);");
+            sb.AppendLine(@"    renderFlowCanvas();");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  dragTemplateKey = '';");
+            sb.AppendLine(@"  dragStepId = '';");
+            sb.AppendLine(@"});");
+            sb.AppendLine(@"flowCanvasEl.addEventListener('click', ev => {");
+            sb.AppendLine(@"  const btn = ev.target.closest('button[data-action]');");
+            sb.AppendLine(@"  if(!btn) return;");
+            sb.AppendLine(@"  const action = btn.getAttribute('data-action');");
+            sb.AppendLine(@"  const id = btn.getAttribute('data-id');");
+            sb.AppendLine(@"  if(!id) return;");
+            sb.AppendLine(@"  const idx = flowSteps.findIndex(s => s.id === id);");
+            sb.AppendLine(@"  if(idx < 0) return;");
+            sb.AppendLine(@"  if(action === 'select'){");
+            sb.AppendLine(@"    flowSelectedId = id;");
+            sb.AppendLine(@"    renderFlowCanvas();");
+            sb.AppendLine(@"    return;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  if(action === 'delete'){");
+            sb.AppendLine(@"    flowSteps.splice(idx, 1);");
+            sb.AppendLine(@"    if(flowSelectedId === id){ flowSelectedId = flowSteps.length ? flowSteps[Math.max(0, idx - 1)].id : ''; }");
+            sb.AppendLine(@"    renderFlowCanvas();");
+            sb.AppendLine(@"    return;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  if(action === 'up' && idx > 0){");
+            sb.AppendLine(@"    const tmp = flowSteps[idx - 1];");
+            sb.AppendLine(@"    flowSteps[idx - 1] = flowSteps[idx];");
+            sb.AppendLine(@"    flowSteps[idx] = tmp;");
+            sb.AppendLine(@"    renderFlowCanvas();");
+            sb.AppendLine(@"    return;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  if(action === 'down' && idx < flowSteps.length - 1){");
+            sb.AppendLine(@"    const tmp = flowSteps[idx + 1];");
+            sb.AppendLine(@"    flowSteps[idx + 1] = flowSteps[idx];");
+            sb.AppendLine(@"    flowSteps[idx] = tmp;");
+            sb.AppendLine(@"    renderFlowCanvas();");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"});");
+            sb.AppendLine(@"flowRunBtn.addEventListener('click', runFlow);");
+            sb.AppendLine(@"flowStopBtn.addEventListener('click', stopFlow);");
+            sb.AppendLine(@"flowClearBtn.addEventListener('click', clearFlow);");
+            sb.AppendLine(@"flowExportBtn.addEventListener('click', exportFlow);");
+            sb.AppendLine(@"flowImportBtn.addEventListener('click', importFlow);");
             sb.AppendLine(@"methodEl.addEventListener('change', syncMethod);");
             sb.AppendLine(@"syncMethod();");
+            sb.AppendLine(@"renderTemplates();");
+            sb.AppendLine(@"renderFlowCanvas();");
             sb.AppendLine(@"</script>");
             sb.AppendLine(@"</body>");
             sb.AppendLine(@"</html>");

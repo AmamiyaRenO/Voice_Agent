@@ -11,7 +11,7 @@ MQTT topics already used by the Unity client.
 - **Face presets**: publish to `robot/pi/face/cmd`.
 - **Servo / flower control**: publish to `robot/pi/servo/cmd`.
 - **LED control**: publish to `robot/pi/led/cmd`.
-- **Dialog style**: publish to `robot/dialog/style`.
+- **LLM prompt**: get/set/reset runtime `/respond` system prompt via `UserTestControlPanel` (`/api/llm/prompt`).
 - **TTS options**: publish to `robot/tts/options`.
 - **Game launch / exit**: publish to `robot/intent`.
 
@@ -49,9 +49,13 @@ client.led_off()
 client.servo_open_hold()
 client.servo_close_slow()
 
-# Dialog style + TTS options
-client.set_dialog_style("Supportive")
+# TTS options
 client.set_tts_options(voice="en_US", model=r"D:\piper\models\en_US-amy-medium.onnx")
+
+# Runtime LLM system prompt (real-time via UserTestControlPanel)
+cfg = client.get_llm_prompt()
+client.set_llm_prompt("You are a concise rehab coach. Keep replies to 1-2 sentences.")
+# client.reset_llm_prompt()
 
 # Game intents
 client.launch_game("cornhole")
@@ -62,5 +66,5 @@ client.exit_game()
 
 - The LED/servo payloads follow the same format that the Unity
   `PiMessageHub` publishes (colon-delimited values inside the MQTT payload).
-- Dialog style and TTS options are sent on dedicated MQTT topics used by the
+- TTS options are sent on dedicated MQTT topics used by the
   Unity `VoiceGameLauncher`.

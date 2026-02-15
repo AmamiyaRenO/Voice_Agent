@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
+import logging
 import os
 import subprocess
 import tempfile
+import wave
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -13,6 +16,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Piper TTS Wrapper")
+logger = logging.getLogger("piper_http")
 
 
 class TtsRequest(BaseModel):
@@ -31,6 +35,18 @@ def _env(key: str, default: str = "") -> str:
     return v.strip() if v else default
 
 
+def _env_bool(key: str, default: bool) -> bool:
+    v = os.getenv(key)
+    if v is None:
+        return default
+    n = v.strip().lower()
+    if n in {"1", "true", "yes", "on"}:
+        return True
+    if n in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _infer_config_for_model(model_path: str) -> str | None:
     path = Path(model_path)
     candidates = []
@@ -41,6 +57,19 @@ def _infer_config_for_model(model_path: str) -> str | None:
     for candidate in candidates:
         if candidate.exists():
             return str(candidate)
+    return None
+
+
+def _normalize_speaker_arg(speaker_raw: str | None) -> str | None:
+    speaker = (speaker_raw or "").strip()
+    if not speaker:
+        return None
+    if speaker.isdigit():
+        return speaker
+    # Most Piper builds expect numeric speaker ids. Ignore string labels by default.
+    if _env_bool("PIPER_ALLOW_STRING_SPEAKER", False):
+        return speaker
+    logger.info("Ignoring non-numeric Piper speaker override: %r", speaker)
     return None
 
 
@@ -76,9 +105,9 @@ def _build_command(
             cfg = inferred
     if cfg:
         cmd += ["--config", cfg]
-    speaker = (speaker_override or "").strip()
+    speaker = _normalize_speaker_arg(speaker_override)
     if not speaker:
-        speaker = _env("PIPER_SPEAKER")
+        speaker = _normalize_speaker_arg(_env("PIPER_SPEAKER"))
     if speaker:
         cmd += ["--speaker", speaker]
     return cmd
@@ -157,6 +186,11 @@ async def _stream_piper_raw(
         return_code = await process.wait()
         if return_code != 0:
             detail = stderr_bytes.decode("utf-8", errors="replace").strip() or f"piper exited with code {return_code}"
+            if return_code in {3221226505, -1073740791}:
+                detail = (
+                    f"{detail} (Windows STATUS_STACK_BUFFER_OVERRUN). "
+                    "Try non-streaming fallback and avoid invalid --speaker values."
+                )
             raise RuntimeError(detail)
     finally:
         try:
@@ -168,6 +202,17 @@ async def _stream_piper_raw(
 
 # Gate synthesis concurrency to avoid spawning multiple heavy Piper processes simultaneously.
 _SYNTH_SEM = asyncio.Semaphore(max(1, int(os.getenv("PIPER_MAX_CONCURRENCY", "1") or "1")))
+
+
+def _wav_to_pcm16_mono(wav_bytes: bytes) -> bytes:
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        if channels != 1 or sample_width != 2:
+            raise RuntimeError(
+                f"Expected mono s16 WAV from Piper fallback, got channels={channels} sample_width={sample_width}"
+            )
+        return wf.readframes(wf.getnframes())
 
 
 async def _synthesize_audio(text: str, model_override: str | None = None, config_override: str | None = None) -> tuple[bytes, int]:
@@ -228,14 +273,35 @@ async def speak_stream(
     }
 
     async def _iter() -> AsyncIterator[bytes]:
-        async with _SYNTH_SEM:
-            async for chunk in _stream_piper_raw(
-                text=text,
-                model_override=model_override,
-                config_override=config_override,
-                speaker_override=speaker_override,
-            ):
-                yield chunk
+        stream_started = False
+        try:
+            async with _SYNTH_SEM:
+                async for chunk in _stream_piper_raw(
+                    text=text,
+                    model_override=model_override,
+                    config_override=config_override,
+                    speaker_override=speaker_override,
+                ):
+                    stream_started = True
+                    yield chunk
+            return
+        except Exception as exc:
+            # Graceful downgrade: if real streaming fails, synthesize WAV and stream PCM bytes.
+            # This avoids ASGI exception groups and keeps caller behavior stable.
+            logger.warning("Piper /speak_stream failed (%s); falling back to non-stream synth", exc)
+            if stream_started:
+                # Stream already emitted bytes; cannot safely switch protocol mid-flight.
+                return
+
+        wav_bytes, _ = await _synthesize_audio(
+            text=text,
+            model_override=model_override,
+            config_override=config_override,
+        )
+        pcm_bytes = _wav_to_pcm16_mono(wav_bytes)
+        chunk_size = 4096
+        for offset in range(0, len(pcm_bytes), chunk_size):
+            yield pcm_bytes[offset : offset + chunk_size]
 
     return StreamingResponse(
         _iter(),

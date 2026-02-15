@@ -138,6 +138,12 @@ namespace RobotVoice
             try
             {
                 var node = JSONNode.Parse(json);
+                var messageType = node?["type"]?.Value ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(messageType) &&
+                    !messageType.Equals("ANSWER", StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
                 var text = node?["text"]?.Value ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(text)) return;
                 var corrId = node?["corr_id"]?.Value ?? string.Empty;
@@ -272,4 +278,3 @@ namespace RobotVoice
         }
     }
 }
-

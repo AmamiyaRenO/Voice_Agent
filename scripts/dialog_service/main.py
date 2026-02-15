@@ -29,7 +29,6 @@ class Topics:
     dialog_answer: str = "robot/dialog/answer"
     tts_state: str = "robot/tts/state"
     tts_options: str = "robot/tts/options"
-    style: str = "robot/dialog/style"
 
 
 @dataclass
@@ -58,7 +57,6 @@ def load_config() -> Config:
         dialog_answer=os.environ.get("DIALOG_ANSWER_TOPIC", cfg.topics.dialog_answer),
         tts_state=os.environ.get("DIALOG_TTS_STATE_TOPIC", cfg.topics.tts_state),
         tts_options=os.environ.get("DIALOG_TTS_OPTIONS_TOPIC", cfg.topics.tts_options),
-        style=os.environ.get("DIALOG_STYLE_TOPIC", cfg.topics.style),
     )
     # Backward compatibility: VOICE_API_URL used to serve both; now prefer RESPOND_API_URL and TTS_API_URL/PIPER_HTTP_URL
     cfg.respond_api_url = os.environ.get("RESPOND_API_URL", os.environ.get("VOICE_API_URL", cfg.respond_api_url)).rstrip("/")
@@ -142,40 +140,13 @@ class DialogService:
         self.http = httpx.Client(timeout=30.0)
         self.tts_voice: Optional[str] = None
         self.tts_model: Optional[str] = None
-        self.current_style: Optional[str] = None
-        self.current_system_prompt: Optional[str] = None
+        # Keep compression for latency, but defaults must not truncate sentence semantics.
         self.reply_compress = _env_bool("DIALOG_REPLY_COMPRESS", True)
-        self.reply_max_sentences = _env_int("DIALOG_MAX_REPLY_SENTENCES", 1, floor=0)
+        self.reply_max_sentences = _env_int("DIALOG_MAX_REPLY_SENTENCES", 2, floor=0)
         self.reply_max_chars = _env_int("DIALOG_MAX_REPLY_CHARS", 0, floor=0)
-        self.reply_max_words = _env_int("DIALOG_MAX_REPLY_WORDS", 14, floor=0)
+        self.reply_max_words = _env_int("DIALOG_MAX_REPLY_WORDS", 0, floor=0)
         if os.environ.get("DIALOG_SPEAK_AUDIO"):
             print("[dialog] NOTE: DIALOG_SPEAK_AUDIO is set but will be ignored (forced off for AEC).")
-
-    @staticmethod
-    def _style_to_prompt(style: str) -> Optional[str]:
-        s = (style or "").strip().lower()
-        if not s:
-            return None
-        if s in {"supportive", "coach", "friendly"}:
-            return (
-                "You are Rachel, a supportive rehabilitation and exercise coach. "
-                "Be encouraging, concise, and proactive. Use simple sentences. "
-                "Guide the user step by step and celebrate small progress."
-            )
-        if s in {"minimalist", "short", "brief"}:
-            return (
-                "You are Rachel the coach. Reply in very short, minimal sentences. "
-                "Only the essential guidance, no small talk. Max two sentences."
-            )
-        if s in {"energetic", "enthusiastic", "cheerful"}:
-            return (
-                "You are Rachel, an energetic and motivating fitness coach. "
-                "Be upbeat and positive. Keep responses concise but spirited."
-            )
-        # Fallback: treat the style string itself as a custom system prompt if it's long
-        if len(s) > 12:
-            return style
-        return None
 
     def start(self) -> None:
         print(f"[dialog] connecting to mqtt {self.cfg.host}:{self.cfg.port}")
@@ -195,8 +166,6 @@ class DialogService:
         print(f"[dialog] subscribed {self.cfg.topics.dialog_query}")
         client.subscribe(self.cfg.topics.tts_options)
         print(f"[dialog] subscribed {self.cfg.topics.tts_options}")
-        client.subscribe(self.cfg.topics.style)
-        print(f"[dialog] subscribed {self.cfg.topics.style}")
 
     def _publish_answer(self, text: str, corr_id: Optional[str]) -> None:
         self._publish_answer_ex(text=text, corr_id=corr_id, tts_speaker=None)
@@ -253,15 +222,6 @@ class DialogService:
             self.tts_model = model or None
             print(f"[dialog] tts options updated voice='{self.tts_voice}' model='{self.tts_model}'")
             return
-        # Style prompt update
-        if topic == self.cfg.topics.style:
-            style = str(payload.get("style") or payload.get("value") or payload or "").strip()
-            prompt = self._style_to_prompt(style)
-            self.current_style = style or None
-            self.current_system_prompt = prompt
-            print(f"[dialog] style updated style='{self.current_style}' prompt={'set' if self.current_system_prompt else 'unset'}")
-            return
-
         text = str(payload.get("text") or "").strip()
         if not text:
             return
@@ -269,18 +229,8 @@ class DialogService:
 
         try:
             url = f"{self.cfg.respond_api_url}{self.cfg.respond_endpoint}"
-            system_prompt = self.current_system_prompt or None
-            if system_prompt:
-                system_prompt = system_prompt.strip()
-            else:
-                # Default persona if no style prompt was configured.
-                system_prompt = (
-                    "You are Rachel, a supportive rehabilitation and exercise coach. "
-                    "Be encouraging, concise, and proactive. Use simple sentences. "
-                    "Prefer one short sentence (under 20 words) so speech starts quickly."
-                )
-
-            body = {"text": text, "system": system_prompt}
+            body = {"text": text}
+            print("[dialog] respond uses backend runtime/default system prompt")
             resp = self.http.post(url, json=body)
             resp.raise_for_status()
             data = resp.json()
@@ -301,6 +251,8 @@ class DialogService:
             )
             answer_text = _compress_reply_by_words(answer_text, self.reply_max_words)
             answer_text = _trim_trailing_connectors(answer_text)
+            if answer_text and answer_text[-1] not in ".!?":
+                answer_text = f"{answer_text}."
         if not answer_text:
             return
         # Prefer the TTS speaker selected by the UI (tts_options topic), if any.

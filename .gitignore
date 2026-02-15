@@ -114,8 +114,7 @@ __pycache__/
 /[Aa]ssets/StreamingAssets/vosk*/*.zip
 /[Aa]ssets/StreamingAssets/vosk*/*.zip.meta
 
-/[Pp]ackages/manifest.json
-/[Pp]ackages/packages-lock.json
+# Keep Unity package manifest/lock tracked for reproducible dependency resolution.
 
 # Mediapipe
 Assets/StreamingAssets/mediapipe

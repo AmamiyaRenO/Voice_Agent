@@ -98,3 +98,37 @@ def test_set_dialog_style_publishes_message():
     data = json.loads(payload)
     assert topic == "robot/dialog/style"
     assert data["style"] == "Supportive"
+
+
+def test_get_llm_prompt_calls_panel_endpoint():
+    session = mock.Mock()
+    response = mock.Mock()
+    response.raise_for_status = mock.Mock()
+    response.json.return_value = {"status": "ok", "prompt": "You are a coach"}
+    session.get.return_value = response
+
+    client = make_client(http_session=session)
+    data = client.get_llm_prompt()
+
+    assert data["status"] == "ok"
+    session.get.assert_called_once()
+    args, kwargs = session.get.call_args
+    assert args[0].endswith("/api/llm/prompt")
+    assert kwargs["timeout"] == 10.0
+
+
+def test_set_llm_prompt_posts_to_panel_endpoint():
+    session = mock.Mock()
+    response = mock.Mock()
+    response.raise_for_status = mock.Mock()
+    response.json.return_value = {"status": "ok", "message": "llm prompt updated"}
+    session.post.return_value = response
+
+    client = make_client(http_session=session)
+    data = client.set_llm_prompt("You are concise.")
+
+    assert data["status"] == "ok"
+    session.post.assert_called_once()
+    args, kwargs = session.post.call_args
+    assert args[0].endswith("/api/llm/prompt")
+    assert kwargs["json"]["prompt"] == "You are concise."

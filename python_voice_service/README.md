@@ -108,6 +108,23 @@ Unity client. The `VoiceGameLauncher` script forwards both launch/exit
 intents and general wake-word commands to `/respond`, so the coach can
 answer free-form questions alongside the existing keyword workflows.
 
+You can also edit the runtime system prompt without restarting the service:
+
+```bash
+# Read current effective prompt
+curl "http://127.0.0.1:8000/respond/config"
+
+# Set runtime override
+curl -X POST "http://127.0.0.1:8000/respond/config" \
+     -H "Content-Type: application/json" \
+     -d '{"system_prompt":"You are a concise rehab coach. Keep replies under 2 sentences."}'
+
+# Reset runtime override back to env/default
+curl -X POST "http://127.0.0.1:8000/respond/config" \
+     -H "Content-Type: application/json" \
+     -d '{"reset":true}'
+```
+
 ## TTS backends (Piper main + Qwen test)
 
 Unity can fetch speech from:

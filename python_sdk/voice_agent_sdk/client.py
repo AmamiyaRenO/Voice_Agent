@@ -61,6 +61,11 @@ class VoiceAgentClient:
         # Mirrors UserTestControlPanel: POST /api/speak
         return f"http://{self._host}:{self._panel_port}/api/speak"
 
+    @property
+    def panel_llm_prompt_url(self) -> str:
+        # Mirrors UserTestControlPanel: GET/POST /api/llm/prompt
+        return f"http://{self._host}:{self._panel_port}/api/llm/prompt"
+
     def connect_mqtt(self, start_loop: bool = True) -> None:
         if self._mqtt_client is None:
             self._mqtt_client = mqtt.Client()
@@ -167,6 +172,43 @@ class VoiceAgentClient:
         if not style or not style.strip():
             raise ValueError("style is required")
         self._publish(self.dialog_style_topic, {"style": style})
+
+    def get_llm_prompt(self, timeout: float = 10.0) -> Dict[str, Any]:
+        """Fetch the current runtime LLM system prompt from UserTestControlPanel (/api/llm/prompt)."""
+        response = self._http.get(self.panel_llm_prompt_url, timeout=timeout)
+        response.raise_for_status()
+        try:
+            return response.json()
+        except Exception:
+            return {"raw": response.text}
+
+    def set_llm_prompt(self, prompt: str, timeout: float = 10.0) -> Dict[str, Any]:
+        """Set runtime LLM system prompt via UserTestControlPanel (/api/llm/prompt)."""
+        if not prompt or not prompt.strip():
+            raise ValueError("prompt is required")
+        response = self._http.post(
+            self.panel_llm_prompt_url,
+            json={"prompt": prompt},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        try:
+            return response.json()
+        except Exception:
+            return {"raw": response.text}
+
+    def reset_llm_prompt(self, timeout: float = 10.0) -> Dict[str, Any]:
+        """Reset runtime LLM system prompt to env/default via UserTestControlPanel (/api/llm/prompt)."""
+        response = self._http.post(
+            self.panel_llm_prompt_url,
+            json={"reset": True},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        try:
+            return response.json()
+        except Exception:
+            return {"raw": response.text}
 
     def launch_game(self, game_name: str, source: str = "python_sdk") -> None:
         if not game_name or not game_name.strip():

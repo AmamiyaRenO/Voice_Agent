@@ -1,271 +1,374 @@
-# Voice Agent for Robot OPR
+# Voice Agent (Unity + Python Services + SDK)
 
-## Primary Speech Pipeline (Windows Live Captions)
+Voice Agent is a Unity-based voice interaction client for rehabilitation/game scenarios.  
+It integrates speech recognition, intent routing, MQTT-based robot control, and HTTP TTS playback.
 
-本项目的默认/主语音识别路径为 Windows 11 实时字幕（Live Captions）。由 `scripts/LiveCaptionsListener/Program.cs` 持续监听系统 Live Captions 的识别结果，并将句子推送进 Unity 进行后续意图解析与发布，无需本地模型下载，低延迟、稳定可靠，适合作为生产默认方案。
+The repository also includes:
+- A Python speech service (`python_voice_service/`) for ASR + LLM reply generation.
+- A Python SDK (`python_sdk/`) for non-Unity control and automation.
+- Local orchestration scripts for multi-process development.
 
-当需要完全离线或更换识别后端时，可启用可选的 `python_voice_service`（Faster-Whisper）作为备用方案。
+## SDK Spotlight (Start Here for Integration)
 
-## Python Speech Service (Faster-Whisper) Environment Variables
+If your goal is to control the robot/agent from Python (without editing Unity scenes first), use the SDK docs:
 
-> The Windows Live Captions bridge is the default speech-to-text pipeline. The
-> following settings only apply when you enable the optional Faster-Whisper
-> fallback described later in this document.
+- **SDK quick guide:** [`python_sdk/README.md`](python_sdk/README.md)
+- **SDK detailed guide:** [`docs/PYTHON_SDK.md`](docs/PYTHON_SDK.md)
 
-- WHISPER_MODEL_PATH (default `large-v3`), optional values include `medium.en`, `small.en`, etc.
-- WHISPER_COMPUTE_TYPE (default `int8_float16`; use `float16` if sufficient GPU memory is available)
-- WAKE_WORD (default `rachel`)
-- WAKE_WORD_ALIASES (default `rachel, rachael, richel, richelle, rachal, raychel, ra chel, rach el`; Python service normalizes recognition results based on these aliases, eliminating the need for duplicate synonym configuration in Unity)
-- WAKE_WORD_PREFIXES (default `hey, hi`; prompts the recognizer to prioritize detecting phrases like “Hey Rachel” while standardizing these prefixes on the server)
+This SDK mirrors the Unity `UserTestControlPanel` capabilities (TTS, face/LED/servo commands, game intents, and runtime LLM prompt control).
 
-Example (Windows PowerShell):
+## Table of Contents
 
-Translated with DeepL.com (free version)
+- [Architecture Overview](#architecture-overview)
+- [Repository Layout](#repository-layout)
+- [Features](#features)
+- [Quick Start Paths](#quick-start-paths)
+- [Environment Requirements](#environment-requirements)
+- [Detailed Setup](#detailed-setup)
+- [Service Endpoints and MQTT Topics](#service-endpoints-and-mqtt-topics)
+- [Python SDK (Detailed)](#python-sdk-detailed)
+- [Python Voice Service (ASR + LLM)](#python-voice-service-asr--llm)
+- [Live Captions Bridge](#live-captions-bridge)
+- [TTS Backends (Piper and Qwen)](#tts-backends-piper-and-qwen)
+- [Troubleshooting](#troubleshooting)
+- [Development and Tests](#development-and-tests)
+- [License](#license)
 
-```powershell
-pip install -r python_voice_service/requirements.txt
-$env:WHISPER_MODEL_PATH="medium.en"
-$env:WHISPER_COMPUTE_TYPE="float16"
-$env:WAKE_WORD="rachel"
-$env:WAKE_WORD_ALIASES="rachel, richel, richelle"
-$env:WAKE_WORD_PREFIXES="hey, hi"
-python python_voice_service/main.py
+## Architecture Overview
+
+```text
+Microphone / Live Captions
+        |
+        v
+Unity Voice Layer (VoskSpeechToText / VoiceGameLauncher / VoiceGameWiring)
+        |                                \
+        |                                 \ (optional HTTP)
+        |                                  -> python_voice_service (ASR /respond)
+        |
+        +--> MQTT broker (robot/intent, robot/pi/*, robot/dialog/*, robot/tts/*)
+                   |
+                   v
+            Robot side services / orchestrator / hardware daemons
+
+Unity TTS playback path:
+Unity -> HTTP GET/POST /speak (port 5005 by default) -> Piper or Qwen wrapper
 ```
 
-This repository contains the Unity client that powers the spoken interface
-for the [Robot_opr](https://github.com/AmamiyaRenO/Robot_opr) rehabilitation
-robot. It forwards recognised intents to the robot control stack over MQTT
-and can listen to multiple transcription sources. The current production
-workflow captures Windows 11 Live Captions output via
-[`scripts/LiveCaptionsListener`](scripts/LiveCaptionsListener) and feeds those
-sentences into the Unity scene. You can also delegate transcription to the
-optional Python service that runs the
-[Faster-Whisper](https://github.com/guillaumekln/faster-whisper) model. The
-Unity scenes included here were used to drive the coach-style voice assistant
-seen in the project demos.
+Default production recognition path in this repo is Windows 11 Live Captions bridge.  
+Optional fallback path is `python_voice_service/main.py` (Faster-Whisper).
+
+## Repository Layout
+
+```text
+Assets/                   Unity scenes, scripts, prefabs, runtime components
+python_sdk/               Python client SDK for robot/voice controls
+python_voice_service/     FastAPI services (ASR, /respond, Piper/Qwen TTS wrappers)
+scripts/                  Multi-service launcher + intent/dialog helper services
+docs/                     Integration guides (SDK, Live Captions bridge, etc.)
+tests/                    Python SDK tests
+native/                   Native audio processing helpers
+```
 
 ## Features
 
-* **Unity-first voice experience** – Prefab components (`VoskSpeechToText`,
-  `VoiceGameLauncher`, `VoiceGameWiring`) take care of microphone capture,
-  wake-word detection and intent routing.
-* **Wi-Fi test panel** – `UserTestControlPanel` exposes an in-editor HTTP UI so
-  therapists can trigger expressions, lighting and the wake flow from a phone
-  connected to the same network.
-* **Focus-aware webcam hand-off** – MediaPipe runners stop their `WebCamTexture`
-  feeds when the agent is backgrounded, allowing another Unity project to claim
-  the camera while the voice agent keeps control of the microphone.
-* **Built-in MQTT publisher** – When the `ROBOTVOICE_USE_MQTT` scripting
-  define is enabled, the agent publishes launch/exit messages to the
-  `robot/intent` topic using a lightweight client that ships with the project,
-  so no external DLLs are required.
-* **Windows Live Captions bridge** – A lightweight UI Automation listener
-  harvests Windows 11 Live Captions output and forwards the sentences straight
-  into Unity so you can reuse the OS-level speech recogniser without custom
-  ASR.
-* **Python transcription fallback** – Stream microphone audio to the
-`python_voice_service` FastAPI application if you prefer Faster-Whisper or
-need an offline alternative to Live Captions.
-* **Pluggable TTS on port 5005** – Unity fetches WAV from `GET /speak`. You can
-  run either the existing Piper wrapper or the Qwen3-TTS wrapper on the same
-  port and switch instantly via an environment variable (no Unity changes).
-* **One-command local tooling** – `helper.bat` (Windows) and
-  `scripts/start_local_services.py` can boot the MQTT hub, Live Captions
-  listener, Python voice service and optional orchestrators together.
-* **Robot_opr ready** – Intent payloads mirror the schema expected by the
-  Robot_opr orchestration layer, enabling voice controlled exercise launch and
-  shutdown without additional glue code.
+- Unity-first voice workflow with wake-word and intent routing.
+- Windows 11 Live Captions ingestion path for low-overhead STT integration.
+- Optional Faster-Whisper transcription backend through FastAPI.
+- MQTT command publish for face/servo/LED and game intents.
+- Embedded remote control panel (`UserTestControlPanel`) over HTTP (default port `8787`).
+- Pluggable TTS backend on stable endpoint (`/speak`) with Piper or Qwen wrapper.
+- Python SDK parity with Unity panel actions.
+- Local multi-process launcher (`scripts/start_local_services.py`).
 
-## Repository layout
+## Quick Start Paths
 
+### Path A (Recommended): Unity + Windows Live Captions
+
+1. Open the project in Unity `2022.3.56f1c1`.
+2. Ensure your scene includes `VoskSpeechToText`, `VoiceGameLauncher`, and wiring components.
+3. Enable Windows Live Captions (`Win + Ctrl + L`) and include microphone audio.
+4. Start the Live Captions listener (see [`docs/LIVE_CAPTIONS_BRIDGE.md`](docs/LIVE_CAPTIONS_BRIDGE.md)).
+5. Run the scene and verify recognized text reaches the voice launcher.
+
+### Path B: Unity + Python Voice Service (Faster-Whisper)
+
+1. Set up `python_voice_service` virtual environment.
+2. Run `uvicorn main:app --host 0.0.0.0 --port 8000`.
+3. In Unity, set Python transcription URL to `http://127.0.0.1:8000/transcribe`.
+4. Keep MQTT broker running if you need robot intents/hardware controls.
+
+### Path C: Python SDK Only (Automation / Integration)
+
+1. Install SDK dependencies from `python_sdk/requirements.txt`.
+2. Import `voice_agent_sdk` from `python_sdk/`.
+3. Connect to broker and call SDK methods (TTS, face, LED, servo, intents).
+4. See [`python_sdk/README.md`](python_sdk/README.md) and [`docs/PYTHON_SDK.md`](docs/PYTHON_SDK.md).
+
+## Environment Requirements
+
+- **Unity:** `2022.3.56f1c1` (see `ProjectSettings/ProjectVersion.txt`)
+- **OS:** Windows 11 recommended for Live Captions workflow
+- **Python:** 3.10+ (3.12 recommended for service environments)
+- **MQTT broker:** typically on `1883`
+- **Audio:** microphone permission enabled
+
+Optional dependencies:
+- Faster-Whisper model files (for Python ASR route)
+- Ollama runtime (for `/respond` endpoint)
+- Piper executable + ONNX model (for Piper TTS wrapper)
+- Qwen TTS environment (separate venv recommended)
+
+## Detailed Setup
+
+### 1) Clone and Open
+
+```bash
+git clone <your-voice-agent-repo-url>
+cd Voice_Agent
 ```
-Assets/                # Unity scenes, prefabs and C# scripts for the voice agent
-python_voice_service/  # FastAPI wrapper around Faster-Whisper
-scripts/               # Local development helpers (MQTT/voice orchestrator launcher)
-ProjectSettings/       # Unity project configuration
-```
 
-## Requirements
+Open `Voice_Agent` via Unity Hub.
 
-* **Unity** 2022.3.56f1c1 (matches `ProjectSettings/ProjectVersion.txt`).
-* Microphone access on the target platform.
-* (Optional) Python 3.10+ if you want to use the Faster-Whisper service.
-* A running MQTT broker (Robot_opr ships a message hub suitable for local
-  testing).
+### 2) Unity Configuration Notes
 
-## Getting started
+- Confirm scene references for:
+  - `VoskSpeechToText`
+  - `VoiceGameLauncher`
+  - `VoiceGameWiring`
+  - `PiMessageHub` (if used in your scene)
+  - `UserTestControlPanel` (optional but strongly recommended for remote testing)
+- Enable scripting define `ROBOTVOICE_USE_MQTT` if your build relies on MQTT intent publishing.
+- If using wake prompt audio, assign clip references in launcher components.
 
-1. **Clone the projects**
-   ```bash
-   git clone https://github.com/AmamiyaRenO/Robot_opr.git
-   git clone https://github.com/AmamiyaRenO/Voice_Agent.git
-   ```
-   Start the Robot_opr messaging hub according to its documentation – the
-   Unity agent will connect to the same broker.
+### 3) Start Local Services
 
-2. **Open the Unity project**
-   * Launch Unity Hub and add the `Voice_Agent` folder as a project.
-   * Load the provided scene and locate the `VoskSpeechToText` component.
-   * If you plan to publish intents, enable the `ROBOTVOICE_USE_MQTT` scripting
-     define (Project Settings → Player → Scripting Define Symbols).
-   * Assign the `wakeWordPromptClip` on `VoiceGameLauncher` to `Assets/Voice/help.mp3`
-     (optionally routing it through a dedicated `AudioSource`) and hook up the
-     wake listening indicator UI (root GameObject, progress `Image`, countdown
-     `Text`) so patients can see the five-second capture window.
+The main orchestrator script is:
+- `scripts/start_local_services.py`
 
-3. **Configure the MQTT publisher**
-   * Add the `MqttIntentPublisher` component to the same GameObject as the
-     `VoiceGameLauncher` or assign it through the inspector.
-   * Point the `Host`, `Port` and credentials fields at the Robot_opr message
-     hub. The default topic (`robot/intent`) and payload schema matches the
-     Robot_opr subscriber expectations.
+Important:
+- `--hub-cmd` (or env `VOICE_AGENT_HUB_CMD`) is required.
+- By default, the script starts voice service + Piper HTTP + Qwen HTTP + intent service + dialog service.
+- If one managed process exits, the launcher shuts down the remaining processes.
 
-4. **Capture speech via Windows Live Captions**
-   * Live Captions is available on Windows 11 (press `Win + Ctrl + L`). Enable
-     the **Include microphone audio** option and keep the floating window on
-     top of Unity.
-   * Build or use the provided
-     [`scripts/LiveCaptionsListener`](scripts/LiveCaptionsListener) project and
-     run `EnableLcMic.exe`/`LiveCaptionsListener.exe` to mirror the reference
-     setup. The listener subscribes to the Live Captions UI Automation tree and
-     prints completed sentences with the `[Sentence]` prefix.
-   * Forward each sentence into Unity (e.g. through a pipe, MQTT topic or the
-     helper batch file) so `VoskSpeechToText`/`VoiceGameLauncher` can treat the
-     transcript as if it came from a traditional recogniser. See
-     [`docs/LIVE_CAPTIONS_BRIDGE.md`](docs/LIVE_CAPTIONS_BRIDGE.md) for detailed
-     wiring instructions.
-
-5. **(Optional) Run the Python voice service fallback**
-   ```bash
-   cd Voice_Agent/python_voice_service
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows use .venv\Scripts\activate
-   pip install -r requirements.txt
-   export WHISPER_MODEL_PATH="/path/to/faster-whisper-large-v3"
-   uvicorn main:app --host 0.0.0.0 --port 8000
-   ```
-   Toggle **Use Python Service** on the `VoskSpeechToText` component and point
-   `PythonServiceUrl` to `http://127.0.0.1:8000/transcribe`.
-
-6. **Launch the full local stack (optional)**
-   * Windows users can double-click `helper.bat` to start the MQTT hub,
-     Live Captions bridge, Faster-Whisper fallback and Unity voice client
-     together.
-   * For cross-platform setups or when you want to customise the command list,
-     use the Python helper:
-     ```bash
-     python scripts/start_local_services.py \
-         --hub-cmd "<command to start Robot_opr hub>" \
-         --orchestrator-cmd "<command to start Robot_opr orchestrator>"
-     ```
-     The script watches the processes, forwards Ctrl+C and stops the remaining
-     services if one exits. You can also supply `--env-file` to preload
-     environment variables.
-
-## Remote user test panel
-
-The Unity scene now ships with an embedded HTTP server that exposes a browser
-panel tailored for therapist / patient trials.
-
-1. Add the `UserTestControlPanel` component (found under `Assets/Scripts`) to a
-   convenient GameObject – for example the one that already holds
-   `VoiceGameLauncher`.
-2. Assign the existing `PiMessageHub` and `VoiceGameLauncher` references in the
-   inspector. The default TCP port is **8787**; change it if the machine has a
-   conflicting service.
-3. Enter Play Mode (or build the scene). The console will print
-   `http://<host-ip>:8787/` after the listener starts. Devices on the same Wi-Fi
-   can open that address to reach the panel.
-4. Use the controls to drive five facial presets (happy/neutral/angry/sad/
-   surprised), adjust LED color/brightness/period, open/close the flower servo,
-   pick a TTS voice, switch between installed Piper/Coqui models, enter text
-   for the robot to speak, or trigger game launch / exit intents. The “Start
-   Wake Flow” button still performs the wake-word choreography without
-   requiring speech. Every action goes through
-   `PiMessageHub` / `VoiceGameLauncher` so the robot reacts immediately.
-   For Piper, set the **Default TTS Model** and **Available TTS Models** fields
-   on `UserTestControlPanel` to the absolute `.onnx` files on disk (for example
-   `D:\piper\models\en_US-hfc_female-medium.onnx`). The panel relays the
-   selected path to `python_voice_service/piper_http.py`, which now accepts a
-   `model` parameter on both `GET /speak` and `POST /speak`, automatically
-   switches Piper to that file, and attempts to load the matching
-   `.onnx.json` config. This makes the dropdown truly change the active TTS
-   checkpoint without restarting the Python process.
-
-If you prefer to start/stop the listener manually, untick **Auto Start** on the
-component and call `StartServer`/`StopServer` from the inspector’s context menu
-or another script.
-
-## Switching TTS backends (Piper vs Qwen3-TTS) without Unity changes
-
-Unity requests speech audio via `http://127.0.0.1:5005/speak?text=...` (WAV).  
-You can decide what runs on port **5005** by setting `VOICE_AGENT_PIPER_HTTP_CMD`
-before launching `scripts/start_local_services.py` (or `helper.bat`).
-
-- **Piper (current default)**:
+Example (PowerShell):
 
 ```powershell
-$env:VOICE_AGENT_PIPER_HTTP_CMD="uvicorn piper_http:app --host 0.0.0.0 --port 5005"
+$env:VOICE_AGENT_HUB_CMD = "<command that starts your MQTT/message hub>"
+python scripts/start_local_services.py --hub-cmd $env:VOICE_AGENT_HUB_CMD
 ```
 
-- **Qwen3-TTS 0.6B (CPU-only)**:
+You can also pass `--env-file` to preload environment variables.
+
+### 4) Optional helper.bat
+
+`helper.bat` is a machine-specific convenience launcher and contains hardcoded local paths.  
+Adjust paths before reuse on another machine.
+
+## Service Endpoints and MQTT Topics
+
+### HTTP endpoints
+
+| Service | Default Port | Key Endpoints |
+|---|---:|---|
+| Unity UserTestControlPanel | `8787` | `/`, `/sdk`, `/api/speak`, `/api/llm/prompt`, `/api/face`, `/api/flower`, `/api/led`, `/api/game` |
+| Python Voice Service | `8000` | `/healthz`, `/transcribe`, `/respond`, `/respond/config`, `/respond/metrics` |
+| Piper wrapper | `5005` | `/speak` (GET/POST), `/speak_stream` |
+| Qwen wrapper | `5006` | `/speak` (GET/POST), `/metrics` |
+
+### MQTT topics (core)
+
+| Topic | Direction | Purpose |
+|---|---|---|
+| `robot/intent` | publish | Launch/exit game intents |
+| `robot/pi/face/cmd` | publish | Face expression commands |
+| `robot/pi/servo/cmd` | publish | Servo/flower commands |
+| `robot/pi/led/cmd` | publish | LED commands |
+| `robot/dialog/query` | publish/subscribe | Dialog query path |
+| `robot/dialog/answer` | publish/subscribe | Dialog answer path |
+| `robot/tts/options` | publish/subscribe | TTS voice/model/speaker options |
+| `robot/voice/text` | subscribe (intent service) | Raw recognized text input |
+
+For payload examples, see [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+
+## Python SDK (Detailed)
+
+Primary links:
+- [`python_sdk/README.md`](python_sdk/README.md)
+- [`docs/PYTHON_SDK.md`](docs/PYTHON_SDK.md)
+
+### What the SDK controls
+
+- Audible speech through Unity panel API (`/api/speak`)
+- WAV synthesis through TTS wrapper (`/speak`)
+- Face presets/custom commands
+- Servo/flower actions
+- LED modes
+- Game launch/exit intents
+- Runtime LLM prompt get/set/reset via Unity panel API (`/api/llm/prompt`)
+
+### Install
+
+```bash
+pip install -r python_sdk/requirements.txt
+```
+
+### Import notes
+
+The SDK package lives under `python_sdk/voice_agent_sdk`.  
+Run scripts from repo root with `python_sdk` on `PYTHONPATH`, or run from inside `python_sdk`.
+
+Example (PowerShell):
 
 ```powershell
-$ttsPy="D:\unityproject\Voice_Agent\python_voice_service\.venv_tts\Scripts\python.exe"
-$env:VOICE_AGENT_PIPER_HTTP_CMD="$ttsPy -m uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5005"
-$env:QWEN_TTS_MODEL="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
-$env:QWEN_TTS_DEVICE_MAP="cpu"
-$env:QWEN_TTS_DTYPE="float32"
+$env:PYTHONPATH = "python_sdk"
+python .\your_script.py
 ```
 
-The Unity client can pass `instruct=` when available (LLM-generated style);
-Piper ignores it and Qwen uses it.
+### Minimal usage
 
-## Python SDK
+```python
+from voice_agent_sdk import VoiceAgentClient
 
-For non-Unity integrations, a lightweight Python SDK is available under
-`python_sdk/` with parity for the UserTestControlPanel controls (TTS, face,
-LED, servo/flower, dialog style, and game intents). See
-[`docs/PYTHON_SDK.md`](docs/PYTHON_SDK.md) for usage details.
+client = VoiceAgentClient(host="10.0.0.1")
 
-## Working with Robot_opr
+# Audible TTS via Unity panel API
+client.speak("Hello Rachel", voice="en_US", speed=1.0, volume=1.0)
 
-When the Unity client detects the wake phrase ("hi rachel" by default) it plays
-the `help.mp3` prompt from `Assets/Voice` and highlights a short five-second
-capture window using the configured UI indicator. If that follow-up instruction
-contains an exercise command, `VoiceGameLauncher` publishes a JSON payload
-describing the request.
-The Robot_opr hub consumes the `LAUNCH_GAME` and `BACK_HOME` intent messages to
-start or exit the corresponding rehabilitation experience. You can customise
-wake words, synonyms and keyword lists through the inspector or by editing the
-JSON configuration asset assigned to the launcher component.
+# MQTT controls
+client.face_happy(duration=3)
+client.led_breathe(color="#00BFFF", brightness=0.8, period=2.5)
+client.servo_open_hold()
 
-For richer interactions (e.g. free-form questions for the virtual coach) enable
-responses via the `/respond` endpoint exposed by the Python voice service. The
-Robot_opr text-to-speech or speaker pipeline can read the generated replies
-back to the patient, keeping the voice-first flow inside a single MQTT/
-HTTP-based loop.
+# Intents
+client.launch_game("cornhole")
+client.exit_game()
 
-## Windows Live Captions bridge
+# Runtime LLM prompt through /api/llm/prompt
+cfg = client.get_llm_prompt()
+client.set_llm_prompt("You are a concise rehab coach. Keep replies short.")
+# client.reset_llm_prompt()
+```
 
-If you need to surface Windows 11 Live Captions inside the Unity experience—for
-example when running the agent on a kiosk that already uses Live Captions for
-system speech—refer to [`docs/LIVE_CAPTIONS_BRIDGE.md`](docs/LIVE_CAPTIONS_BRIDGE.md)
-for a UI Automation listener, sentence assembly logic and Unity ingestion
-examples. The guide also includes startup automation tips and transport options
-for forwarding captioned sentences into the voice agent runtime.
+### Key method groups
+
+- Speech:
+  - `speak(...)` -> Unity panel `/api/speak` (audible)
+  - `synthesize_wav(...)` -> TTS wrapper `/speak` (WAV bytes)
+- LLM prompt:
+  - `get_llm_prompt()`
+  - `set_llm_prompt(prompt)`
+  - `reset_llm_prompt()`
+- Face:
+  - `face_happy()`, `face_neutral()`, `face_sad()`, `face_very_sad()`, `face_excited()`, `face_idle()`, `face_custom(...)`
+- Servo:
+  - `servo_open()`, `servo_close()`, `servo_open_hold()`, `servo_close_hold()`, `servo_center_hold()`, `servo_stop()`, `servo_open_slow()`, `servo_close_slow()`
+- LED:
+  - `led_breathe()`, `led_solid()`, `led_random()`, `led_off()`
+- Intents/options:
+  - `launch_game(...)`, `exit_game()`, `set_tts_options(...)`, `set_dialog_style(...)`
+
+## Python Voice Service (ASR + LLM)
+
+Service file: `python_voice_service/main.py`
+
+### Main endpoints
+
+- `POST /transcribe` -> ASR output (Vosk-like JSON fields + metadata)
+- `POST /respond` -> LLM reply generation
+- `GET /respond/config` -> current runtime/system prompt
+- `POST /respond/config` -> set/reset runtime prompt
+- `GET /respond/metrics` -> reply latency metrics
+- `GET /healthz` -> health check
+
+### Quick run
+
+```bash
+cd python_voice_service
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+### Useful environment variables
+
+- Whisper model/runtime:
+  - `WHISPER_MODEL_PATH`
+  - `WHISPER_DEVICE`
+  - `WHISPER_COMPUTE_TYPE`
+- Wake word normalization:
+  - `WAKE_WORD`
+  - `WAKE_WORD_ALIASES`
+  - `WAKE_WORD_PREFIXES`
+- Ollama:
+  - `OLLAMA_BASE_URL`
+  - `OLLAMA_MODEL`
+  - `OLLAMA_SYSTEM_PROMPT`
+
+More details are documented in [`python_voice_service/README.md`](python_voice_service/README.md).
+
+## Live Captions Bridge
+
+Reference guide: [`docs/LIVE_CAPTIONS_BRIDGE.md`](docs/LIVE_CAPTIONS_BRIDGE.md)
+
+Summary:
+- Listener process captures Windows Live Captions text updates.
+- Partial updates are assembled into finalized sentences.
+- Sentences are forwarded into Unity (pipe/MQTT/IPC depending on your integration).
+
+This is the recommended default STT path for Windows deployments in this repo.
+
+## TTS Backends (Piper and Qwen)
+
+Both wrappers expose compatible `/speak` routes:
+- Piper wrapper: `python_voice_service/piper_http.py`
+- Qwen wrapper: `python_voice_service/qwen_tts_http.py`
+
+Typical defaults:
+- Piper on `5005`
+- Qwen on `5006`
+
+Override commands explicitly with launcher arguments:
+
+```powershell
+python scripts/start_local_services.py `
+  --hub-cmd "<your hub command>" `
+  --piper-http-cmd "uvicorn piper_http:app --host 0.0.0.0 --port 5005" `
+  --qwen-http-cmd "uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5006"
+```
+
+If you use Qwen TTS and Faster-Whisper together, keep separate virtual environments to avoid dependency conflicts.
 
 ## Troubleshooting
 
-* **No speech detected** – Confirm the microphone permissions are granted and
-  that `VoiceGameWiring` is attached so transcription results reach the
-  launcher.
-* **MQTT not connecting** – Ensure the broker address matches the Robot_opr hub
-  and that any TLS or credential settings line up with your deployment.
-* **Python service 404** – Verify the FastAPI app is running and the
-  `PythonServiceUrl` includes `/transcribe`.
+- No speech recognized:
+  - Check microphone permission.
+  - Verify active recognition path (Live Captions vs `/transcribe`).
+  - Confirm Unity component references are not null.
+- MQTT commands not received:
+  - Verify broker host/port and credentials.
+  - Confirm topic names match your robot-side subscribers.
+- `/api/speak` fails:
+  - Ensure Unity is running and `UserTestControlPanel` server is started on `8787`.
+- `/transcribe` fails:
+  - Check `WHISPER_MODEL_PATH` and model availability.
+  - Check Python service logs for load/runtime errors.
+- `/respond` is slow or failing:
+  - Confirm Ollama is reachable and model exists.
+  - Use `/respond/metrics` for latency visibility.
+
+## Development and Tests
+
+SDK tests:
+
+```bash
+pip install -r python_sdk/requirements-dev.txt
+python -m pytest tests/test_voice_agent_sdk.py
+```
+
+When updating SDK behavior, keep `tests/test_voice_agent_sdk.py` aligned with API expectations.
 
 ## License
 
-This project is released under the MIT License. See [LICENSE](LICENSE) for
-full terms.
+MIT License. See [`LICENSE`](LICENSE).

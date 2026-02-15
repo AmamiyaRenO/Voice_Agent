@@ -188,6 +188,10 @@ _WAKE_WORD_REGEX = _build_wake_word_pattern()
 
 
 _REPETITION_TOKEN_PATTERN = re.compile(r"[\w']+")
+_KNOWN_HALLUCINATION_PHRASES = {
+    "thanks for watching",
+    "thank you for watching",
+}
 
 
 def _build_wake_word_prefix_pattern() -> Optional[re.Pattern[str]]:
@@ -348,6 +352,21 @@ WHISPER_STREAM_SESSION_TTL_SECONDS = _non_negative_float(
 )
 WHISPER_STREAM_MAX_SESSIONS = max(4, _environment_int("WHISPER_STREAM_MAX_SESSIONS", 32))
 WHISPER_STREAM_CONTEXT_CHARS = max(0, _environment_int("WHISPER_STREAM_CONTEXT_CHARS", 220))
+WHISPER_SUPPRESS_KNOWN_HALLUCINATIONS = _environment_bool(
+    "WHISPER_SUPPRESS_KNOWN_HALLUCINATIONS", True
+)
+WHISPER_HALLUCINATION_MAX_SPEECH_FRACTION = _non_negative_float(
+    _environment_float("WHISPER_HALLUCINATION_MAX_SPEECH_FRACTION", 0.2)
+)
+WHISPER_HALLUCINATION_MAX_AMPLITUDE = _non_negative_float(
+    _environment_float("WHISPER_HALLUCINATION_MAX_AMPLITUDE", 0.08)
+)
+WHISPER_HALLUCINATION_MAX_RMS = _non_negative_float(
+    _environment_float("WHISPER_HALLUCINATION_MAX_RMS", 0.015)
+)
+WHISPER_HALLUCINATION_MAX_EXTRA_TOKENS = max(
+    0, _environment_int("WHISPER_HALLUCINATION_MAX_EXTRA_TOKENS", 3)
+)
 
 
 def _parse_hotwords(raw: str) -> Optional[List[str]]:
@@ -480,6 +499,19 @@ class RespondResponse(BaseModel):
     generation_seconds: Optional[float] = Field(default=None, ge=0.0)
 
 
+class RespondConfigRequest(BaseModel):
+    system_prompt: Optional[str] = Field(default=None, description="Runtime system prompt override.")
+    prompt: Optional[str] = Field(default=None, description="Alias of system_prompt.")
+    reset: bool = Field(default=False, description="Clear runtime override and use env/default prompt.")
+
+
+class RespondConfigResponse(BaseModel):
+    status: str = "ok"
+    system_prompt: str
+    runtime_override_active: bool
+    source: str
+
+
 class OllamaError(RuntimeError):
     pass
 
@@ -496,6 +528,30 @@ def _ollama_system_prompt() -> str:
     return _environment("OLLAMA_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
 
 
+_RUNTIME_OLLAMA_SYSTEM_PROMPT: Optional[str] = None
+_RUNTIME_OLLAMA_SYSTEM_PROMPT_LOCK = asyncio.Lock()
+
+
+async def _set_runtime_ollama_system_prompt(value: Optional[str]) -> None:
+    global _RUNTIME_OLLAMA_SYSTEM_PROMPT
+    async with _RUNTIME_OLLAMA_SYSTEM_PROMPT_LOCK:
+        _RUNTIME_OLLAMA_SYSTEM_PROMPT = value
+
+
+async def _get_runtime_ollama_system_prompt() -> Optional[str]:
+    async with _RUNTIME_OLLAMA_SYSTEM_PROMPT_LOCK:
+        return _RUNTIME_OLLAMA_SYSTEM_PROMPT
+
+
+async def _get_effective_ollama_system_prompt() -> tuple[str, bool, str]:
+    runtime_value = await _get_runtime_ollama_system_prompt()
+    if runtime_value is not None:
+        normalized = runtime_value.strip()
+        if normalized:
+            return normalized, True, "runtime"
+    return _ollama_system_prompt(), False, "env_or_default"
+
+
 def _piper_http_base_url() -> str:
     # Base URL for the Piper HTTP wrapper (piper_http.py)
     # Defaults to local instance started by scripts/start_local_services.py
@@ -504,16 +560,17 @@ def _piper_http_base_url() -> str:
 
 async def _generate_coach_reply(user_text: str, system_override: Optional[str] = None) -> str:
     keep_alive = _environment("OLLAMA_KEEP_ALIVE", "30m")
+    effective_system_prompt, _, _ = await _get_effective_ollama_system_prompt()
     payload = {
         "model": _ollama_model(),
-        "system": (system_override or "").strip() or _ollama_system_prompt(),
+        "system": (system_override or "").strip() or effective_system_prompt,
         "prompt": f"User: {user_text}\nCoach:",
         "stream": False,
         "options": {
             "temperature": _environment_float("OLLAMA_TEMPERATURE", 0.6),
             "top_p": _environment_float("OLLAMA_TOP_P", 0.9),
             "top_k": _environment_int("OLLAMA_TOP_K", 40),
-            "num_predict": _environment_int("OLLAMA_MAX_TOKENS", 80),
+            "num_predict": _environment_int("OLLAMA_MAX_TOKENS", 120),
             "repeat_penalty": _environment_float("OLLAMA_REPEAT_PENALTY", 1.1),
         },
     }
@@ -639,6 +696,44 @@ def _looks_like_meaningful_text(text: str) -> bool:
         return True
 
     return len(stripped.split()) >= 2
+
+
+def _normalize_phrase_for_match(text: str) -> str:
+    if not text:
+        return ""
+    normalized = re.sub(r"[^a-z0-9\s]", " ", text.lower())
+    return " ".join(normalized.split())
+
+
+def _is_known_hallucination_phrase(text: str) -> bool:
+    normalized = _normalize_phrase_for_match(text)
+    if not normalized:
+        return False
+    return normalized in _KNOWN_HALLUCINATION_PHRASES
+
+
+def _matches_known_hallucination_fragment(text: str) -> tuple[bool, str]:
+    normalized = _normalize_phrase_for_match(text)
+    if not normalized:
+        return False, ""
+
+    for phrase in _KNOWN_HALLUCINATION_PHRASES:
+        if normalized == phrase:
+            return True, phrase
+
+    normalized_tokens = normalized.split()
+    normalized_token_count = len(normalized_tokens)
+    if normalized_token_count == 0:
+        return False, ""
+
+    for phrase in _KNOWN_HALLUCINATION_PHRASES:
+        if phrase not in normalized:
+            continue
+        phrase_token_count = len(phrase.split())
+        # Allow a few extra words around a known hallucination phrase.
+        if normalized_token_count <= phrase_token_count + WHISPER_HALLUCINATION_MAX_EXTRA_TOKENS:
+            return True, phrase
+    return False, ""
 
 
 def _tokenize_for_repetition(text: str) -> List[str]:
@@ -1284,6 +1379,36 @@ async def transcribe(
             if deduped_tokens:
                 full_text = _canonicalize_wake_words(" ".join(deduped_tokens).strip()) or full_text
 
+    if WHISPER_SUPPRESS_KNOWN_HALLUCINATIONS:
+        matched_hallucination, matched_phrase = _matches_known_hallucination_fragment(full_text)
+        if matched_hallucination:
+            normalized_text = _normalize_phrase_for_match(full_text)
+            token_count = len(normalized_text.split()) if normalized_text else 0
+            phrase_token_count = len(matched_phrase.split()) if matched_phrase else 0
+            short_phrase_guard = (
+                phrase_token_count > 0
+                and token_count <= phrase_token_count + WHISPER_HALLUCINATION_MAX_EXTRA_TOKENS
+            )
+            low_signal_guard = (
+                speech_fraction <= WHISPER_HALLUCINATION_MAX_SPEECH_FRACTION
+                and max_amplitude <= WHISPER_HALLUCINATION_MAX_AMPLITUDE
+                and rms <= WHISPER_HALLUCINATION_MAX_RMS
+            )
+
+            if short_phrase_guard or low_signal_guard:
+                logger.info(
+                    "Suppressed known hallucination phrase: %r (matched=%r short=%s low_signal=%s speech_fraction=%.3f rms=%.4f max_amp=%.4f)",
+                    full_text,
+                    matched_phrase,
+                    short_phrase_guard,
+                    low_signal_guard,
+                    speech_fraction,
+                    rms,
+                    max_amplitude,
+                )
+                full_text = ""
+                words = []
+
     response = {
         "text": full_text,
         "result": _build_vosk_result(words),
@@ -1376,6 +1501,43 @@ async def respond(payload: RespondRequest) -> RespondResponse:
     )
 
     return RespondResponse(text=reply, generation_seconds=generation_seconds)
+
+
+@app.get("/respond/config", response_model=RespondConfigResponse)
+async def get_respond_config() -> RespondConfigResponse:
+    system_prompt, runtime_override_active, source = await _get_effective_ollama_system_prompt()
+    return RespondConfigResponse(
+        status="ok",
+        system_prompt=system_prompt,
+        runtime_override_active=runtime_override_active,
+        source=source,
+    )
+
+
+@app.post("/respond/config", response_model=RespondConfigResponse)
+async def set_respond_config(payload: RespondConfigRequest) -> RespondConfigResponse:
+    if payload.reset:
+        await _set_runtime_ollama_system_prompt(None)
+        system_prompt, runtime_override_active, source = await _get_effective_ollama_system_prompt()
+        return RespondConfigResponse(
+            status="ok",
+            system_prompt=system_prompt,
+            runtime_override_active=runtime_override_active,
+            source=source,
+        )
+
+    candidate = (payload.system_prompt or payload.prompt or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="system_prompt (or prompt) is required unless reset=true")
+
+    await _set_runtime_ollama_system_prompt(candidate)
+    system_prompt, runtime_override_active, source = await _get_effective_ollama_system_prompt()
+    return RespondConfigResponse(
+        status="ok",
+        system_prompt=system_prompt,
+        runtime_override_active=runtime_override_active,
+        source=source,
+    )
 
 
 @app.get("/respond/metrics")

@@ -3,7 +3,7 @@
 This SDK wraps the Robot Voice Agent's HTTP TTS and MQTT control channels in a
 single Python client. It mirrors the same controls available in the Unity
 `UserTestControlPanel`, including face presets, servo/flower actions, LED
-effects, TTS options, dialog style, and game launch/exit.
+effects, TTS options, runtime LLM prompt editing, and game launch/exit.
 
 ## Installation
 
@@ -22,6 +22,11 @@ client.face_happy(duration=3)
 client.led_breathe(color="#00BFFF", brightness=0.8, period=2.5)
 client.servo_open_hold()
 client.launch_game("cornhole")
+
+# Runtime LLM system prompt (real-time, via UserTestControlPanel /api/llm/prompt)
+cfg = client.get_llm_prompt()
+client.set_llm_prompt("You are a concise rehab coach. Keep replies to 1-2 sentences.")
+# client.reset_llm_prompt()
 ```
 
 ## Supported features (parity with UserTestControlPanel)
@@ -30,7 +35,7 @@ client.launch_game("cornhole")
 - **Servo actions**: open/close/open_hold/close_hold/center/stop/open_slow/close_slow
 - **LED effects**: breathe/solid/random/off
 - **TTS**: speak text, set voice/model options
-- **Dialog style**: publish LLM style changes
+- **LLM system prompt**: get/set/reset runtime `/respond` prompt through UserTestControlPanel
 - **Game**: launch/exit intents
 
 ## Tests
