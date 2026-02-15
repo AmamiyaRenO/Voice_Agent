@@ -336,9 +336,9 @@ client.on("connect", () => {
 
 ---
 
-### 6) Orchestrator Intents (for game launching)
+### 6) Game Launcher Intents
 
-The Agent typically publishes launch/exit intents and an external orchestrator reads them and starts/stops games according to `config/manifest.json`.
+The Agent typically publishes launch/exit intents and a launcher service reads them and starts/stops games according to your manifest.
 
 - Topic: `robot/intent`
 
@@ -393,5 +393,4 @@ Security notes:
 - Optionally, a small single-file SDK per language that wraps the examples above.
 
 With the HTTP TTS endpoint and the MQTT topics above, your teammate can integrate in minutes without touching Unity internals.
-
 

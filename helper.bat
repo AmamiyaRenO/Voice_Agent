@@ -1,5 +1,22 @@
 @echo off
-cd /d D:\unityproject\Robot_opr
-start "" "C:\Users\tianj\AppData\Local\Programs\Python\Python313\python.exe" "D:\unityproject\Voice_Agent\scripts\start_local_services.py"
-start "" "C:\Program Files\mosquitto\mosquitto.exe" -c "D:\unityproject\Robot_opr\config\mosquitto.conf" -v
+setlocal
+cd /d "%~dp0"
 
+if exist "C:\Program Files\mosquitto\mosquitto.exe" (
+  set "VOICE_AGENT_MOSQUITTO_EXE=C:\Program Files\mosquitto\mosquitto.exe"
+)
+
+where py >nul 2>nul
+if %errorlevel%==0 (
+  start "" py -3 scripts\start_local_services.py
+  exit /b 0
+)
+
+where python >nul 2>nul
+if %errorlevel%==0 (
+  start "" python scripts\start_local_services.py
+  exit /b 0
+)
+
+echo [voice-agent] Python launcher not found. Install Python or run scripts\start_local_services.py manually.
+exit /b 1

@@ -5,15 +5,21 @@ import base64
 import json
 import os
 import re
-import signal
 import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import httpx
 import paho.mqtt.client as mqtt
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from common.service_runtime import run_service_loop
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?])\s+")
@@ -294,23 +300,12 @@ class DialogService:
 def main() -> int:
     cfg = load_config()
     svc = DialogService(cfg)
-    svc.start()
-
-    def _term(signum, frame):  # type: ignore[override]
-        print(f"[dialog] signal {signum}, stopping...")
-        svc.stop()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, _term)
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, _term)
-
-    try:
-        while True:
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        _term(signal.SIGINT, None)
-    return 0
+    return run_service_loop(
+        service_name="dialog",
+        start=svc.start,
+        stop=svc.stop,
+        interval_sec=0.5,
+    )
 
 
 if __name__ == "__main__":

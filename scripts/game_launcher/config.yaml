@@ -1,0 +1,10 @@
+mqtt:
+  host: 127.0.0.1
+  port: 1883
+
+topics:
+  intent: robot/intent
+  state: robot/state
+
+# Relative path is resolved from this config file directory.
+manifest_path: ../intent_service/manifest.json

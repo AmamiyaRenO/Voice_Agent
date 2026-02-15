@@ -37,7 +37,7 @@ rules:
 
 source_label: intent_service
 
-# Optional: let intent service read Robot_opr manifest to auto-match game names/aliases
-# manifest_path: D:\unityproject\Robot_opr\config\manifest.json
+# Local manifest in this repository (standalone mode)
+manifest_path: manifest.json
 
 

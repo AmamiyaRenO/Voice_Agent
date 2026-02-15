@@ -1,0 +1,71 @@
+{
+  "games": [
+    {
+      "id": "cornhole",
+      "name": "Cornhole",
+      "synonyms": [
+        "cornhole",
+        "corn hole"
+      ],
+      "exec": "%VOICE_AGENT_CORNHOLE_EXE%",
+      "workdir": "%VOICE_AGENT_CORNHOLE_CWD%",
+      "args": [
+        "-screen-fullscreen",
+        "1",
+        "-screen-width",
+        "1920",
+        "-screen-height",
+        "1080"
+      ],
+      "env": {}
+    },
+    {
+      "id": "disc_golf",
+      "name": "Disc Golf",
+      "synonyms": [
+        "disc golf",
+        "discgolf",
+        "frisbee golf"
+      ],
+      "exec": "%VOICE_AGENT_DISC_GOLF_EXE%",
+      "workdir": "%VOICE_AGENT_DISC_GOLF_CWD%",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "notebook",
+      "name": "Notebook",
+      "synonyms": [
+        "notebook",
+        "note book"
+      ],
+      "exec": "%VOICE_AGENT_NOTEBOOK_EXE%",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "pickleball",
+      "name": "Pickleball",
+      "synonyms": [
+        "pickleball",
+        "pickle ball"
+      ],
+      "exec": "%VOICE_AGENT_PICKLEBALL_EXE%",
+      "workdir": "%VOICE_AGENT_PICKLEBALL_CWD%",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "garden_of_motion",
+      "name": "Garden Of Motion",
+      "synonyms": [
+        "garden of motion",
+        "gom"
+      ],
+      "exec": "%VOICE_AGENT_GARDEN_OF_MOTION_EXE%",
+      "workdir": "%VOICE_AGENT_GARDEN_OF_MOTION_CWD%",
+      "args": [],
+      "env": {}
+    }
+  ]
+}

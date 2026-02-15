@@ -55,6 +55,8 @@ namespace RobotVoice
         private int ttsStreamSampleRate = 22050;
         [SerializeField, Tooltip("How much audio to buffer before starting playback (seconds)."), Range(0.02f, 1.0f)]
         private float ttsStreamStartBufferSeconds = 0.15f;
+        [SerializeField, Tooltip("Extra realtime seconds to wait after stream buffer drains before stopping playback (prevents clipped final phonemes)."), Range(0f, 0.5f)]
+        private float ttsStreamDrainTailSeconds = 0.12f;
         [SerializeField, Tooltip("In-memory PCM ring buffer size in seconds for true streaming playback."), Range(4, 60)]
         private int ttsStreamRingBufferSeconds = 20;
         [SerializeField, Tooltip("Force a fixed speaker for dialog answer playback (ignores dialog_service tts_speaker).")]
@@ -1434,6 +1436,11 @@ namespace RobotVoice
                         yield return null;
                     }
 
+                    var drainTailSeconds = Mathf.Clamp(ttsStreamDrainTailSeconds, 0f, 0.5f);
+                    if (drainTailSeconds > 0f)
+                    {
+                        yield return new WaitForSecondsRealtime(drainTailSeconds);
+                    }
                     ttsSource.Stop();
                 }
             }

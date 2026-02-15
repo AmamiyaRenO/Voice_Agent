@@ -48,7 +48,7 @@ Unity Voice Layer (VoskSpeechToText / VoiceGameLauncher / VoiceGameWiring)
         +--> MQTT broker (robot/intent, robot/pi/*, robot/dialog/*, robot/tts/*)
                    |
                    v
-            Robot side services / orchestrator / hardware daemons
+            Local game launcher + robot side services / hardware daemons
 
 Unity TTS playback path:
 Unity -> HTTP GET/POST /speak (port 5005 by default) -> Piper or Qwen wrapper
@@ -86,7 +86,7 @@ native/                   Native audio processing helpers
 1. Set up `python_voice_service` virtual environment.
 2. Run `uvicorn main:app --host 0.0.0.0 --port 8000`.
 3. In Unity, set Python transcription URL to `http://127.0.0.1:8000/transcribe`.
-4. Keep MQTT broker running if you need robot intents/hardware controls.
+4. Keep MQTT broker running if you need robot intents/hardware controls (or use `scripts/start_local_services.py`, which can auto-start local Mosquitto).
 
 ### Path B: Python SDK Only (Automation / Integration)
 
@@ -133,27 +133,37 @@ Open `Voice_Agent` via Unity Hub.
 
 ### 3) Start Local Services
 
-The main orchestrator script is:
+The main local launcher script is:
 - `scripts/start_local_services.py`
 
 Important:
-- `--hub-cmd` (or env `VOICE_AGENT_HUB_CMD`) is required.
-- By default, the script starts voice service + Piper HTTP + Qwen HTTP + intent service + dialog service.
+- By default, the launcher auto-starts a local MQTT broker (Mosquitto) if available.
+- `--hub-cmd` is optional and only needed when you want to override broker startup.
+- Use `--no-hub` if you already have an external broker running.
+- By default, the script starts voice service + Piper HTTP + Qwen HTTP + intent service + dialog service + game launcher.
+- Intent alias matching uses `scripts/intent_service/manifest.json` by default (override with `INTENT_MANIFEST_PATH`).
+- Game launching reads the same manifest file (override with `GAME_LAUNCHER_MANIFEST_PATH`).
+- Each game entry can include `exec`, `workdir`, `args`, and `env`; `LAUNCH_GAME` only opens a process when `exec` is configured.
 - If one managed process exits, the launcher shuts down the remaining processes.
 
 Example (PowerShell):
 
 ```powershell
-$env:VOICE_AGENT_HUB_CMD = "<command that starts your MQTT/message hub>"
-python scripts/start_local_services.py --hub-cmd $env:VOICE_AGENT_HUB_CMD
+# Default standalone startup (no Robot_opr required)
+python scripts/start_local_services.py
+
+# Optional: override broker command
+python scripts/start_local_services.py --hub-cmd "mosquitto -p 1883 -v"
+
+# Optional: do not start broker (use external one)
+python scripts/start_local_services.py --no-hub
 ```
 
 You can also pass `--env-file` to preload environment variables.
 
 ### 4) Optional helper.bat
 
-`helper.bat` is a machine-specific convenience launcher and contains hardcoded local paths.  
-Adjust paths before reuse on another machine.
+`helper.bat` now starts `scripts/start_local_services.py` from the repository root using local Python (`py -3` or `python`) and no longer depends on `Robot_opr` paths.
 
 ## Service Endpoints and MQTT Topics
 
@@ -438,7 +448,6 @@ Override commands explicitly with launcher arguments:
 
 ```powershell
 python scripts/start_local_services.py `
-  --hub-cmd "<your hub command>" `
   --piper-http-cmd "uvicorn piper_http:app --host 0.0.0.0 --port 5005" `
   --qwen-http-cmd "uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5006"
 ```
