@@ -40,7 +40,7 @@ It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for 
 Microphone / External Transcript Source
         |
         v
-Unity Voice Layer (VoskSpeechToText / VoiceGameLauncher / VoiceGameWiring)
+Unity Voice Layer (SpeechToText / VoiceGameLauncher / VoiceGameWiring)
         |                                \
         |                                 \ (optional HTTP)
         |                                  -> python_voice_service (ASR /respond)
