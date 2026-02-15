@@ -10,10 +10,9 @@ The repository also includes:
 
 ## SDK Spotlight (Start Here for Integration)
 
-If your goal is to control the robot/agent from Python (without editing Unity scenes first), use the SDK docs:
+If your goal is to control the robot/agent from Python (without editing Unity scenes first), use:
 
-- **SDK quick guide:** [`python_sdk/README.md`](python_sdk/README.md)
-- **SDK detailed guide:** [`docs/PYTHON_SDK.md`](docs/PYTHON_SDK.md)
+- **SDK guide:** [`python_sdk/README.md`](python_sdk/README.md)
 
 This SDK mirrors the Unity `UserTestControlPanel` capabilities (TTS, face/LED/servo commands, game intents, and runtime LLM prompt control).
 It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for interactive API testing and flow prototyping.
@@ -27,7 +26,7 @@ It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for 
 - [Environment Requirements](#environment-requirements)
 - [Detailed Setup](#detailed-setup)
 - [Service Endpoints and MQTT Topics](#service-endpoints-and-mqtt-topics)
-- [Python SDK (Detailed)](#python-sdk-detailed)
+- [Python SDK](#python-sdk)
 - [SDK Visualizer](#sdk-visualizer)
 - [Python Voice Service (ASR + LLM)](#python-voice-service-asr--llm)
 - [TTS Backends (Piper and Qwen)](#tts-backends-piper-and-qwen)
@@ -94,7 +93,7 @@ native/                   Native audio processing helpers
 1. Install SDK dependencies from `python_sdk/requirements.txt`.
 2. Import `voice_agent_sdk` from `python_sdk/`.
 3. Connect to broker and call SDK methods (TTS, face, LED, servo, intents).
-4. See [`python_sdk/README.md`](python_sdk/README.md) and [`docs/PYTHON_SDK.md`](docs/PYTHON_SDK.md).
+4. See [`python_sdk/README.md`](python_sdk/README.md).
 
 ## Environment Requirements
 
@@ -182,11 +181,10 @@ Adjust paths before reuse on another machine.
 
 For payload examples, see [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
 
-## Python SDK (Detailed)
+## Python SDK
 
-Primary links:
+Primary link:
 - [`python_sdk/README.md`](python_sdk/README.md)
-- [`docs/PYTHON_SDK.md`](docs/PYTHON_SDK.md)
 
 ### What the SDK controls
 
@@ -285,6 +283,105 @@ Core capabilities:
   - Export flow definitions to JSON and import them later for repeatable test scenarios.
 
 This page calls the same `/api/*` routes used by `python_sdk/voice_agent_sdk/client.py`, so it is useful for validating payload shape and backend behavior before writing automation scripts.
+
+### Built-in method templates
+
+Current built-ins in the visualizer method list:
+
+- `speak(text,voice,model,speed,volume)` -> `/api/speak`
+- `qwen_speak(text,speaker,instruct)` -> `/api/qwen/speak`
+- `set_tts_options(voice,model)` -> `/api/voice`
+- `set_tts_model(model)` -> `/api/voice`
+- `get_llm_prompt()` -> `/api/llm/prompt` (GET)
+- `set_llm_prompt(prompt)` -> `/api/llm/prompt`
+- `reset_llm_prompt()` -> `/api/llm/prompt`
+- `launch_game(name)` -> `/api/game`
+- `exit_game()` -> `/api/game`
+- `face_preset(mode,seconds)` -> `/api/face`
+- `flower_open()` -> `/api/flower`
+- `led_breathe(color,brightness,period,duration)` -> `/api/led`
+
+### Flow node types and fields
+
+- `api` node:
+  - Fields: `endpoint`, `method`, `payload`, `continueOnError`.
+  - Behavior: sends HTTP request; flow stops on failure unless `continueOnError=true`.
+- `delay` node:
+  - Field: `delayMs`.
+  - Behavior: sleeps for the specified milliseconds.
+- `condition` node:
+  - Field: `expression` (JavaScript expression).
+  - Context: can reference `ctx.lastStatus`, `ctx.lastJson`, `ctx.lastRaw`, `ctx.lastRecognized`.
+  - Behavior: node passes only when expression evaluates truthy; otherwise flow fails.
+- `keyword_wait` node:
+  - Fields: `keyword`, `timeoutMs`, `pollMs`, `source`, `caseSensitive`, `onlyNew`.
+  - Behavior: polls conversation logs until keyword appears or timeout expires.
+  - `source` options: `user`, `coach`, `any`.
+
+### Execution model
+
+- Flow runs strictly in order from step 1 to N.
+- Per-step visual state:
+  - `running` while executing
+  - `ok` on success
+  - `error` on failure
+- Stop behavior:
+  - `Stop` requests cancellation of the active run token.
+  - Next loop boundary or poll cycle exits with `Stopped`.
+- Import/export behavior:
+  - Export writes an array of step objects (no binary data).
+  - Import validates known `type` values and skips unsupported entries.
+
+### Flow JSON example
+
+```json
+[
+  {
+    "type": "api",
+    "name": "Set concise prompt",
+    "endpoint": "/api/llm/prompt",
+    "method": "POST",
+    "payload": {
+      "prompt": "You are a concise rehab coach. Keep replies under 2 sentences."
+    },
+    "continueOnError": false
+  },
+  {
+    "type": "api",
+    "name": "Speak intro",
+    "endpoint": "/api/speak",
+    "method": "POST",
+    "payload": {
+      "text": "Hello, let's begin today's session.",
+      "voice": "en_US",
+      "speed": 1.0,
+      "volume": 1.0
+    },
+    "continueOnError": false
+  },
+  {
+    "type": "keyword_wait",
+    "name": "Wait for thanks",
+    "keyword": "thanks",
+    "timeoutMs": 12000,
+    "pollMs": 350,
+    "source": "user",
+    "caseSensitive": false,
+    "onlyNew": true
+  },
+  {
+    "type": "api",
+    "name": "Happy face",
+    "endpoint": "/api/face",
+    "method": "POST",
+    "payload": {
+      "mode": "happy",
+      "seconds": 3
+    },
+    "continueOnError": false
+  }
+]
+```
 
 ## Python Voice Service (ASR + LLM)
 

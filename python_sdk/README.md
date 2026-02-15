@@ -70,6 +70,28 @@ What the Visualizer provides:
 This is useful for rapid API and behavior verification before automating with
 `VoiceAgentClient`.
 
+Built-in method templates:
+
+- `speak(text,voice,model,speed,volume)` -> `/api/speak`
+- `qwen_speak(text,speaker,instruct)` -> `/api/qwen/speak`
+- `set_tts_options(voice,model)` -> `/api/voice`
+- `set_tts_model(model)` -> `/api/voice`
+- `get_llm_prompt()` -> `/api/llm/prompt` (GET)
+- `set_llm_prompt(prompt)` -> `/api/llm/prompt`
+- `reset_llm_prompt()` -> `/api/llm/prompt`
+- `launch_game(name)` -> `/api/game`
+- `exit_game()` -> `/api/game`
+- `face_preset(mode,seconds)` -> `/api/face`
+- `flower_open()` -> `/api/flower`
+- `led_breathe(color,brightness,period,duration)` -> `/api/led`
+
+Flow node semantics:
+
+- `api`: HTTP request step with optional `continueOnError`.
+- `delay`: sleeps for `delayMs`.
+- `condition`: evaluates JavaScript expression against flow context.
+- `keyword_wait`: polls log stream until keyword match or timeout.
+
 ## Tests
 
 ```bash
