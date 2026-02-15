@@ -16,6 +16,7 @@ If your goal is to control the robot/agent from Python (without editing Unity sc
 - **SDK detailed guide:** [`docs/PYTHON_SDK.md`](docs/PYTHON_SDK.md)
 
 This SDK mirrors the Unity `UserTestControlPanel` capabilities (TTS, face/LED/servo commands, game intents, and runtime LLM prompt control).
+It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for interactive API testing and flow prototyping.
 
 ## Table of Contents
 
@@ -27,8 +28,8 @@ This SDK mirrors the Unity `UserTestControlPanel` capabilities (TTS, face/LED/se
 - [Detailed Setup](#detailed-setup)
 - [Service Endpoints and MQTT Topics](#service-endpoints-and-mqtt-topics)
 - [Python SDK (Detailed)](#python-sdk-detailed)
+- [SDK Visualizer](#sdk-visualizer)
 - [Python Voice Service (ASR + LLM)](#python-voice-service-asr--llm)
-- [Live Captions Bridge](#live-captions-bridge)
 - [TTS Backends (Piper and Qwen)](#tts-backends-piper-and-qwen)
 - [Troubleshooting](#troubleshooting)
 - [Development and Tests](#development-and-tests)
@@ -37,7 +38,7 @@ This SDK mirrors the Unity `UserTestControlPanel` capabilities (TTS, face/LED/se
 ## Architecture Overview
 
 ```text
-Microphone / Live Captions
+Microphone / External Transcript Source
         |
         v
 Unity Voice Layer (VoskSpeechToText / VoiceGameLauncher / VoiceGameWiring)
@@ -54,8 +55,7 @@ Unity TTS playback path:
 Unity -> HTTP GET/POST /speak (port 5005 by default) -> Piper or Qwen wrapper
 ```
 
-Default production recognition path in this repo is Windows 11 Live Captions bridge.  
-Optional fallback path is `python_voice_service/main.py` (Faster-Whisper).
+The maintained recognition path in this repo is `python_voice_service/main.py` (`/transcribe` with Faster-Whisper), or any custom transcript source integrated into Unity.
 
 ## Repository Layout
 
@@ -64,7 +64,7 @@ Assets/                   Unity scenes, scripts, prefabs, runtime components
 python_sdk/               Python client SDK for robot/voice controls
 python_voice_service/     FastAPI services (ASR, /respond, Piper/Qwen TTS wrappers)
 scripts/                  Multi-service launcher + intent/dialog helper services
-docs/                     Integration guides (SDK, Live Captions bridge, etc.)
+docs/                     Integration guides (SDK, integration, and supporting notes)
 tests/                    Python SDK tests
 native/                   Native audio processing helpers
 ```
@@ -72,32 +72,24 @@ native/                   Native audio processing helpers
 ## Features
 
 - Unity-first voice workflow with wake-word and intent routing.
-- Windows 11 Live Captions ingestion path for low-overhead STT integration.
 - Optional Faster-Whisper transcription backend through FastAPI.
 - MQTT command publish for face/servo/LED and game intents.
 - Embedded remote control panel (`UserTestControlPanel`) over HTTP (default port `8787`).
 - Pluggable TTS backend on stable endpoint (`/speak`) with Piper or Qwen wrapper.
 - Python SDK parity with Unity panel actions.
+- SDK Visualizer (`/sdk`) with step-by-step flow building, execution, and JSON import/export.
 - Local multi-process launcher (`scripts/start_local_services.py`).
 
 ## Quick Start Paths
 
-### Path A (Recommended): Unity + Windows Live Captions
-
-1. Open the project in Unity `2022.3.56f1c1`.
-2. Ensure your scene includes `VoskSpeechToText`, `VoiceGameLauncher`, and wiring components.
-3. Enable Windows Live Captions (`Win + Ctrl + L`) and include microphone audio.
-4. Start the Live Captions listener (see [`docs/LIVE_CAPTIONS_BRIDGE.md`](docs/LIVE_CAPTIONS_BRIDGE.md)).
-5. Run the scene and verify recognized text reaches the voice launcher.
-
-### Path B: Unity + Python Voice Service (Faster-Whisper)
+### Path A (Recommended): Unity + Python Voice Service (Faster-Whisper)
 
 1. Set up `python_voice_service` virtual environment.
 2. Run `uvicorn main:app --host 0.0.0.0 --port 8000`.
 3. In Unity, set Python transcription URL to `http://127.0.0.1:8000/transcribe`.
 4. Keep MQTT broker running if you need robot intents/hardware controls.
 
-### Path C: Python SDK Only (Automation / Integration)
+### Path B: Python SDK Only (Automation / Integration)
 
 1. Install SDK dependencies from `python_sdk/requirements.txt`.
 2. Import `voice_agent_sdk` from `python_sdk/`.
@@ -107,7 +99,7 @@ native/                   Native audio processing helpers
 ## Environment Requirements
 
 - **Unity:** `2022.3.56f1c1` (see `ProjectSettings/ProjectVersion.txt`)
-- **OS:** Windows 11 recommended for Live Captions workflow
+- **OS:** Any OS supported by your Unity/Python deployment (Windows is common for this setup)
 - **Python:** 3.10+ (3.12 recommended for service environments)
 - **MQTT broker:** typically on `1883`
 - **Audio:** microphone permission enabled
@@ -267,6 +259,33 @@ client.set_llm_prompt("You are a concise rehab coach. Keep replies short.")
 - Intents/options:
   - `launch_game(...)`, `exit_game()`, `set_tts_options(...)`, `set_dialog_style(...)`
 
+## SDK Visualizer
+
+The SDK Visualizer is served by Unity `UserTestControlPanel` and is designed for rapid integration testing.
+
+Access:
+- Start Unity with `UserTestControlPanel` listening on port `8787`.
+- Open `http://<host-ip>:8787/sdk` (or `/sdk.html`) in a browser.
+
+Core capabilities:
+- SDK method sandbox:
+  - Select a mapped SDK method (for example `speak`, `set_llm_prompt`, `launch_game`).
+  - Auto-fill endpoint and payload templates.
+  - Send request and inspect HTTP status + response body directly in the UI.
+- Flow Builder:
+  - Drag method templates into a canvas and run steps sequentially.
+  - Add utility nodes: `delay(ms)`, `condition(expr)`, and `wait_keyword(keyword)`.
+  - Reorder, delete, and edit steps with per-step configuration.
+  - Configure API step behavior such as HTTP method, JSON payload, and `continueOnError`.
+- Condition and context controls:
+  - Condition expressions can use flow context values such as `ctx.lastStatus`, `ctx.lastJson`, `ctx.lastRaw`, and `ctx.lastRecognized`.
+  - Keyword wait nodes support source filtering (`user` / `coach` / `any`), timeout, poll interval, case sensitivity, and "only new text" matching.
+- Debug and sharing:
+  - Live run log and per-step state (`running`, `ok`, `error`).
+  - Export flow definitions to JSON and import them later for repeatable test scenarios.
+
+This page calls the same `/api/*` routes used by `python_sdk/voice_agent_sdk/client.py`, so it is useful for validating payload shape and backend behavior before writing automation scripts.
+
 ## Python Voice Service (ASR + LLM)
 
 Service file: `python_voice_service/main.py`
@@ -308,17 +327,6 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 More details are documented in [`python_voice_service/README.md`](python_voice_service/README.md).
 
-## Live Captions Bridge
-
-Reference guide: [`docs/LIVE_CAPTIONS_BRIDGE.md`](docs/LIVE_CAPTIONS_BRIDGE.md)
-
-Summary:
-- Listener process captures Windows Live Captions text updates.
-- Partial updates are assembled into finalized sentences.
-- Sentences are forwarded into Unity (pipe/MQTT/IPC depending on your integration).
-
-This is the recommended default STT path for Windows deployments in this repo.
-
 ## TTS Backends (Piper and Qwen)
 
 Both wrappers expose compatible `/speak` routes:
@@ -344,7 +352,7 @@ If you use Qwen TTS and Faster-Whisper together, keep separate virtual environme
 
 - No speech recognized:
   - Check microphone permission.
-  - Verify active recognition path (Live Captions vs `/transcribe`).
+  - Verify Unity is configured to use the expected recognizer endpoint (`/transcribe` or your custom source).
   - Confirm Unity component references are not null.
 - MQTT commands not received:
   - Verify broker host/port and credentials.
