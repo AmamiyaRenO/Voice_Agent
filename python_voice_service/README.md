@@ -75,7 +75,7 @@ pip install -r requirements.txt
    ```bash
    # Optional: customise the Ollama integration
    export OLLAMA_BASE_URL="http://127.0.0.1:11434"
-   export OLLAMA_MODEL="llama3.1:8b-instruct"
+   export OLLAMA_MODEL="gemma3:4b"
    export OLLAMA_SYSTEM_PROMPT="You are the Coach Voice Agent..."
 
    uvicorn main:app --host 0.0.0.0 --port 8000
@@ -94,7 +94,7 @@ publishing to the MQTT message hub.
 
 The `/respond` endpoint relays recognised text to a local Ollama
 deployment. By default it targets `http://127.0.0.1:11434/api/generate`
-with the `llama3.1:8b-instruct` model and the coach system prompt. Send
+with the `gemma3:4b` model and the coach system prompt. Send
 a POST request with a JSON body containing the `text` field:
 
 ```bash

@@ -132,3 +132,27 @@ def test_set_llm_prompt_posts_to_panel_endpoint():
     args, kwargs = session.post.call_args
     assert args[0].endswith("/api/llm/prompt")
     assert kwargs["json"]["prompt"] == "You are concise."
+
+
+def test_describe_current_camera_posts_to_panel_endpoint():
+    session = mock.Mock()
+    response = mock.Mock()
+    response.raise_for_status = mock.Mock()
+    response.json.return_value = {
+        "status": "ok",
+        "description": "I see a person standing in front of the camera.",
+    }
+    session.post.return_value = response
+
+    client = make_client(http_session=session)
+    data = client.describe_current_camera(
+        prompt="What do you see?",
+        model="gemma3:4b",
+    )
+
+    assert data["status"] == "ok"
+    session.post.assert_called_once()
+    args, kwargs = session.post.call_args
+    assert args[0].endswith("/api/vision/describe")
+    assert kwargs["json"]["prompt"] == "What do you see?"
+    assert kwargs["json"]["model"] == "gemma3:4b"

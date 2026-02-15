@@ -95,6 +95,12 @@ namespace RobotVoice
 
         [SerializeField, Tooltip("Python voice service base URL used to get/set runtime LLM system prompt.")]
         private string llmServiceBaseUrl = "http://127.0.0.1:8000";
+        [SerializeField, Tooltip("Ollama base URL used by /api/vision/describe.")]
+        private string ollamaBaseUrl = "http://127.0.0.1:11434";
+        [SerializeField, Tooltip("Default multimodal model for camera description.")]
+        private string defaultVisionModel = "gemma3:4b";
+        [SerializeField, Tooltip("Default prompt used when /api/vision/describe request has empty prompt.")]
+        private string defaultVisionPrompt = "Describe what you see in this camera frame in 2-4 concise sentences.";
 
         private HttpListener listener;
         private CancellationTokenSource shutdownToken;
@@ -342,6 +348,9 @@ namespace RobotVoice
                     case "/api/llm/prompt":
                         await HandleLlmPromptAsync(context).ConfigureAwait(false);
                         return;
+                    case "/api/vision/describe":
+                        await HandleVisionDescribeAsync(context).ConfigureAwait(false);
+                        return;
                     case "/api/game":
                         await HandleGameAsync(context).ConfigureAwait(false);
                         return;
@@ -541,6 +550,20 @@ namespace RobotVoice
             public bool runtime_override_active;
             public string source;
             public string detail;
+        }
+
+        [Serializable]
+        private struct VisionDescribeRequest
+        {
+            public string prompt;
+            public string model;
+        }
+
+        [Serializable]
+        private struct OllamaGenerateResponse
+        {
+            public string response;
+            public string error;
         }
 
         [Serializable]
@@ -940,6 +963,182 @@ namespace RobotVoice
                 url = "http://127.0.0.1:8000";
             }
             return url.TrimEnd('/');
+        }
+
+        private string ResolveOllamaBaseUrl()
+        {
+            var url = (ollamaBaseUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                url = (Environment.GetEnvironmentVariable("OLLAMA_BASE_URL") ?? string.Empty).Trim();
+            }
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                url = "http://127.0.0.1:11434";
+            }
+            return url.TrimEnd('/');
+        }
+
+        private string ResolveVisionModel(string requestedModel)
+        {
+            var model = (requestedModel ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(model))
+            {
+                return model;
+            }
+            model = (defaultVisionModel ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(model))
+            {
+                return model;
+            }
+            model = (Environment.GetEnvironmentVariable("OLLAMA_MODEL") ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(model))
+            {
+                return model;
+            }
+            return "gemma3:4b";
+        }
+
+        private bool TryGetLatestCameraJpegCopy(out byte[] jpeg)
+        {
+            jpeg = null;
+            lock (_cameraLock)
+            {
+                if (_latestJpeg == null || _latestJpeg.Length <= 0)
+                {
+                    return false;
+                }
+                jpeg = new byte[_latestJpeg.Length];
+                Buffer.BlockCopy(_latestJpeg, 0, jpeg, 0, _latestJpeg.Length);
+            }
+            return true;
+        }
+
+        private async Task<byte[]> TryGetLatestCameraJpegWithWaitAsync(int waitMs, int pollMs = 50)
+        {
+            var timeoutMs = Mathf.Max(0, waitMs);
+            var intervalMs = Mathf.Clamp(pollMs, 10, 250);
+            var startedAt = DateTime.UtcNow;
+
+            while (true)
+            {
+                if (TryGetLatestCameraJpegCopy(out var jpeg))
+                {
+                    return jpeg;
+                }
+
+                var elapsedMs = (int)(DateTime.UtcNow - startedAt).TotalMilliseconds;
+                if (elapsedMs >= timeoutMs)
+                {
+                    return null;
+                }
+
+                await Task.Delay(intervalMs).ConfigureAwait(false);
+            }
+        }
+
+        private string BuildNoCameraFrameHint()
+        {
+            int bytes;
+            int frameCount;
+            lock (_cameraLock)
+            {
+                bytes = _latestJpeg != null ? _latestJpeg.Length : 0;
+                frameCount = _cameraFrameCount;
+            }
+
+            var mode = useExternalCameraTexture ? "external" : "webcam";
+            var clientActive = IsCameraClientActive() ? "true" : "false";
+            return $"no camera frame (mode={mode}, frame_count={frameCount}, jpeg_bytes={bytes}, client_active={clientActive}). Start Preview and wait 1-2 seconds.";
+        }
+
+        private async Task HandleVisionDescribeAsync(HttpListenerContext context)
+        {
+            var method = (context.Request.HttpMethod ?? string.Empty).Trim().ToUpperInvariant();
+            if (method != "POST")
+            {
+                context.Response.StatusCode = 405;
+                context.Response.Headers["Allow"] = "POST,OPTIONS";
+                await WriteJsonAsync(context.Response, 405, "error", "method not allowed").ConfigureAwait(false);
+                return;
+            }
+
+            if (!enableCameraPreview)
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "camera preview disabled").ConfigureAwait(false);
+                return;
+            }
+
+            TouchCameraClientHeartbeat();
+
+            var jpeg = await TryGetLatestCameraJpegWithWaitAsync(1500).ConfigureAwait(false);
+            if (jpeg == null || jpeg.Length <= 0)
+            {
+                await WriteJsonAsync(context.Response, 503, "error", BuildNoCameraFrameHint()).ConfigureAwait(false);
+                return;
+            }
+
+            var request = ParseJsonBody<VisionDescribeRequest>(context.Request);
+            var prompt = (request.prompt ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(prompt))
+            {
+                prompt = string.IsNullOrWhiteSpace(defaultVisionPrompt)
+                    ? "Describe what you see in this camera frame in 2-4 concise sentences."
+                    : defaultVisionPrompt.Trim();
+            }
+            var model = ResolveVisionModel(request.model);
+            var imageBase64 = Convert.ToBase64String(jpeg);
+
+            var payload = new StringBuilder(imageBase64.Length + prompt.Length + model.Length + 256)
+                .Append("{\"model\":\"").Append(EscapeJson(model)).Append('"')
+                .Append(",\"prompt\":\"").Append(EscapeJson(prompt)).Append('"')
+                .Append(",\"stream\":false")
+                .Append(",\"images\":[\"").Append(imageBase64).Append("\"]}")
+                .ToString();
+
+            var url = ResolveOllamaBaseUrl() + "/api/generate";
+            try
+            {
+                using (var content = new StringContent(payload, Encoding.UTF8, "application/json"))
+                {
+                    var response = await SharedHttpClient.PostAsync(url, content).ConfigureAwait(false);
+                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        await WriteJsonAsync(context.Response, (int)response.StatusCode, "error", $"vision request failed: {body}").ConfigureAwait(false);
+                        return;
+                    }
+
+                    string description = string.Empty;
+                    try
+                    {
+                        var result = JsonUtility.FromJson<OllamaGenerateResponse>(body);
+                        description = (result.response ?? string.Empty).Trim();
+                    }
+                    catch (Exception)
+                    {
+                        description = string.Empty;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(description))
+                    {
+                        description = body.Trim();
+                    }
+
+                    var responseJson = new StringBuilder(description.Length + prompt.Length + model.Length + 128)
+                        .Append("{\"status\":\"ok\"")
+                        .Append(",\"message\":\"vision description ready\"")
+                        .Append(",\"model\":\"").Append(EscapeJson(model)).Append('"')
+                        .Append(",\"prompt\":\"").Append(EscapeJson(prompt)).Append('"')
+                        .Append(",\"description\":\"").Append(EscapeJson(description)).Append("\"}")
+                        .ToString();
+                    await WriteRawJsonAsync(context.Response, 200, responseJson).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                await WriteJsonAsync(context.Response, 502, "error", $"vision request failed: {ex.Message}").ConfigureAwait(false);
+            }
         }
 
         private static async Task WriteRawJsonAsync(HttpListenerResponse response, int statusCode, string json)
@@ -1743,6 +1942,17 @@ namespace RobotVoice
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"</section>");
             sb.AppendLine(@"<section>");
+            sb.AppendLine(@"<h2>Camera Vision (LLM)</h2>");
+            sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:stretch;"">");
+            sb.AppendLine(@"<input id=""visionModel"" type=""text"" placeholder=""Vision model (e.g. gemma3:4b)"" value=""gemma3:4b"">");
+            sb.AppendLine(@"<textarea id=""visionPrompt"" placeholder=""Ask the model what it sees in the current camera frame..."">Describe what you see and call out anything important for the current exercise.</textarea>");
+            sb.AppendLine(@"<div class=""controls"" style=""width:100%;"">");
+            sb.AppendLine(@"<button onclick=""describeCameraNow()"">Describe Current Frame</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<pre id=""visionResult"" style=""min-height:88px;margin-top:0.4rem;padding:0.65rem 0.75rem;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.25);white-space:pre-wrap;"">Result will appear here.</pre>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</section>");
+            sb.AppendLine(@"<section>");
             sb.AppendLine(@"<h2>LED Lighting</h2>");
             sb.AppendLine(@"<div class=""controls"">");
             sb.AppendLine(@"<input id=""ledColor"" type=""color"" value=""#00bfff"">");
@@ -1965,6 +2175,52 @@ namespace RobotVoice
             sb.AppendLine(@"  const speaker = qwenSpeakerSelect ? qwenSpeakerSelect.value : '';");
             sb.AppendLine(@"  const instruct = (document.getElementById('qwenInstruct').value||'').trim();");
             sb.AppendLine(@"  send('/api/qwen/speak',{text:text,speaker:speaker,instruct:instruct});");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function describeCameraNow(){");
+            sb.AppendLine(@"  const promptEl = document.getElementById('visionPrompt');");
+            sb.AppendLine(@"  const modelEl = document.getElementById('visionModel');");
+            sb.AppendLine(@"  const resultEl = document.getElementById('visionResult');");
+            sb.AppendLine(@"  if(resultEl){ resultEl.textContent = 'Preparing latest camera frame...'; }");
+            sb.AppendLine(@"  if(statusEl){ statusEl.textContent = 'vision: preparing request...'; }");
+            sb.AppendLine(@"  if(!cameraPolling){");
+            sb.AppendLine(@"    cameraAutoStart = true;");
+            sb.AppendLine(@"    startPolling();");
+            sb.AppendLine(@"    pullCameraFrame();");
+            sb.AppendLine(@"    await new Promise(resolve => setTimeout(resolve, 280));");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  const prompt = promptEl ? String(promptEl.value || '').trim() : '';");
+            sb.AppendLine(@"  const model = modelEl ? String(modelEl.value || '').trim() : '';");
+            sb.AppendLine(@"  const payload = { prompt: prompt };");
+            sb.AppendLine(@"  if(model){ payload.model = model; }");
+            sb.AppendLine(@"  const controller = new AbortController();");
+            sb.AppendLine(@"  const timeoutId = setTimeout(() => controller.abort(), 120000);");
+            sb.AppendLine(@"  if(statusEl){ statusEl.textContent = 'vision: requesting /api/vision/describe ...'; }");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/vision/describe', {");
+            sb.AppendLine(@"      method:'POST',");
+            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
+            sb.AppendLine(@"      body: JSON.stringify(payload),");
+            sb.AppendLine(@"      signal: controller.signal");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    const raw = await resp.text();");
+            sb.AppendLine(@"    let data = null;");
+            sb.AppendLine(@"    try { data = JSON.parse(raw); } catch(err) { data = null; }");
+            sb.AppendLine(@"    if(!resp.ok){");
+            sb.AppendLine(@"      const msg = data && data.message ? data.message : (raw || ('HTTP ' + resp.status));");
+            sb.AppendLine(@"      if(resultEl){ resultEl.textContent = 'Error: ' + msg; }");
+            sb.AppendLine(@"      if(statusEl){ statusEl.textContent = 'vision error: ' + msg; }");
+            sb.AppendLine(@"      return;");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    const desc = data && data.description ? String(data.description) : (raw || 'No description returned.');");
+            sb.AppendLine(@"    if(resultEl){ resultEl.textContent = desc; }");
+            sb.AppendLine(@"    if(statusEl){ statusEl.textContent = 'vision: done'; }");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    const msg = (err && err.name === 'AbortError') ? 'vision request timed out' : ('vision request failed: ' + err);");
+            sb.AppendLine(@"    if(resultEl){ resultEl.textContent = 'Error: ' + msg; }");
+            sb.AppendLine(@"    if(statusEl){ statusEl.textContent = msg; }");
+            sb.AppendLine(@"  } finally {");
+            sb.AppendLine(@"    clearTimeout(timeoutId);");
+            sb.AppendLine(@"  }");
             sb.AppendLine(@"}");
             sb.AppendLine(@"async function loadLlmPrompt(){");
             sb.AppendLine(@"  if(!llmPromptEl) return;");
@@ -2235,6 +2491,7 @@ namespace RobotVoice
             sb.AppendLine(@"  'get_llm_prompt()': { endpoint:'/api/llm/prompt', method:'GET', payload:{} },");
             sb.AppendLine(@"  'set_llm_prompt(prompt)': { endpoint:'/api/llm/prompt', payload:{ prompt:'You are a concise coach. Keep replies under 2 sentences.' } },");
             sb.AppendLine(@"  'reset_llm_prompt()': { endpoint:'/api/llm/prompt', payload:{ reset:true } },");
+            sb.AppendLine(@"  'describe_camera(prompt,model)': { endpoint:'/api/vision/describe', payload:{ prompt:'Describe what you see in the current camera frame.', model:'gemma3:4b' } },");
             sb.AppendLine(@"  'launch_game(name)': { endpoint:'/api/game', payload:{ action:'launch', name:'cornhole' } },");
             sb.AppendLine(@"  'exit_game()': { endpoint:'/api/game', payload:{ action:'exit' } },");
             sb.AppendLine(@"  'face_preset(mode,seconds)': { endpoint:'/api/face', payload:{ mode:'happy', seconds:3 } },");

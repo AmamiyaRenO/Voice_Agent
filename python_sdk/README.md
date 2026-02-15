@@ -30,6 +30,9 @@ client.launch_game("cornhole")
 cfg = client.get_llm_prompt()
 client.set_llm_prompt("You are a concise rehab coach. Keep replies to 1-2 sentences.")
 # client.reset_llm_prompt()
+
+# Camera vision (uses current panel camera frame)
+vision = client.describe_current_camera("Describe what you see and whether the user is ready to start.")
 ```
 
 ## Supported features (parity with UserTestControlPanel)
@@ -39,6 +42,7 @@ client.set_llm_prompt("You are a concise rehab coach. Keep replies to 1-2 senten
 - **LED effects**: breathe/solid/random/off
 - **TTS**: speak text, set voice/model options
 - **LLM system prompt**: get/set/reset runtime `/respond` prompt through UserTestControlPanel
+- **Camera vision describe**: send current Unity camera frame + user prompt to multimodal LLM
 - **Game**: launch/exit intents
 
 ## SDK Visualizer (Unity UserTestControlPanel)
@@ -79,6 +83,7 @@ Built-in method templates:
 - `get_llm_prompt()` -> `/api/llm/prompt` (GET)
 - `set_llm_prompt(prompt)` -> `/api/llm/prompt`
 - `reset_llm_prompt()` -> `/api/llm/prompt`
+- `describe_camera(prompt,model)` -> `/api/vision/describe`
 - `launch_game(name)` -> `/api/game`
 - `exit_game()` -> `/api/game`
 - `face_preset(mode,seconds)` -> `/api/face`

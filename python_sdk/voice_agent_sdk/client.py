@@ -66,6 +66,11 @@ class VoiceAgentClient:
         # Mirrors UserTestControlPanel: GET/POST /api/llm/prompt
         return f"http://{self._host}:{self._panel_port}/api/llm/prompt"
 
+    @property
+    def panel_vision_describe_url(self) -> str:
+        # Mirrors UserTestControlPanel: POST /api/vision/describe
+        return f"http://{self._host}:{self._panel_port}/api/vision/describe"
+
     def connect_mqtt(self, start_loop: bool = True) -> None:
         if self._mqtt_client is None:
             self._mqtt_client = mqtt.Client()
@@ -204,6 +209,28 @@ class VoiceAgentClient:
             json={"reset": True},
             timeout=timeout,
         )
+        response.raise_for_status()
+        try:
+            return response.json()
+        except Exception:
+            return {"raw": response.text}
+
+    def describe_current_camera(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        timeout: float = 45.0,
+    ) -> Dict[str, Any]:
+        """
+        Ask UserTestControlPanel to run a vision-capable LLM on the latest camera frame.
+
+        Endpoint: POST /api/vision/describe
+        Payload: {prompt, model?}
+        """
+        payload: Dict[str, Any] = {"prompt": (prompt or "").strip()}
+        if model and model.strip():
+            payload["model"] = model.strip()
+        response = self._http.post(self.panel_vision_describe_url, json=payload, timeout=timeout)
         response.raise_for_status()
         try:
             return response.json()

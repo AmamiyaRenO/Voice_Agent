@@ -171,7 +171,7 @@ You can also pass `--env-file` to preload environment variables.
 
 | Service | Default Port | Key Endpoints |
 |---|---:|---|
-| Unity UserTestControlPanel | `8787` | `/`, `/sdk`, `/api/speak`, `/api/llm/prompt`, `/api/face`, `/api/flower`, `/api/led`, `/api/game` |
+| Unity UserTestControlPanel | `8787` | `/`, `/sdk`, `/api/speak`, `/api/llm/prompt`, `/api/vision/describe`, `/api/face`, `/api/flower`, `/api/led`, `/api/game` |
 | Python Voice Service | `8000` | `/healthz`, `/transcribe`, `/respond`, `/respond/config`, `/respond/metrics` |
 | Piper wrapper | `5005` | `/speak` (GET/POST), `/speak_stream` |
 | Qwen wrapper | `5006` | `/speak` (GET/POST), `/metrics` |
@@ -205,6 +205,7 @@ Primary link:
 - LED modes
 - Game launch/exit intents
 - Runtime LLM prompt get/set/reset via Unity panel API (`/api/llm/prompt`)
+- Camera vision describe via Unity panel API (`/api/vision/describe`)
 
 ### Install
 
@@ -247,6 +248,9 @@ client.exit_game()
 cfg = client.get_llm_prompt()
 client.set_llm_prompt("You are a concise rehab coach. Keep replies short.")
 # client.reset_llm_prompt()
+
+# Camera vision describe through /api/vision/describe
+vision = client.describe_current_camera("Describe what you see in the current camera frame.")
 ```
 
 ### Key method groups
@@ -258,6 +262,8 @@ client.set_llm_prompt("You are a concise rehab coach. Keep replies short.")
   - `get_llm_prompt()`
   - `set_llm_prompt(prompt)`
   - `reset_llm_prompt()`
+- Vision:
+  - `describe_current_camera(prompt, model=None)`
 - Face:
   - `face_happy()`, `face_neutral()`, `face_sad()`, `face_very_sad()`, `face_excited()`, `face_idle()`, `face_custom(...)`
 - Servo:
@@ -305,6 +311,7 @@ Current built-ins in the visualizer method list:
 - `get_llm_prompt()` -> `/api/llm/prompt` (GET)
 - `set_llm_prompt(prompt)` -> `/api/llm/prompt`
 - `reset_llm_prompt()` -> `/api/llm/prompt`
+- `describe_camera(prompt,model)` -> `/api/vision/describe`
 - `launch_game(name)` -> `/api/game`
 - `exit_game()` -> `/api/game`
 - `face_preset(mode,seconds)` -> `/api/face`

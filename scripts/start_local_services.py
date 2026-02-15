@@ -420,6 +420,7 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     # Latency-first defaults (can still be overridden by user env/.env).
     env.setdefault("OLLAMA_MAX_TOKENS", "180")
     env.setdefault("OLLAMA_KEEP_ALIVE", "30m")
+    env.setdefault("OLLAMA_MODEL", "gemma3:4b")
     # ASR defaults for NucBox M6 (no NVIDIA GPU): CPU-only faster-whisper tuning.
     env.setdefault("WHISPER_DEVICE", "cpu")
     env.setdefault("WHISPER_COMPUTE_TYPE", "int8")
