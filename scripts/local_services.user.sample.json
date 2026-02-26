@@ -1,0 +1,36 @@
+{
+  "python": {
+    "asr": "",
+    "tts": ""
+  },
+  "paths": {
+    "intent_manifest": "",
+    "game_manifest": ""
+  },
+  "openai": {
+    "api_key": "",
+    "base_url": "",
+    "transcribe_model": "gpt-4o-mini-transcribe",
+    "transcribe_prompt": ""
+  },
+  "intent": {
+    "launch_triggers": [
+      "open",
+      "start",
+      "launch",
+      "play",
+      "begin",
+      "load"
+    ],
+    "exit_keywords": [
+      "back home",
+      "go home",
+      "return home",
+      "quit",
+      "exit",
+      "stop",
+      "close game"
+    ]
+  },
+  "env": {}
+}

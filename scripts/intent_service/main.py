@@ -108,6 +108,14 @@ def _apply_file_config(cfg: Config, cfg_path: Path) -> Config:
     rules_dedupe = rules.get("dedupe_window_sec")
     if rules_dedupe is not None:
         cfg.dedupe_window_sec = float(rules_dedupe)
+    cfg.launch_triggers = _apply_list_env_override(
+        cfg.launch_triggers,
+        os.environ.get("INTENT_LAUNCH_TRIGGERS"),
+    )
+    cfg.exit_keywords = _apply_list_env_override(
+        cfg.exit_keywords,
+        os.environ.get("INTENT_EXIT_KEYWORDS"),
+    )
     return cfg
 
 
@@ -124,6 +132,14 @@ def _apply_env_only_config(cfg: Config) -> Config:
         cfg.manifest_path = resolve_optional_path(env_manifest)
     cfg.fuzzy_threshold = int(os.environ.get("FUZZY_THRESHOLD", cfg.fuzzy_threshold))
     cfg.dedupe_window_sec = float(os.environ.get("DEDUPE_WINDOW_SEC", cfg.dedupe_window_sec))
+    cfg.launch_triggers = _apply_list_env_override(
+        cfg.launch_triggers,
+        os.environ.get("INTENT_LAUNCH_TRIGGERS"),
+    )
+    cfg.exit_keywords = _apply_list_env_override(
+        cfg.exit_keywords,
+        os.environ.get("INTENT_EXIT_KEYWORDS"),
+    )
     return cfg
 
 
@@ -150,15 +166,41 @@ def contains_any(text: str, keywords: List[str]) -> bool:
     return any(keyword.lower() in lower for keyword in keywords)
 
 
+def _apply_list_env_override(current: Optional[List[str]], raw: Optional[str]) -> List[str]:
+    base = [str(item).strip() for item in (current or []) if str(item).strip()]
+    text = (raw or "").strip()
+    if not text:
+        return base
+
+    parsed: List[str] = []
+    try:
+        node = json.loads(text)
+        if isinstance(node, list):
+            parsed = [str(item).strip() for item in node if str(item).strip()]
+    except Exception:
+        merged = text.replace("\r\n", "\n").replace(";", ",").replace("\n", ",")
+        parsed = [part.strip() for part in merged.split(",") if part.strip()]
+
+    return parsed if parsed else base
+
+
 def extract_game_name(text: str, triggers: List[str]) -> Optional[str]:
+    lower = text.lower()
     for trigger in triggers:
-        idx = text.lower().find(trigger.lower())
-        if idx >= 0:
-            tail = text[idx + len(trigger) :].strip()
-            tail = re.sub(r"[.!?\u3002\uff01\uff1f\s]+$", "", tail)
-            tail = tail.lstrip("\u7684 ")
-            if tail:
-                return tail
+        raw_trigger = str(trigger).strip()
+        if not raw_trigger:
+            continue
+        pattern = re.compile(rf"(?<!\w){re.escape(raw_trigger.lower())}(?!\w)")
+        match = pattern.search(lower)
+        if not match:
+            continue
+        tail = text[match.end() :].strip()
+        tail = tail.lstrip(":,.- \t")
+        tail = re.sub(r"^(the|a|an)\s+", "", tail, flags=re.IGNORECASE)
+        tail = re.sub(r"[.!?\u3002\uff01\uff1f\s]+$", "", tail)
+        tail = tail.lstrip("\u7684 ")
+        if tail:
+            return tail
     return None
 
 
@@ -180,7 +222,7 @@ class ManifestAliasResolver:
             if not os.path.exists(path):
                 print(f"[intent] manifest not found: {path}")
                 return
-            with open(path, "r", encoding="utf-8") as handle:
+            with open(path, "r", encoding="utf-8-sig") as handle:
                 data = json.load(handle)
             for game in data.get("games", []) or []:
                 name = str(game.get("name") or game.get("id") or "").strip()

@@ -1,0 +1,31 @@
+{
+  "python": {},
+  "paths": {},
+  "openai": {
+    "transcribe_model": "gpt-4o-mini-transcribe",
+    "transcribe_prompt": ""
+  },
+  "intent": {
+    "launch_triggers": [
+      "open",
+      "start",
+      "launch",
+      "play",
+      "begin",
+      "load"
+    ],
+    "exit_keywords": [
+      "back home",
+      "go home",
+      "return home",
+      "back",
+      "quit",
+      "exit",
+      "stop",
+      "cancel",
+      "close",
+      "close game"
+    ]
+  },
+  "env": {}
+}

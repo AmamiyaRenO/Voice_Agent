@@ -700,6 +700,32 @@ namespace RobotVoice
             PublishExit(string.IsNullOrWhiteSpace(reason) ? "tester_panel" : reason.Trim());
         }
 
+        public bool SetAgentListeningForTester(bool shouldListen)
+        {
+            if (speechToText == null)
+            {
+                speechToText = GetComponent<VoskSpeechToText>();
+            }
+
+            if (speechToText == null)
+            {
+                return false;
+            }
+
+            speechToText.SetListeningEnabled(shouldListen);
+            return true;
+        }
+
+        public bool IsAgentListeningForTester()
+        {
+            if (speechToText == null)
+            {
+                speechToText = GetComponent<VoskSpeechToText>();
+            }
+
+            return speechToText != null && speechToText.IsListening;
+        }
+
         public void TriggerSpeakForTester(string text, string voiceCode = null, string modelPath = null, string ttsInstruct = null)
         {
             TriggerSpeakInternal(text, voiceCode, modelPath, ttsInstruct, fromTesterPanel: false);

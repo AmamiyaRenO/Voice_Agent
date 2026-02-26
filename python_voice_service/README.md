@@ -47,6 +47,16 @@ pip install -r requirements.txt
    export WHISPER_VAD_MIN_SPEECH_MS=150
    export WHISPER_RECENT_WINDOW_PAD_MS=100
    export WHISPER_CONDITION_ON_PREVIOUS_TEXT=false
+   # Optional: ASR mode switch
+   export TRANSCRIBE_MODE=offline  # offline | api
+   # Optional: when TRANSCRIBE_MODE=api (OpenAI STT)
+   export OPENAI_API_KEY="sk-..."
+   export OPENAI_TRANSCRIBE_MODEL="gpt-4o-mini-transcribe"
+   # Optional: prompt bias for OpenAI STT (recommended empty to avoid prompt leakage)
+   export OPENAI_TRANSCRIBE_PROMPT=""
+   # API language control (defaults already enforce English)
+   export ASR_API_LANGUAGE="en"
+   export ASR_API_FORCE_LANGUAGE="1"
    ```
 
    On Windows PowerShell replace `export` with `$env:VAR = "value"`.
@@ -89,6 +99,40 @@ When Unity detects speech the `VoskSpeechToText` component serialises the
 PCM samples, posts them to `/transcribe` and reuses the JSON response to
 update the intent pipeline. No scene changes are required to keep
 publishing to the MQTT message hub.
+
+### Runtime ASR mode switch (offline vs OpenAI API)
+
+You can switch ASR mode without restarting the service:
+
+```bash
+# Read current mode
+curl "http://127.0.0.1:8000/transcribe/config"
+
+# Switch to OpenAI API mode
+curl -X POST "http://127.0.0.1:8000/transcribe/config" \
+     -H "Content-Type: application/json" \
+     -d '{"mode":"api"}'
+
+# Switch back to local offline Faster-Whisper
+curl -X POST "http://127.0.0.1:8000/transcribe/config" \
+     -H "Content-Type: application/json" \
+     -d '{"mode":"offline"}'
+```
+
+### OpenAI prompt behavior (important)
+
+- `OPENAI_TRANSCRIBE_PROMPT` is optional and defaults to empty.
+- This service does not auto-inject a default OpenAI prompt anymore.
+- Prompt is only a soft decoding bias; if you see prompt leakage/hallucination, clear this value first.
+- If you change prompt from launcher/runtime config, restart `service_launcher` and `voice_service` so env changes take effect.
+
+### English enforcement and game-term normalization
+
+- In API mode, language is forced to English by default (`ASR_API_FORCE_LANGUAGE=1`, `ASR_API_LANGUAGE=en`).
+- The service also normalizes common game terms to improve intent matching:
+  - `corn hole` -> `cornhole`
+  - `discgolf` / `disc-golf` -> `disc golf`
+  - `pickle ball` -> `pickleball`
 
 ## Generating coach replies with Ollama
 

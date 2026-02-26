@@ -11,6 +11,9 @@ using System.Threading.Tasks;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.UI;
+using Process = System.Diagnostics.Process;
+using ProcessStartInfo = System.Diagnostics.ProcessStartInfo;
+using ProcessWindowStyle = System.Diagnostics.ProcessWindowStyle;
 using PiHub = global::PiMessageHub;
 
 namespace RobotVoice
@@ -91,7 +94,7 @@ namespace RobotVoice
         [SerializeField, Tooltip("Max width for external-texture JPEG snapshots when optimization is enabled.")]
         private int externalPreviewMaxWidth = 256;
         [SerializeField, Tooltip("Only keep encoding frames for this many seconds after a panel camera request.")]
-        private float cameraClientActiveWindowSeconds = 3f;
+        private float cameraClientActiveWindowSeconds = 6f;
 
         [SerializeField, Tooltip("Python voice service base URL used to get/set runtime LLM system prompt.")]
         private string llmServiceBaseUrl = "http://127.0.0.1:8000";
@@ -101,6 +104,8 @@ namespace RobotVoice
         private string defaultVisionModel = "gemma3:4b";
         [SerializeField, Tooltip("Default prompt used when /api/vision/describe request has empty prompt.")]
         private string defaultVisionPrompt = "Describe what you see in this camera frame in 2-4 concise sentences.";
+        [SerializeField, Tooltip("Telemetry dashboard base URL served by telemetry_service.")]
+        private string telemetryDashboardUrl = "http://127.0.0.1:8101/dashboard";
 
         private HttpListener listener;
         private CancellationTokenSource shutdownToken;
@@ -308,9 +313,25 @@ namespace RobotVoice
                     case "/index.html":
                         await RespondWithHtmlAsync(context.Response).ConfigureAwait(false);
                         return;
+                    case "/games":
+                    case "/games.html":
+                        await RespondWithGameConfigHtmlAsync(context.Response).ConfigureAwait(false);
+                        return;
+                    case "/runtime":
+                    case "/runtime.html":
+                        await RespondWithRuntimeConfigHtmlAsync(context.Response).ConfigureAwait(false);
+                        return;
+                    case "/setup":
+                    case "/setup.html":
+                        await RespondWithSetupWizardHtmlAsync(context.Response).ConfigureAwait(false);
+                        return;
                     case "/sdk":
                     case "/sdk.html":
                         await RespondWithSdkHtmlAsync(context.Response).ConfigureAwait(false);
+                        return;
+                    case "/telemetry":
+                    case "/telemetry.html":
+                        await RespondWithTelemetryHtmlAsync(context.Response).ConfigureAwait(false);
                         return;
                     case "/camera.mjpg":
                         await HandleCameraMjpegAsync(context).ConfigureAwait(false);
@@ -354,6 +375,24 @@ namespace RobotVoice
                     case "/api/game":
                         await HandleGameAsync(context).ConfigureAwait(false);
                         return;
+                    case "/api/game/manifest":
+                        await HandleGameManifestAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/file/pick":
+                        await HandleFilePickAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/runtime/config":
+                        await HandleRuntimeConfigAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/runtime/prereq":
+                        await HandleRuntimePrereqAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/runtime/ollama":
+                        await HandleRuntimeOllamaAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/asr":
+                        await HandleAsrAsync(context).ConfigureAwait(false);
+                        return;
                     case "/camera.jpg":
                         await HandleCameraJpegAsync(context).ConfigureAwait(false);
                         return;
@@ -362,6 +401,10 @@ namespace RobotVoice
                         return;
                     case "/api/camera/ping":
                         await HandleCameraPingAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/favicon.ico":
+                        context.Response.StatusCode = 204;
+                        context.Response.Close();
                         return;
                     default:
                         context.Response.StatusCode = 404;
@@ -571,6 +614,49 @@ namespace RobotVoice
         {
             public string action;
             public string name;
+        }
+
+        [Serializable]
+        private struct FilePickRequest
+        {
+            public string title;
+            public string filter;
+            public string initial_dir;
+            public string initial_filename;
+        }
+
+        [Serializable]
+        private struct AsrRequest
+        {
+            public string action;
+            public string mode;
+            public string value;
+            public bool listening;
+        }
+
+        [Serializable]
+        private struct AsrConfigResponse
+        {
+            public string status;
+            public string mode;
+            public string source;
+            public string[] available_modes;
+            public bool openai_configured;
+            public string openai_model;
+        }
+
+        [Serializable]
+        private struct AsrErrorResponse
+        {
+            public string detail;
+            public string message;
+        }
+
+        [Serializable]
+        private struct RuntimeActionRequest
+        {
+            public string action;
+            public string model;
         }
 
         private async Task HandleFaceAsync(HttpListenerContext context)
@@ -1087,6 +1173,28 @@ namespace RobotVoice
                     : defaultVisionPrompt.Trim();
             }
             var model = ResolveVisionModel(request.model);
+            var ollamaBaseUrl = ResolveOllamaBaseUrl();
+            var ollamaProbe = await ProbeOllamaAsync(ollamaBaseUrl, model).ConfigureAwait(false);
+            if (!ollamaProbe.Reachable)
+            {
+                await WriteJsonAsync(
+                    context.Response,
+                    503,
+                    "error",
+                    $"vision backend unavailable at {ollamaBaseUrl}: {ollamaProbe.Error}")
+                    .ConfigureAwait(false);
+                return;
+            }
+            if (!ollamaProbe.ModelAvailable)
+            {
+                await WriteJsonAsync(
+                    context.Response,
+                    503,
+                    "error",
+                    $"vision model not available in Ollama: {model}. Run: ollama pull {model}")
+                    .ConfigureAwait(false);
+                return;
+            }
             var imageBase64 = Convert.ToBase64String(jpeg);
 
             var payload = new StringBuilder(imageBase64.Length + prompt.Length + model.Length + 256)
@@ -1096,44 +1204,71 @@ namespace RobotVoice
                 .Append(",\"images\":[\"").Append(imageBase64).Append("\"]}")
                 .ToString();
 
-            var url = ResolveOllamaBaseUrl() + "/api/generate";
+            var url = ollamaBaseUrl + "/api/generate";
             try
             {
                 using (var content = new StringContent(payload, Encoding.UTF8, "application/json"))
                 {
-                    var response = await SharedHttpClient.PostAsync(url, content).ConfigureAwait(false);
-                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    if (!response.IsSuccessStatusCode)
+                    using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(300)))
                     {
-                        await WriteJsonAsync(context.Response, (int)response.StatusCode, "error", $"vision request failed: {body}").ConfigureAwait(false);
-                        return;
-                    }
+                        var response = await SharedHttpClient.PostAsync(url, content, cts.Token).ConfigureAwait(false);
+                        var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            await WriteJsonAsync(context.Response, (int)response.StatusCode, "error", $"vision request failed: {body}").ConfigureAwait(false);
+                            return;
+                        }
 
-                    string description = string.Empty;
-                    try
-                    {
-                        var result = JsonUtility.FromJson<OllamaGenerateResponse>(body);
-                        description = (result.response ?? string.Empty).Trim();
-                    }
-                    catch (Exception)
-                    {
-                        description = string.Empty;
-                    }
+                        string description = string.Empty;
+                        try
+                        {
+                            var result = JsonUtility.FromJson<OllamaGenerateResponse>(body);
+                            description = (result.response ?? string.Empty).Trim();
+                        }
+                        catch (Exception)
+                        {
+                            description = string.Empty;
+                        }
 
-                    if (string.IsNullOrWhiteSpace(description))
-                    {
-                        description = body.Trim();
-                    }
+                        if (string.IsNullOrWhiteSpace(description))
+                        {
+                            description = body.Trim();
+                        }
 
-                    var responseJson = new StringBuilder(description.Length + prompt.Length + model.Length + 128)
-                        .Append("{\"status\":\"ok\"")
-                        .Append(",\"message\":\"vision description ready\"")
-                        .Append(",\"model\":\"").Append(EscapeJson(model)).Append('"')
-                        .Append(",\"prompt\":\"").Append(EscapeJson(prompt)).Append('"')
-                        .Append(",\"description\":\"").Append(EscapeJson(description)).Append("\"}")
-                        .ToString();
-                    await WriteRawJsonAsync(context.Response, 200, responseJson).ConfigureAwait(false);
+                        var responseJson = new StringBuilder(description.Length + prompt.Length + model.Length + 128)
+                            .Append("{\"status\":\"ok\"")
+                            .Append(",\"message\":\"vision description ready\"")
+                            .Append(",\"model\":\"").Append(EscapeJson(model)).Append('"')
+                            .Append(",\"prompt\":\"").Append(EscapeJson(prompt)).Append('"')
+                            .Append(",\"description\":\"").Append(EscapeJson(description)).Append("\"}")
+                            .ToString();
+                        await WriteRawJsonAsync(context.Response, 200, responseJson).ConfigureAwait(false);
+                    }
                 }
+            }
+            catch (TaskCanceledException)
+            {
+                await WriteJsonAsync(
+                    context.Response,
+                    504,
+                    "error",
+                    "vision request timed out after 300s (5 minutes). Check Ollama is running and model is loaded.")
+                    .ConfigureAwait(false);
+            }
+            catch (HttpRequestException ex)
+            {
+                var detail = ex.InnerException?.Message;
+                if (string.IsNullOrWhiteSpace(detail))
+                {
+                    detail = ex.Message;
+                }
+
+                await WriteJsonAsync(
+                    context.Response,
+                    502,
+                    "error",
+                    $"vision request failed to {url}: {detail}")
+                    .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -1262,6 +1397,2310 @@ namespace RobotVoice
             }
         }
 
+        private async Task HandleGameManifestAsync(HttpListenerContext context)
+        {
+            var method = (context.Request.HttpMethod ?? string.Empty).Trim().ToUpperInvariant();
+            if (method == "GET")
+            {
+                await WriteGameManifestStatusAsync(context.Response).ConfigureAwait(false);
+                return;
+            }
+
+            if (method != "POST")
+            {
+                context.Response.StatusCode = 405;
+                context.Response.Headers["Allow"] = "GET,POST,OPTIONS";
+                await WriteJsonAsync(context.Response, 405, "error", "method not allowed").ConfigureAwait(false);
+                return;
+            }
+
+            var body = ReadRequestBody(context.Request);
+            JSONNode requestNode;
+            try
+            {
+                requestNode = JSONNode.Parse(body);
+            }
+            catch (Exception ex)
+            {
+                await WriteJsonAsync(context.Response, 400, "error", $"invalid json body: {ex.Message}").ConfigureAwait(false);
+                return;
+            }
+
+            var gamesNode = requestNode?["games"];
+            if (gamesNode == null || !gamesNode.IsArray)
+            {
+                await WriteJsonAsync(context.Response, 400, "error", "games array is required").ConfigureAwait(false);
+                return;
+            }
+
+            var manifestPath = ResolveGameManifestPath();
+            var load = LoadGameManifestRoot(manifestPath);
+            if (!load.Success)
+            {
+                await WriteJsonAsync(context.Response, 500, "error", load.Error).ConfigureAwait(false);
+                return;
+            }
+            var manifestBaseDir = Path.GetDirectoryName(manifestPath);
+            if (string.IsNullOrWhiteSpace(manifestBaseDir))
+            {
+                manifestBaseDir = ResolveProjectRootPath();
+            }
+            var launcherEnv = LoadLauncherEnvOverrides();
+
+            var existingRoot = load.Root;
+            var existingById = new Dictionary<string, JSONObject>(StringComparer.OrdinalIgnoreCase);
+            var oldGames = existingRoot["games"];
+            if (oldGames != null && oldGames.IsArray)
+            {
+                var oldArray = oldGames.AsArray;
+                for (int i = 0; i < oldArray.Count; i++)
+                {
+                    var oldNode = oldArray[i];
+                    if (oldNode == null || !oldNode.IsObject)
+                    {
+                        continue;
+                    }
+
+                    var oldObj = oldNode.AsObject;
+                    var oldId = NormalizeGameId((oldObj["id"]?.Value ?? string.Empty).Trim());
+                    if (string.IsNullOrWhiteSpace(oldId))
+                    {
+                        continue;
+                    }
+                    existingById[oldId] = oldObj;
+                }
+            }
+
+            var nextGames = new JSONArray();
+            var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var reqArray = gamesNode.AsArray;
+            for (int i = 0; i < reqArray.Count; i++)
+            {
+                var row = reqArray[i];
+                if (row == null || !row.IsObject)
+                {
+                    continue;
+                }
+
+                var rowObj = row.AsObject;
+                var rawId = (rowObj["id"]?.Value ?? string.Empty).Trim();
+                var rawName = (rowObj["name"]?.Value ?? string.Empty).Trim();
+                var id = NormalizeGameId(string.IsNullOrWhiteSpace(rawId) ? rawName : rawId);
+                if (string.IsNullOrWhiteSpace(id))
+                {
+                    await WriteJsonAsync(context.Response, 400, "error", $"invalid game id at index {i}").ConfigureAwait(false);
+                    return;
+                }
+                if (!seenIds.Add(id))
+                {
+                    await WriteJsonAsync(context.Response, 400, "error", $"duplicate game id: {id}").ConfigureAwait(false);
+                    return;
+                }
+
+                var name = string.IsNullOrWhiteSpace(rawName) ? id : rawName;
+                var rawExecInput = (rowObj["exec"]?.Value ?? string.Empty).Trim();
+                var rawWorkdirInput = (rowObj["workdir"]?.Value ?? string.Empty).Trim();
+                var exec = ResolvePathFromConfigOrPlaceholder(
+                    rawExecInput,
+                    manifestBaseDir,
+                    launcherEnv,
+                    allowCommandName: true);
+                var workdir = ResolvePathFromConfigOrPlaceholder(
+                    rawWorkdirInput,
+                    manifestBaseDir,
+                    launcherEnv,
+                    allowCommandName: false);
+                if (!string.IsNullOrWhiteSpace(rawExecInput) && string.IsNullOrWhiteSpace(exec))
+                {
+                    await WriteJsonAsync(
+                        context.Response,
+                        400,
+                        "error",
+                        $"game '{id}' executable path is unresolved. Please provide an absolute path.")
+                        .ConfigureAwait(false);
+                    return;
+                }
+                if (!string.IsNullOrWhiteSpace(rawWorkdirInput) && string.IsNullOrWhiteSpace(workdir))
+                {
+                    await WriteJsonAsync(
+                        context.Response,
+                        400,
+                        "error",
+                        $"game '{id}' workdir is unresolved. Please provide an absolute path.")
+                        .ConfigureAwait(false);
+                    return;
+                }
+                var keywords = ParseKeywordList(rowObj);
+
+                JSONObject target;
+                if (!existingById.TryGetValue(id, out target))
+                {
+                    target = new JSONObject();
+                }
+
+                target["id"] = id;
+                target["name"] = name;
+                target["exec"] = exec;
+                target["workdir"] = workdir;
+
+                var synonyms = new JSONArray();
+                foreach (var keyword in keywords)
+                {
+                    synonyms.Add(keyword);
+                }
+                target["synonyms"] = synonyms;
+
+                if (target["args"] == null || !target["args"].IsArray)
+                {
+                    target["args"] = new JSONArray();
+                }
+                if (target["env"] == null || !target["env"].IsObject)
+                {
+                    target["env"] = new JSONObject();
+                }
+
+                nextGames.Add(target);
+            }
+
+            existingRoot["games"] = nextGames;
+
+            try
+            {
+                var parent = Path.GetDirectoryName(manifestPath);
+                if (!string.IsNullOrWhiteSpace(parent))
+                {
+                    Directory.CreateDirectory(parent);
+                }
+                File.WriteAllText(manifestPath, existingRoot.ToString(2), Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                await WriteJsonAsync(context.Response, 500, "error", $"failed to save manifest: {ex.Message}").ConfigureAwait(false);
+                return;
+            }
+
+            await WriteRawJsonAsync(
+                context.Response,
+                200,
+                "{\"status\":\"ok\",\"message\":\"saved. restart intent_service and game_launcher to apply immediately.\"}")
+                .ConfigureAwait(false);
+        }
+
+        private async Task HandleFilePickAsync(HttpListenerContext context)
+        {
+            var method = (context.Request.HttpMethod ?? string.Empty).Trim().ToUpperInvariant();
+            if (method != "POST")
+            {
+                context.Response.StatusCode = 405;
+                context.Response.Headers["Allow"] = "POST,OPTIONS";
+                await WriteJsonAsync(context.Response, 405, "error", "method not allowed").ConfigureAwait(false);
+                return;
+            }
+
+            var request = ParseJsonBody<FilePickRequest>(context.Request);
+            var title = string.IsNullOrWhiteSpace(request.title) ? "Select File" : request.title.Trim();
+            var filter = string.IsNullOrWhiteSpace(request.filter)
+                ? "Executable Files (*.exe)|*.exe|All Files (*.*)|*.*"
+                : request.filter.Trim();
+            var projectRoot = ResolveProjectRootPath();
+            var initialDir = NormalizePathOrCommandForConfig(request.initial_dir, projectRoot, allowCommandName: false);
+            var initialFile = NormalizePathOrCommandForConfig(request.initial_filename, projectRoot, allowCommandName: false);
+            var pick = await Task.Run(() => ShowHostOpenFileDialog(title, filter, initialDir, initialFile)).ConfigureAwait(false);
+            if (!pick.Success)
+            {
+                await WriteJsonAsync(context.Response, 500, "error", pick.Error).ConfigureAwait(false);
+                return;
+            }
+
+            var payload = new JSONObject();
+            payload["status"] = "ok";
+            payload["cancelled"] = pick.Cancelled;
+            payload["path"] = pick.Path;
+            payload["directory"] = string.IsNullOrWhiteSpace(pick.Path)
+                ? string.Empty
+                : (Path.GetDirectoryName(pick.Path) ?? string.Empty);
+            await WriteRawJsonAsync(context.Response, 200, payload.ToString()).ConfigureAwait(false);
+        }
+
+        private static (bool Success, bool Cancelled, string Path, string Error) ShowHostOpenFileDialog(
+            string title,
+            string filter,
+            string initialDir,
+            string initialFile)
+        {
+            var done = new ManualResetEvent(false);
+            var success = false;
+            var cancelled = true;
+            var selectedPath = string.Empty;
+            var error = string.Empty;
+
+            void Work()
+            {
+                try
+                {
+                    var formsAssembly = Assembly.Load("System.Windows.Forms");
+                    var openFileDialogType = formsAssembly.GetType("System.Windows.Forms.OpenFileDialog", throwOnError: false);
+                    if (openFileDialogType == null)
+                    {
+                        error = "native file dialog not available on this runtime";
+                        return;
+                    }
+
+                    var dialog = Activator.CreateInstance(openFileDialogType);
+                    if (dialog == null)
+                    {
+                        error = "failed to create file dialog instance";
+                        return;
+                    }
+
+                    SetReflectedProperty(openFileDialogType, dialog, "Title", title);
+                    SetReflectedProperty(openFileDialogType, dialog, "Filter", filter);
+                    SetReflectedProperty(openFileDialogType, dialog, "CheckFileExists", true);
+                    SetReflectedProperty(openFileDialogType, dialog, "Multiselect", false);
+                    SetReflectedProperty(openFileDialogType, dialog, "RestoreDirectory", true);
+                    if (!string.IsNullOrWhiteSpace(initialDir) && Directory.Exists(initialDir))
+                    {
+                        SetReflectedProperty(openFileDialogType, dialog, "InitialDirectory", initialDir);
+                    }
+                    if (!string.IsNullOrWhiteSpace(initialFile))
+                    {
+                        SetReflectedProperty(openFileDialogType, dialog, "FileName", initialFile);
+                    }
+
+                    var showDialogMethod = openFileDialogType.GetMethod("ShowDialog", Type.EmptyTypes);
+                    if (showDialogMethod == null)
+                    {
+                        error = "file dialog ShowDialog method not found";
+                        return;
+                    }
+
+                    var result = showDialogMethod.Invoke(dialog, null);
+                    var code = Convert.ToInt32(result, CultureInfo.InvariantCulture);
+                    // System.Windows.Forms.DialogResult.OK == 1
+                    if (code != 1)
+                    {
+                        success = true;
+                        cancelled = true;
+                        return;
+                    }
+
+                    var fileNameObj = openFileDialogType.GetProperty("FileName")?.GetValue(dialog, null);
+                    var filePath = (fileNameObj as string ?? string.Empty).Trim();
+                    if (string.IsNullOrWhiteSpace(filePath))
+                    {
+                        success = true;
+                        cancelled = true;
+                        return;
+                    }
+
+                    selectedPath = Path.GetFullPath(filePath);
+                    success = true;
+                    cancelled = false;
+                }
+                catch (Exception ex)
+                {
+                    error = ex.Message;
+                }
+                finally
+                {
+                    done.Set();
+                }
+            }
+
+            try
+            {
+                var thread = new Thread(Work);
+                thread.SetApartmentState(ApartmentState.STA);
+                thread.IsBackground = true;
+                thread.Start();
+                done.WaitOne();
+            }
+            catch (Exception ex)
+            {
+                return (false, false, string.Empty, ex.Message);
+            }
+            finally
+            {
+                done.Dispose();
+            }
+
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                return (false, false, string.Empty, error);
+            }
+            return (success, cancelled, selectedPath, string.Empty);
+        }
+
+        private static void SetReflectedProperty(Type targetType, object instance, string name, object value)
+        {
+            if (targetType == null || instance == null || string.IsNullOrWhiteSpace(name))
+            {
+                return;
+            }
+
+            var prop = targetType.GetProperty(name);
+            if (prop == null || !prop.CanWrite)
+            {
+                return;
+            }
+
+            try
+            {
+                prop.SetValue(instance, value, null);
+            }
+            catch
+            {
+                // Ignore unsupported property assignments.
+            }
+        }
+
+        private async Task WriteGameManifestStatusAsync(HttpListenerResponse response)
+        {
+            var manifestPath = ResolveGameManifestPath();
+            var load = LoadGameManifestRoot(manifestPath);
+            if (!load.Success)
+            {
+                await WriteJsonAsync(response, 500, "error", load.Error).ConfigureAwait(false);
+                return;
+            }
+            var manifestBaseDir = Path.GetDirectoryName(manifestPath);
+            if (string.IsNullOrWhiteSpace(manifestBaseDir))
+            {
+                manifestBaseDir = ResolveProjectRootPath();
+            }
+            var launcherEnv = LoadLauncherEnvOverrides();
+
+            var root = load.Root;
+            var outGames = new JSONArray();
+            var unresolvedCount = 0;
+            var gamesNode = root["games"];
+            if (gamesNode != null && gamesNode.IsArray)
+            {
+                var gamesArray = gamesNode.AsArray;
+                for (int i = 0; i < gamesArray.Count; i++)
+                {
+                    var node = gamesArray[i];
+                    if (node == null || !node.IsObject)
+                    {
+                        continue;
+                    }
+
+                    var obj = node.AsObject;
+                    var id = (obj["id"]?.Value ?? string.Empty).Trim();
+                    if (string.IsNullOrWhiteSpace(id))
+                    {
+                        continue;
+                    }
+
+                    var item = new JSONObject();
+                    item["id"] = id;
+                    item["name"] = (obj["name"]?.Value ?? string.Empty).Trim();
+                    var rawExec = (obj["exec"]?.Value ?? string.Empty).Trim();
+                    var rawWorkdir = (obj["workdir"]?.Value ?? string.Empty).Trim();
+                    var resolvedExec = ResolvePathFromConfigOrPlaceholder(
+                        rawExec,
+                        manifestBaseDir,
+                        launcherEnv,
+                        allowCommandName: true);
+                    var resolvedWorkdir = ResolvePathFromConfigOrPlaceholder(
+                        rawWorkdir,
+                        manifestBaseDir,
+                        launcherEnv,
+                        allowCommandName: false);
+                    if (!string.IsNullOrWhiteSpace(rawExec) && string.IsNullOrWhiteSpace(resolvedExec))
+                    {
+                        unresolvedCount++;
+                    }
+                    if (!string.IsNullOrWhiteSpace(rawWorkdir) && string.IsNullOrWhiteSpace(resolvedWorkdir))
+                    {
+                        unresolvedCount++;
+                    }
+                    item["exec"] = resolvedExec;
+                    item["workdir"] = resolvedWorkdir;
+
+                    var keywords = new JSONArray();
+                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var synonymsNode = obj["synonyms"];
+                    if (synonymsNode != null && synonymsNode.IsArray)
+                    {
+                        var synonyms = synonymsNode.AsArray;
+                        for (int j = 0; j < synonyms.Count; j++)
+                        {
+                            var text = (synonyms[j]?.Value ?? string.Empty).Trim();
+                            if (!string.IsNullOrWhiteSpace(text) && seen.Add(text))
+                            {
+                                keywords.Add(text);
+                            }
+                        }
+                    }
+                    item["keywords"] = keywords;
+                    outGames.Add(item);
+                }
+            }
+
+            var payload = new JSONObject();
+            payload["status"] = "ok";
+            payload["path"] = manifestPath;
+            payload["unresolved_count"] = unresolvedCount;
+            payload["games"] = outGames;
+            await WriteRawJsonAsync(response, 200, payload.ToString()).ConfigureAwait(false);
+        }
+
+        private static string ReadRequestBody(HttpListenerRequest request)
+        {
+            using (var reader = new StreamReader(request.InputStream, request.ContentEncoding ?? Encoding.UTF8))
+            {
+                return reader.ReadToEnd();
+            }
+        }
+
+        private static string NormalizeGameId(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return string.Empty;
+            }
+
+            var text = raw.Trim();
+            var sb = new StringBuilder(text.Length);
+            var wroteUnderscore = false;
+            for (int i = 0; i < text.Length; i++)
+            {
+                var ch = char.ToLowerInvariant(text[i]);
+                if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'))
+                {
+                    sb.Append(ch);
+                    wroteUnderscore = false;
+                    continue;
+                }
+
+                if (ch == '_' || ch == '-' || char.IsWhiteSpace(ch))
+                {
+                    if (!wroteUnderscore && sb.Length > 0)
+                    {
+                        sb.Append('_');
+                        wroteUnderscore = true;
+                    }
+                }
+            }
+
+            var normalized = sb.ToString().Trim('_');
+            return normalized;
+        }
+
+        private static List<string> ParseKeywordList(JSONObject rowObj)
+        {
+            var result = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            var keywordsNode = rowObj["keywords"];
+            if (keywordsNode != null && keywordsNode.IsArray)
+            {
+                var arr = keywordsNode.AsArray;
+                for (int i = 0; i < arr.Count; i++)
+                {
+                    var value = (arr[i]?.Value ?? string.Empty).Trim();
+                    if (!string.IsNullOrWhiteSpace(value) && seen.Add(value))
+                    {
+                        result.Add(value);
+                    }
+                }
+            }
+
+            var keywordsText = (rowObj["keywords_text"]?.Value ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(keywordsText))
+            {
+                var parts = keywordsText.Split(',');
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    var value = (parts[i] ?? string.Empty).Trim();
+                    if (!string.IsNullOrWhiteSpace(value) && seen.Add(value))
+                    {
+                        result.Add(value);
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        private async Task HandleRuntimeConfigAsync(HttpListenerContext context)
+        {
+            var method = (context.Request.HttpMethod ?? string.Empty).Trim().ToUpperInvariant();
+            if (method == "GET")
+            {
+                await WriteRuntimeConfigStatusAsync(context.Response, "runtime config").ConfigureAwait(false);
+                return;
+            }
+
+            if (method != "POST")
+            {
+                context.Response.StatusCode = 405;
+                context.Response.Headers["Allow"] = "GET,POST,OPTIONS";
+                await WriteJsonAsync(context.Response, 405, "error", "method not allowed").ConfigureAwait(false);
+                return;
+            }
+
+            var body = ReadRequestBody(context.Request);
+            JSONNode requestNode;
+            try
+            {
+                requestNode = string.IsNullOrWhiteSpace(body) ? new JSONObject() : JSONNode.Parse(body);
+            }
+            catch (Exception ex)
+            {
+                await WriteJsonAsync(context.Response, 400, "error", $"invalid json body: {ex.Message}").ConfigureAwait(false);
+                return;
+            }
+
+            if (requestNode == null || !requestNode.IsObject)
+            {
+                await WriteJsonAsync(context.Response, 400, "error", "json object body is required").ConfigureAwait(false);
+                return;
+            }
+
+            var requestObj = requestNode.AsObject;
+            var configPath = ResolveLauncherConfigPath();
+            var load = LoadLauncherConfigRoot(configPath);
+            if (!load.Success)
+            {
+                await WriteJsonAsync(context.Response, 500, "error", load.Error).ConfigureAwait(false);
+                return;
+            }
+
+            var root = load.Root;
+            var pythonObj = EnsureObjectNode(root, "python");
+            var pathsObj = EnsureObjectNode(root, "paths");
+            var openaiObj = EnsureObjectNode(root, "openai");
+            var intentObj = EnsureObjectNode(root, "intent");
+            var envObj = EnsureObjectNode(root, "env");
+            var projectRoot = ResolveProjectRootPath();
+
+            string value;
+            if (TryReadOptionalString(requestObj, "asr_python", out value))
+            {
+                SetOrRemoveString(
+                    pythonObj,
+                    "asr",
+                    NormalizePathOrCommandForConfig(value, projectRoot, allowCommandName: true));
+            }
+            if (TryReadOptionalString(requestObj, "tts_python", out value))
+            {
+                SetOrRemoveString(
+                    pythonObj,
+                    "tts",
+                    NormalizePathOrCommandForConfig(value, projectRoot, allowCommandName: true));
+            }
+            if (TryReadOptionalString(requestObj, "intent_manifest_path", out value))
+            {
+                SetOrRemoveString(
+                    pathsObj,
+                    "intent_manifest",
+                    NormalizePathOrCommandForConfig(value, projectRoot, allowCommandName: false));
+            }
+            if (TryReadOptionalString(requestObj, "game_manifest_path", out value))
+            {
+                SetOrRemoveString(
+                    pathsObj,
+                    "game_manifest",
+                    NormalizePathOrCommandForConfig(value, projectRoot, allowCommandName: false));
+            }
+            if (TryReadOptionalString(requestObj, "openai_api_key", out value))
+            {
+                SetOrRemoveString(openaiObj, "api_key", value);
+            }
+            if (TryReadOptionalString(requestObj, "openai_transcribe_model", out value))
+            {
+                SetOrRemoveString(openaiObj, "transcribe_model", value);
+            }
+            if (TryReadOptionalString(requestObj, "openai_base_url", out value))
+            {
+                SetOrRemoveString(openaiObj, "base_url", value);
+            }
+            if (TryReadOptionalString(requestObj, "openai_transcribe_prompt", out value))
+            {
+                SetOrRemoveString(openaiObj, "transcribe_prompt", value);
+            }
+            if (TryReadOptionalString(requestObj, "ollama_model", out value))
+            {
+                SetOrRemoveString(envObj, "OLLAMA_MODEL", value);
+            }
+            if (TryReadOptionalString(requestObj, "launch_triggers", out value))
+            {
+                SetOrRemoveStringList(intentObj, "launch_triggers", ParsePhraseList(value));
+            }
+            if (TryReadOptionalString(requestObj, "exit_keywords", out value))
+            {
+                SetOrRemoveStringList(intentObj, "exit_keywords", ParsePhraseList(value));
+            }
+
+            // Clean up legacy flat keys when intent rules are stored in nested intent object.
+            root.Remove("launch_triggers");
+            root.Remove("exit_keywords");
+
+            try
+            {
+                var parent = Path.GetDirectoryName(configPath);
+                if (!string.IsNullOrWhiteSpace(parent))
+                {
+                    Directory.CreateDirectory(parent);
+                }
+                File.WriteAllText(configPath, root.ToString(2), Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                await WriteJsonAsync(context.Response, 500, "error", $"failed to save launcher config: {ex.Message}").ConfigureAwait(false);
+                return;
+            }
+
+            await WriteRuntimeConfigStatusAsync(
+                    context.Response,
+                    "saved. restart scripts/start_local_services.py to apply service runtime changes.")
+                .ConfigureAwait(false);
+        }
+
+        private async Task WriteRuntimeConfigStatusAsync(HttpListenerResponse response, string message)
+        {
+            var configPath = ResolveLauncherConfigPath();
+            var defaultConfigPath = ResolveLauncherDefaultConfigPath();
+            var load = LoadMergedLauncherConfigRoot(configPath, defaultConfigPath);
+            if (!load.Success)
+            {
+                await WriteJsonAsync(response, 500, "error", load.Error).ConfigureAwait(false);
+                return;
+            }
+
+            var root = load.Root;
+            var pythonObj = EnsureObjectNode(root, "python");
+            var pathsObj = EnsureObjectNode(root, "paths");
+            var openaiObj = EnsureObjectNode(root, "openai");
+            var intentObj = EnsureObjectNode(root, "intent");
+            var envObj = EnsureObjectNode(root, "env");
+            var projectRoot = ResolveProjectRootPath();
+            var launchTriggers = ReadStringList(intentObj, "launch_triggers");
+            if (launchTriggers.Count == 0)
+            {
+                launchTriggers = ReadStringList(root, "launch_triggers");
+            }
+            if (launchTriggers.Count == 0)
+            {
+                launchTriggers = GetDefaultLaunchTriggers();
+            }
+            var exitKeywords = ReadStringList(intentObj, "exit_keywords");
+            if (exitKeywords.Count == 0)
+            {
+                exitKeywords = ReadStringList(root, "exit_keywords");
+            }
+            if (exitKeywords.Count == 0)
+            {
+                exitKeywords = GetDefaultExitKeywords();
+            }
+
+            var openaiApiKey = (openaiObj["api_key"]?.Value ?? string.Empty).Trim();
+            var payload = new JSONObject();
+            payload["status"] = "ok";
+            payload["message"] = message;
+            payload["path"] = configPath;
+            payload["default_path"] = defaultConfigPath;
+            payload["asr_python"] = NormalizePathOrCommandForConfig(
+                (pythonObj["asr"]?.Value ?? string.Empty).Trim(),
+                projectRoot,
+                allowCommandName: true);
+            payload["tts_python"] = NormalizePathOrCommandForConfig(
+                (pythonObj["tts"]?.Value ?? string.Empty).Trim(),
+                projectRoot,
+                allowCommandName: true);
+            payload["intent_manifest_path"] = NormalizePathOrCommandForConfig(
+                (pathsObj["intent_manifest"]?.Value ?? string.Empty).Trim(),
+                projectRoot,
+                allowCommandName: false);
+            payload["game_manifest_path"] = NormalizePathOrCommandForConfig(
+                (pathsObj["game_manifest"]?.Value ?? string.Empty).Trim(),
+                projectRoot,
+                allowCommandName: false);
+            payload["openai_api_key"] = openaiApiKey;
+            payload["openai_api_key_set"] = !string.IsNullOrWhiteSpace(openaiApiKey);
+            payload["openai_transcribe_model"] = (openaiObj["transcribe_model"]?.Value ?? string.Empty).Trim();
+            payload["openai_base_url"] = (openaiObj["base_url"]?.Value ?? string.Empty).Trim();
+            payload["openai_transcribe_prompt"] = (openaiObj["transcribe_prompt"]?.Value ?? string.Empty).Trim();
+            var ollamaModel = (envObj["OLLAMA_MODEL"]?.Value ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(ollamaModel))
+            {
+                ollamaModel = (Environment.GetEnvironmentVariable("OLLAMA_MODEL") ?? string.Empty).Trim();
+            }
+            if (string.IsNullOrWhiteSpace(ollamaModel))
+            {
+                ollamaModel = "gemma3:4b";
+            }
+            payload["ollama_model"] = ollamaModel;
+            payload["launch_triggers"] = string.Join(", ", launchTriggers);
+            payload["exit_keywords"] = string.Join(", ", exitKeywords);
+            payload["effective_game_manifest_path"] = ResolveGameManifestPath();
+            await WriteRawJsonAsync(response, 200, payload.ToString()).ConfigureAwait(false);
+        }
+
+        private async Task HandleRuntimePrereqAsync(HttpListenerContext context)
+        {
+            var method = (context.Request.HttpMethod ?? string.Empty).Trim().ToUpperInvariant();
+            if (method != "GET")
+            {
+                context.Response.StatusCode = 405;
+                context.Response.Headers["Allow"] = "GET,OPTIONS";
+                await WriteJsonAsync(context.Response, 405, "error", "method not allowed").ConfigureAwait(false);
+                return;
+            }
+
+            var payload = new JSONObject();
+            payload["status"] = "ok";
+
+            var configuredModel = ResolveConfiguredOllamaModel();
+            var ollamaBase = ResolveOllamaBaseUrl();
+            var ollamaExe = ResolveOllamaExecutablePath();
+
+            var piperExe = (Environment.GetEnvironmentVariable("PIPER_EXECUTABLE") ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(piperExe))
+            {
+                piperExe = ResolveBundledPiperExecutablePath();
+            }
+            piperExe = ResolveAbsolutePathCandidate(piperExe);
+
+            var piperModel = (Environment.GetEnvironmentVariable("PIPER_MODEL_PATH") ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(piperModel))
+            {
+                piperModel = ResolveBundledPiperModelPath();
+            }
+            piperModel = ResolveAbsolutePathCandidate(piperModel);
+
+            var piperConfig = ResolveAbsolutePathCandidate((Environment.GetEnvironmentVariable("PIPER_CONFIG_PATH") ?? string.Empty).Trim());
+            var piperExeReady = !string.IsNullOrWhiteSpace(piperExe) && File.Exists(piperExe);
+            var piperModelReady = !string.IsNullOrWhiteSpace(piperModel) && File.Exists(piperModel);
+            var piperReady = piperExeReady && piperModelReady;
+
+            var ollamaProbe = await ProbeOllamaAsync(ollamaBase, configuredModel).ConfigureAwait(false);
+
+            payload["piper_ready"] = piperReady;
+            payload["piper_executable_path"] = piperExe;
+            payload["piper_model_path"] = piperModel;
+            payload["piper_config_path"] = piperConfig;
+            payload["piper_executable_exists"] = piperExeReady;
+            payload["piper_model_exists"] = piperModelReady;
+            payload["ollama_base_url"] = ollamaBase;
+            payload["ollama_executable_path"] = ollamaExe;
+            payload["ollama_installed"] = !string.IsNullOrWhiteSpace(ollamaExe);
+            payload["ollama_running"] = ollamaProbe.Reachable;
+            payload["ollama_model"] = configuredModel;
+            payload["ollama_model_available"] = ollamaProbe.ModelAvailable;
+            payload["ollama_error"] = ollamaProbe.Error;
+            payload["ollama_download_url"] = "https://ollama.com/download/windows";
+            payload["ollama_install_command"] = "winget install -e --id Ollama.Ollama --accept-package-agreements --accept-source-agreements";
+            payload["ollama_pull_command"] = "ollama pull " + configuredModel;
+            payload["needs_piper_setup"] = !piperReady;
+            payload["needs_ollama_setup"] = !ollamaProbe.Reachable || !ollamaProbe.ModelAvailable;
+
+            await WriteRawJsonAsync(context.Response, 200, payload.ToString()).ConfigureAwait(false);
+        }
+
+        private async Task HandleRuntimeOllamaAsync(HttpListenerContext context)
+        {
+            var method = (context.Request.HttpMethod ?? string.Empty).Trim().ToUpperInvariant();
+            if (method != "POST")
+            {
+                context.Response.StatusCode = 405;
+                context.Response.Headers["Allow"] = "POST,OPTIONS";
+                await WriteJsonAsync(context.Response, 405, "error", "method not allowed").ConfigureAwait(false);
+                return;
+            }
+
+            var request = ParseJsonBody<RuntimeActionRequest>(context.Request);
+            var action = (request.action ?? string.Empty).Trim().ToLowerInvariant();
+            var model = NormalizeOllamaModelName(request.model);
+            if (string.IsNullOrWhiteSpace(model))
+            {
+                model = ResolveConfiguredOllamaModel();
+            }
+
+            string error;
+            switch (action)
+            {
+                case "open_download":
+                    if (!TryOpenUrl("https://ollama.com/download/windows", out error))
+                    {
+                        await WriteJsonAsync(context.Response, 500, "error", $"failed to open browser: {error}").ConfigureAwait(false);
+                        return;
+                    }
+                    await WriteJsonAsync(context.Response, 200, "ok", "opened Ollama download page").ConfigureAwait(false);
+                    return;
+
+                case "install":
+                    if (!TryStartPowerShellDetached(
+                        "winget install -e --id Ollama.Ollama --accept-package-agreements --accept-source-agreements",
+                        elevate: true,
+                        hidden: false,
+                        out error))
+                    {
+                        await WriteJsonAsync(context.Response, 500, "error", $"failed to start Ollama install: {error}").ConfigureAwait(false);
+                        return;
+                    }
+                    await WriteJsonAsync(
+                        context.Response,
+                        200,
+                        "ok",
+                        "started Ollama install in elevated PowerShell. Approve UAC prompt and wait for completion.")
+                        .ConfigureAwait(false);
+                    return;
+
+                case "pull_model":
+                    if (string.IsNullOrWhiteSpace(model))
+                    {
+                        await WriteJsonAsync(context.Response, 400, "error", "invalid model name").ConfigureAwait(false);
+                        return;
+                    }
+
+                    var escapedModel = model.Replace("'", "''");
+                    if (!TryStartPowerShellDetached(
+                        "ollama pull '" + escapedModel + "'",
+                        elevate: false,
+                        hidden: false,
+                        out error))
+                    {
+                        await WriteJsonAsync(context.Response, 500, "error", $"failed to start model pull: {error}").ConfigureAwait(false);
+                        return;
+                    }
+                    await WriteJsonAsync(
+                        context.Response,
+                        200,
+                        "ok",
+                        $"started model pull: {model}. wait until the PowerShell window finishes.")
+                        .ConfigureAwait(false);
+                    return;
+
+                default:
+                    await WriteJsonAsync(context.Response, 400, "error", "unknown action").ConfigureAwait(false);
+                    return;
+            }
+        }
+
+        private async Task<(bool Reachable, bool ModelAvailable, string Error)> ProbeOllamaAsync(string baseUrl, string requiredModel)
+        {
+            var model = NormalizeOllamaModelName(requiredModel);
+            if (string.IsNullOrWhiteSpace(model))
+            {
+                model = "gemma3:4b";
+            }
+
+            var url = (baseUrl ?? string.Empty).Trim().TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                url = "http://127.0.0.1:11434";
+            }
+            url += "/api/tags";
+
+            try
+            {
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2.5)))
+                {
+                    var response = await SharedHttpClient.GetAsync(url, cts.Token).ConfigureAwait(false);
+                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        return (false, false, $"http {(int)response.StatusCode}: {body}");
+                    }
+
+                    var parsed = JSONNode.Parse(body);
+                    var models = parsed?["models"];
+                    if (models == null || !models.IsArray)
+                    {
+                        return (true, false, "ollama /api/tags returned no models list");
+                    }
+
+                    var available = models.AsArray;
+                    for (int i = 0; i < available.Count; i++)
+                    {
+                        var node = available[i];
+                        var name = (node?["name"]?.Value ?? string.Empty).Trim();
+                        if (OllamaModelNamesMatch(model, name))
+                        {
+                            return (true, true, string.Empty);
+                        }
+                    }
+
+                    return (true, false, $"model not found: {model}");
+                }
+            }
+            catch (TaskCanceledException)
+            {
+                return (false, false, "request timeout");
+            }
+            catch (Exception ex)
+            {
+                return (false, false, ex.Message);
+            }
+        }
+
+        private string ResolveConfiguredOllamaModel()
+        {
+            var configPath = ResolveLauncherConfigPath();
+            var defaultConfigPath = ResolveLauncherDefaultConfigPath();
+            var load = LoadMergedLauncherConfigRoot(configPath, defaultConfigPath);
+            if (load.Success && load.Root != null)
+            {
+                var envNode = load.Root["env"];
+                if (envNode != null && envNode.IsObject)
+                {
+                    var model = (envNode["OLLAMA_MODEL"]?.Value ?? string.Empty).Trim();
+                    if (!string.IsNullOrWhiteSpace(model))
+                    {
+                        return model;
+                    }
+                }
+            }
+
+            var fromEnv = (Environment.GetEnvironmentVariable("OLLAMA_MODEL") ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(fromEnv))
+            {
+                return fromEnv;
+            }
+
+            return "gemma3:4b";
+        }
+
+        private static string NormalizeOllamaModelName(string raw)
+        {
+            var text = (raw ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            for (int i = 0; i < text.Length; i++)
+            {
+                var c = text[i];
+                var ok = (c >= 'a' && c <= 'z')
+                    || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9')
+                    || c == '-' || c == '_' || c == '.' || c == ':' || c == '/';
+                if (!ok)
+                {
+                    return string.Empty;
+                }
+            }
+            return text;
+        }
+
+        private static bool OllamaModelNamesMatch(string expected, string candidate)
+        {
+            var exp = (expected ?? string.Empty).Trim();
+            var got = (candidate ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(exp) || string.IsNullOrWhiteSpace(got))
+            {
+                return false;
+            }
+            if (string.Equals(exp, got, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            var expBase = exp.Split(':')[0].Trim();
+            var gotBase = got.Split(':')[0].Trim();
+            return !string.IsNullOrWhiteSpace(expBase)
+                && !string.IsNullOrWhiteSpace(gotBase)
+                && string.Equals(expBase, gotBase, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string ResolveOllamaExecutablePath()
+        {
+            var envExe = ResolveAbsolutePathCandidate(Environment.GetEnvironmentVariable("OLLAMA_EXE"));
+            if (!string.IsNullOrWhiteSpace(envExe) && File.Exists(envExe))
+            {
+                return envExe;
+            }
+
+            var fromPath = ResolveExecutableFromPath("ollama.exe");
+            if (!string.IsNullOrWhiteSpace(fromPath))
+            {
+                return fromPath;
+            }
+
+            var candidates = new[]
+            {
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Ollama", "ollama.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Ollama", "ollama.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Ollama", "ollama.exe"),
+            };
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                var candidate = ResolveAbsolutePathCandidate(candidates[i]);
+                if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static string ResolveExecutableFromPath(string executableName)
+        {
+            var exe = (executableName ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(exe))
+            {
+                return string.Empty;
+            }
+
+            var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+            var parts = pathEnv.Split(Path.PathSeparator);
+            for (int i = 0; i < parts.Length; i++)
+            {
+                var dir = (parts[i] ?? string.Empty).Trim().Trim('"');
+                if (string.IsNullOrWhiteSpace(dir))
+                {
+                    continue;
+                }
+                try
+                {
+                    var candidate = Path.Combine(dir, exe);
+                    if (File.Exists(candidate))
+                    {
+                        return Path.GetFullPath(candidate);
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static bool TryOpenUrl(string url, out string error)
+        {
+            error = string.Empty;
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = url,
+                    UseShellExecute = true,
+                };
+                Process.Start(startInfo);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        private static bool TryStartPowerShellDetached(string script, bool elevate, bool hidden, out string error)
+        {
+            error = string.Empty;
+            var source = (script ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(source))
+            {
+                error = "empty script";
+                return false;
+            }
+
+            try
+            {
+                var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(source));
+                var args = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + encoded;
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = args,
+                    UseShellExecute = elevate || !hidden,
+                    WindowStyle = hidden ? ProcessWindowStyle.Hidden : ProcessWindowStyle.Normal,
+                    CreateNoWindow = hidden && !elevate
+                };
+                if (elevate)
+                {
+                    startInfo.Verb = "runas";
+                }
+
+                Process.Start(startInfo);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        private static string ResolveBundledPiperExecutablePath()
+        {
+            var root = ResolveProjectRootPath();
+            var candidate = ResolveAbsolutePathCandidate(Path.Combine(root, "runtime", "piper", "piper.exe"));
+            if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
+            {
+                return candidate;
+            }
+            return string.Empty;
+        }
+
+        private static string ResolveBundledPiperModelPath()
+        {
+            var root = ResolveProjectRootPath();
+            var modelsDir = ResolveAbsolutePathCandidate(Path.Combine(root, "runtime", "piper", "models"));
+            if (string.IsNullOrWhiteSpace(modelsDir) || !Directory.Exists(modelsDir))
+            {
+                return string.Empty;
+            }
+
+            var preferred = new[]
+            {
+                "en_US-lessac-medium.onnx",
+                "en_US-amy-medium.onnx",
+                "en_US-ryan-high.onnx",
+            };
+            for (int i = 0; i < preferred.Length; i++)
+            {
+                var candidate = ResolveAbsolutePathCandidate(Path.Combine(modelsDir, preferred[i]));
+                if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            try
+            {
+                var first = Directory.GetFiles(modelsDir, "*.onnx", SearchOption.AllDirectories).FirstOrDefault();
+                return ResolveAbsolutePathCandidate(first);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static bool TryReadOptionalString(JSONObject obj, string key, out string value)
+        {
+            value = string.Empty;
+            if (obj == null || string.IsNullOrWhiteSpace(key) || !obj.HasKey(key))
+            {
+                return false;
+            }
+
+            value = (obj[key]?.Value ?? string.Empty).Trim();
+            return true;
+        }
+
+        private static JSONObject EnsureObjectNode(JSONObject root, string key)
+        {
+            if (root != null)
+            {
+                var current = root[key];
+                if (current != null && current.IsObject)
+                {
+                    return current.AsObject;
+                }
+            }
+
+            var created = new JSONObject();
+            if (root != null)
+            {
+                root[key] = created;
+            }
+            return created;
+        }
+
+        private static void SetOrRemoveString(JSONObject obj, string key, string value)
+        {
+            if (obj == null || string.IsNullOrWhiteSpace(key))
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                obj.Remove(key);
+                return;
+            }
+
+            obj[key] = value.Trim();
+        }
+
+        private static void SetOrRemoveStringList(JSONObject obj, string key, List<string> values)
+        {
+            if (obj == null || string.IsNullOrWhiteSpace(key))
+            {
+                return;
+            }
+
+            if (values == null || values.Count == 0)
+            {
+                obj.Remove(key);
+                return;
+            }
+
+            var arr = new JSONArray();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < values.Count; i++)
+            {
+                var text = (values[i] ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    continue;
+                }
+                if (seen.Add(text))
+                {
+                    arr.Add(text);
+                }
+            }
+
+            if (arr.Count == 0)
+            {
+                obj.Remove(key);
+                return;
+            }
+
+            obj[key] = arr;
+        }
+
+        private static List<string> ReadStringList(JSONObject obj, string key)
+        {
+            var values = new List<string>();
+            if (obj == null || string.IsNullOrWhiteSpace(key))
+            {
+                return values;
+            }
+
+            var node = obj[key];
+            if (node != null && node.IsArray)
+            {
+                var arr = node.AsArray;
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < arr.Count; i++)
+                {
+                    var text = (arr[i]?.Value ?? string.Empty).Trim();
+                    if (!string.IsNullOrWhiteSpace(text) && seen.Add(text))
+                    {
+                        values.Add(text);
+                    }
+                }
+            }
+            return values;
+        }
+
+        private static List<string> ParsePhraseList(string text)
+        {
+            var values = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return values;
+            }
+
+            var merged = text
+                .Replace("\r\n", "\n")
+                .Replace('，', ',')
+                .Replace('；', ';')
+                .Replace(';', ',')
+                .Replace('\n', ',');
+            var parts = merged.Split(',');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                var value = (parts[i] ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(value) && seen.Add(value))
+                {
+                    values.Add(value);
+                }
+            }
+            return values;
+        }
+
+        private static List<string> GetDefaultLaunchTriggers()
+        {
+            return new List<string>
+            {
+                "open",
+                "start",
+                "launch",
+                "play",
+                "begin",
+                "load"
+            };
+        }
+
+        private static List<string> GetDefaultExitKeywords()
+        {
+            return new List<string>
+            {
+                "back home",
+                "go home",
+                "return home",
+                "back",
+                "quit",
+                "exit",
+                "stop",
+                "cancel",
+                "close",
+                "close game"
+            };
+        }
+
+        private static string ResolveProjectRootPath()
+        {
+            try
+            {
+                var appRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+                var appScripts = Path.Combine(appRoot, "scripts");
+                if (Directory.Exists(appScripts))
+                {
+                    return appRoot;
+                }
+
+                // Installed layout can be <install>\app\<Unity build> with scripts at <install>\scripts.
+                var installRoot = Path.GetFullPath(Path.Combine(appRoot, ".."));
+                var installScripts = Path.Combine(installRoot, "scripts");
+                if (Directory.Exists(installScripts))
+                {
+                    return installRoot;
+                }
+
+                return appRoot;
+            }
+            catch
+            {
+                return Directory.GetCurrentDirectory();
+            }
+        }
+
+        private static string ResolveUserStateDirectoryPath()
+        {
+            var fromEnv = ResolveAbsolutePathCandidate(Environment.GetEnvironmentVariable("VOICE_AGENT_STATE_DIR"));
+            if (!string.IsNullOrWhiteSpace(fromEnv))
+            {
+                return fromEnv;
+            }
+
+            try
+            {
+                var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (!string.IsNullOrWhiteSpace(localAppData))
+                {
+                    return Path.GetFullPath(Path.Combine(localAppData, "VoiceAgent"));
+                }
+            }
+            catch
+            {
+            }
+
+            return Path.GetFullPath(Path.Combine(ResolveProjectRootPath(), "state"));
+        }
+
+        private static string ResolveUserLauncherConfigPathDefault()
+        {
+            return Path.GetFullPath(Path.Combine(ResolveUserStateDirectoryPath(), "local_services.user.json"));
+        }
+
+        private static string ResolveUserManifestPathDefault()
+        {
+            return Path.GetFullPath(Path.Combine(ResolveUserStateDirectoryPath(), "manifest.json"));
+        }
+
+        private static string EnsureUserManifestPathDefault()
+        {
+            var userManifestPath = ResolveUserManifestPathDefault();
+            try
+            {
+                var parent = Path.GetDirectoryName(userManifestPath);
+                if (!string.IsNullOrWhiteSpace(parent))
+                {
+                    Directory.CreateDirectory(parent);
+                }
+
+                if (!File.Exists(userManifestPath))
+                {
+                    var installedManifest = Path.Combine(ResolveProjectRootPath(), "scripts", "intent_service", "manifest.json");
+                    if (File.Exists(installedManifest))
+                    {
+                        File.Copy(installedManifest, userManifestPath, false);
+                    }
+                    else
+                    {
+                        File.WriteAllText(userManifestPath, "{\"games\":[]}", Encoding.UTF8);
+                    }
+                }
+            }
+            catch
+            {
+                // Keep returning the target path even if seeding fails.
+            }
+
+            return userManifestPath;
+        }
+
+        private static bool IsPathWithinRoot(string candidatePath, string rootPath)
+        {
+            if (string.IsNullOrWhiteSpace(candidatePath) || string.IsNullOrWhiteSpace(rootPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                var fullPath = Path.GetFullPath(candidatePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var fullRoot = Path.GetFullPath(rootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (string.Equals(fullPath, fullRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                return fullPath.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                    || fullPath.StartsWith(fullRoot + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool ShouldPreferUserWritableManifestPath(string manifestPath)
+        {
+            if (Application.isEditor || string.IsNullOrWhiteSpace(manifestPath))
+            {
+                return false;
+            }
+
+            var installScriptsDir = Path.Combine(ResolveProjectRootPath(), "scripts");
+            if (!Directory.Exists(installScriptsDir))
+            {
+                return false;
+            }
+
+            return IsPathWithinRoot(manifestPath, installScriptsDir);
+        }
+
+        private static string ResolveExistingFilePathCandidate(string raw, string baseDir = null)
+        {
+            var candidate = ResolveAbsolutePathCandidate(raw, baseDir);
+            if (string.IsNullOrWhiteSpace(candidate))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+
+                // Legacy buggy value: <install>\app\scripts\... should be <install>\scripts\...
+                var normalized = candidate.Replace('/', '\\');
+                var marker = "\\app\\scripts\\";
+                var idx = normalized.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+                if (idx >= 0)
+                {
+                    var repaired = normalized.Remove(idx, "\\app".Length);
+                    repaired = Path.GetFullPath(repaired);
+                    if (File.Exists(repaired))
+                    {
+                        return repaired;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return string.Empty;
+        }
+
+        private static bool LooksLikePathValue(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return false;
+            }
+
+            var text = raw.Trim();
+            if (text.StartsWith(".", StringComparison.Ordinal))
+            {
+                return true;
+            }
+            return text.IndexOf('\\') >= 0
+                || text.IndexOf('/') >= 0
+                || text.IndexOf(':') >= 0;
+        }
+
+        private static string NormalizePathOrCommandForConfig(string raw, string baseDir, bool allowCommandName)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return string.Empty;
+            }
+
+            var trimmed = raw.Trim();
+            if (allowCommandName && !LooksLikePathValue(trimmed))
+            {
+                return trimmed;
+            }
+
+            var expanded = Environment.ExpandEnvironmentVariables(trimmed);
+            if (expanded.IndexOf('%') >= 0 && trimmed.IndexOf('%') >= 0)
+            {
+                // Keep unresolved %VAR% literals as-is.
+                return trimmed;
+            }
+
+            try
+            {
+                if (Path.IsPathRooted(expanded))
+                {
+                    return Path.GetFullPath(expanded);
+                }
+                var root = string.IsNullOrWhiteSpace(baseDir) ? ResolveProjectRootPath() : baseDir;
+                return Path.GetFullPath(Path.Combine(root, expanded));
+            }
+            catch
+            {
+                return trimmed;
+            }
+        }
+
+        private static bool IsSinglePercentPlaceholder(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return false;
+            }
+
+            var text = raw.Trim();
+            if (!(text.StartsWith("%", StringComparison.Ordinal) && text.EndsWith("%", StringComparison.Ordinal)))
+            {
+                return false;
+            }
+            if (text.Length < 3)
+            {
+                return false;
+            }
+
+            return text.IndexOf('%', 1) == text.Length - 1;
+        }
+
+        private Dictionary<string, string> LoadLauncherEnvOverrides()
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var configPath = ResolveLauncherConfigPath();
+            var defaultConfigPath = ResolveLauncherDefaultConfigPath();
+            var load = LoadMergedLauncherConfigRoot(configPath, defaultConfigPath);
+            if (!load.Success || load.Root == null)
+            {
+                return result;
+            }
+
+            var envNode = load.Root["env"];
+            if (envNode == null || !envNode.IsObject)
+            {
+                return result;
+            }
+
+            var envObj = envNode.AsObject;
+            foreach (var pair in envObj.Linq)
+            {
+                var key = (pair.Key ?? string.Empty).Trim();
+                var value = (pair.Value?.Value ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value))
+                {
+                    result[key] = value;
+                }
+            }
+            return result;
+        }
+
+        private string ResolvePathFromConfigOrPlaceholder(
+            string raw,
+            string baseDir,
+            Dictionary<string, string> launcherEnv,
+            bool allowCommandName)
+        {
+            var text = (raw ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            if (!IsSinglePercentPlaceholder(text))
+            {
+                return NormalizePathOrCommandForConfig(text, baseDir, allowCommandName);
+            }
+
+            var key = text.Substring(1, text.Length - 2).Trim();
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                return string.Empty;
+            }
+
+            string resolved;
+            if (launcherEnv != null && launcherEnv.TryGetValue(key, out resolved) && !string.IsNullOrWhiteSpace(resolved))
+            {
+                return NormalizePathOrCommandForConfig(resolved, baseDir, allowCommandName);
+            }
+
+            resolved = Environment.GetEnvironmentVariable(key);
+            if (!string.IsNullOrWhiteSpace(resolved))
+            {
+                return NormalizePathOrCommandForConfig(resolved, baseDir, allowCommandName);
+            }
+
+            var expanded = Environment.ExpandEnvironmentVariables(text);
+            if (!string.Equals(expanded, text, StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(expanded))
+            {
+                return NormalizePathOrCommandForConfig(expanded, baseDir, allowCommandName);
+            }
+
+            // Unresolved placeholder -> require explicit absolute path in UI.
+            return string.Empty;
+        }
+
+        private string ResolveLauncherConfigPath()
+        {
+            var fromEnv = ResolveAbsolutePathCandidate(Environment.GetEnvironmentVariable("VOICE_AGENT_LAUNCHER_CONFIG"));
+            if (!string.IsNullOrWhiteSpace(fromEnv))
+            {
+                return fromEnv;
+            }
+
+            if (!Application.isEditor)
+            {
+                return ResolveUserLauncherConfigPathDefault();
+            }
+
+            var cwdDefault = ResolveAbsolutePathCandidate(Path.Combine("scripts", "local_services.user.json"));
+            if (!string.IsNullOrWhiteSpace(cwdDefault))
+            {
+                return cwdDefault;
+            }
+
+            return Path.GetFullPath(Path.Combine(Application.dataPath, "..", "scripts", "local_services.user.json"));
+        }
+
+        private string ResolveLauncherDefaultConfigPath()
+        {
+            var fromEnv = ResolveAbsolutePathCandidate(Environment.GetEnvironmentVariable("VOICE_AGENT_DEFAULT_CONFIG"));
+            if (!string.IsNullOrWhiteSpace(fromEnv))
+            {
+                return fromEnv;
+            }
+
+            var cwdDefault = ResolveAbsolutePathCandidate(Path.Combine("scripts", "local_services.default.json"));
+            if (!string.IsNullOrWhiteSpace(cwdDefault))
+            {
+                return cwdDefault;
+            }
+
+            return Path.GetFullPath(Path.Combine(Application.dataPath, "..", "scripts", "local_services.default.json"));
+        }
+
+        private static string ResolveAbsolutePathCandidate(string raw, string baseDir = null)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                var expanded = Environment.ExpandEnvironmentVariables(raw.Trim());
+                if (Path.IsPathRooted(expanded))
+                {
+                    return Path.GetFullPath(expanded);
+                }
+                var root = string.IsNullOrWhiteSpace(baseDir) ? ResolveProjectRootPath() : baseDir;
+                return Path.GetFullPath(Path.Combine(root, expanded));
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static (bool Success, JSONObject Root, string Error) LoadLauncherConfigRoot(string path)
+        {
+            try
+            {
+                JSONObject rootObj = null;
+                if (File.Exists(path))
+                {
+                    var raw = File.ReadAllText(path, Encoding.UTF8);
+                    if (!string.IsNullOrWhiteSpace(raw))
+                    {
+                        var parsed = JSONNode.Parse(raw);
+                        if (parsed != null && parsed.IsObject)
+                        {
+                            rootObj = parsed.AsObject;
+                        }
+                    }
+                }
+
+                if (rootObj == null)
+                {
+                    rootObj = new JSONObject();
+                }
+
+                if (rootObj["python"] == null || !rootObj["python"].IsObject)
+                {
+                    rootObj["python"] = new JSONObject();
+                }
+                if (rootObj["paths"] == null || !rootObj["paths"].IsObject)
+                {
+                    rootObj["paths"] = new JSONObject();
+                }
+                if (rootObj["openai"] == null || !rootObj["openai"].IsObject)
+                {
+                    rootObj["openai"] = new JSONObject();
+                }
+                if (rootObj["intent"] == null || !rootObj["intent"].IsObject)
+                {
+                    rootObj["intent"] = new JSONObject();
+                }
+                if (rootObj["env"] == null || !rootObj["env"].IsObject)
+                {
+                    rootObj["env"] = new JSONObject();
+                }
+
+                return (true, rootObj, string.Empty);
+            }
+            catch (Exception ex)
+            {
+                return (false, null, $"failed to load launcher config: {ex.Message}");
+            }
+        }
+
+        private static JSONNode CloneJsonNode(JSONNode node)
+        {
+            if (node == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                return JSONNode.Parse(node.ToString());
+            }
+            catch
+            {
+                return node;
+            }
+        }
+
+        private static void MergeJsonObjectInto(JSONObject target, JSONObject source)
+        {
+            if (target == null || source == null)
+            {
+                return;
+            }
+
+            foreach (var pair in source.Linq)
+            {
+                var key = pair.Key;
+                var value = pair.Value;
+                if (string.IsNullOrWhiteSpace(key) || value == null)
+                {
+                    continue;
+                }
+
+                if (value.IsObject)
+                {
+                    var current = target[key];
+                    JSONObject targetChild;
+                    if (current != null && current.IsObject)
+                    {
+                        targetChild = current.AsObject;
+                    }
+                    else
+                    {
+                        targetChild = new JSONObject();
+                        target[key] = targetChild;
+                    }
+
+                    MergeJsonObjectInto(targetChild, value.AsObject);
+                    continue;
+                }
+
+                target[key] = CloneJsonNode(value);
+            }
+        }
+
+        private static (bool Success, JSONObject Root, string Error) LoadMergedLauncherConfigRoot(string userPath, string defaultPath)
+        {
+            var baseLoad = LoadLauncherConfigRoot(defaultPath);
+            if (!baseLoad.Success)
+            {
+                return baseLoad;
+            }
+
+            var userLoad = LoadLauncherConfigRoot(userPath);
+            if (!userLoad.Success)
+            {
+                return userLoad;
+            }
+
+            var merged = new JSONObject();
+            MergeJsonObjectInto(merged, baseLoad.Root);
+            MergeJsonObjectInto(merged, userLoad.Root);
+
+            if (merged["python"] == null || !merged["python"].IsObject)
+            {
+                merged["python"] = new JSONObject();
+            }
+            if (merged["paths"] == null || !merged["paths"].IsObject)
+            {
+                merged["paths"] = new JSONObject();
+            }
+            if (merged["openai"] == null || !merged["openai"].IsObject)
+            {
+                merged["openai"] = new JSONObject();
+            }
+            if (merged["intent"] == null || !merged["intent"].IsObject)
+            {
+                merged["intent"] = new JSONObject();
+            }
+            if (merged["env"] == null || !merged["env"].IsObject)
+            {
+                merged["env"] = new JSONObject();
+            }
+
+            return (true, merged, string.Empty);
+        }
+
+        private string ResolveGameManifestPath()
+        {
+            var userManifestPath = string.Empty;
+            var configPath = ResolveLauncherConfigPath();
+            var defaultConfigPath = ResolveLauncherDefaultConfigPath();
+            var config = LoadMergedLauncherConfigRoot(configPath, defaultConfigPath);
+            if (config.Success && config.Root != null)
+            {
+                var pathsNode = config.Root["paths"];
+                if (pathsNode != null && pathsNode.IsObject)
+                {
+                    var paths = pathsNode.AsObject;
+                    var gameFromConfig = ResolveExistingFilePathCandidate((paths["game_manifest"]?.Value ?? string.Empty).Trim());
+                    if (!string.IsNullOrWhiteSpace(gameFromConfig))
+                    {
+                        if (ShouldPreferUserWritableManifestPath(gameFromConfig))
+                        {
+                            if (string.IsNullOrWhiteSpace(userManifestPath))
+                            {
+                                userManifestPath = EnsureUserManifestPathDefault();
+                            }
+                            return userManifestPath;
+                        }
+                        return gameFromConfig;
+                    }
+                    var intentFromConfig = ResolveExistingFilePathCandidate((paths["intent_manifest"]?.Value ?? string.Empty).Trim());
+                    if (!string.IsNullOrWhiteSpace(intentFromConfig))
+                    {
+                        if (ShouldPreferUserWritableManifestPath(intentFromConfig))
+                        {
+                            if (string.IsNullOrWhiteSpace(userManifestPath))
+                            {
+                                userManifestPath = EnsureUserManifestPathDefault();
+                            }
+                            return userManifestPath;
+                        }
+                        return intentFromConfig;
+                    }
+                }
+            }
+
+            var primary = ResolveExistingFilePathCandidate(Environment.GetEnvironmentVariable("GAME_LAUNCHER_MANIFEST_PATH"));
+            if (!string.IsNullOrWhiteSpace(primary))
+            {
+                if (ShouldPreferUserWritableManifestPath(primary))
+                {
+                    if (string.IsNullOrWhiteSpace(userManifestPath))
+                    {
+                        userManifestPath = EnsureUserManifestPathDefault();
+                    }
+                    return userManifestPath;
+                }
+                return primary;
+            }
+
+            var secondary = ResolveExistingFilePathCandidate(Environment.GetEnvironmentVariable("INTENT_MANIFEST_PATH"));
+            if (!string.IsNullOrWhiteSpace(secondary))
+            {
+                if (ShouldPreferUserWritableManifestPath(secondary))
+                {
+                    if (string.IsNullOrWhiteSpace(userManifestPath))
+                    {
+                        userManifestPath = EnsureUserManifestPathDefault();
+                    }
+                    return userManifestPath;
+                }
+                return secondary;
+            }
+
+            if (!Application.isEditor)
+            {
+                if (string.IsNullOrWhiteSpace(userManifestPath))
+                {
+                    userManifestPath = EnsureUserManifestPathDefault();
+                }
+                return userManifestPath;
+            }
+
+            var cwdDefault = ResolveExistingFilePathCandidate(Path.Combine("scripts", "intent_service", "manifest.json"));
+            if (!string.IsNullOrWhiteSpace(cwdDefault))
+            {
+                return cwdDefault;
+            }
+
+            return Path.GetFullPath(Path.Combine(ResolveProjectRootPath(), "scripts", "intent_service", "manifest.json"));
+        }
+
+        private static (bool Success, JSONObject Root, string Error) LoadGameManifestRoot(string path)
+        {
+            try
+            {
+                JSONObject rootObj = null;
+                if (File.Exists(path))
+                {
+                    var raw = File.ReadAllText(path, Encoding.UTF8);
+                    if (!string.IsNullOrWhiteSpace(raw))
+                    {
+                        var parsed = JSONNode.Parse(raw);
+                        if (parsed != null && parsed.IsObject)
+                        {
+                            rootObj = parsed.AsObject;
+                        }
+                    }
+                }
+
+                if (rootObj == null)
+                {
+                    rootObj = new JSONObject();
+                }
+
+                if (rootObj["games"] == null || !rootObj["games"].IsArray)
+                {
+                    rootObj["games"] = new JSONArray();
+                }
+
+                return (true, rootObj, string.Empty);
+            }
+            catch (Exception ex)
+            {
+                return (false, null, $"failed to load manifest: {ex.Message}");
+            }
+        }
+
+        private async Task HandleAsrAsync(HttpListenerContext context)
+        {
+            var method = (context.Request.HttpMethod ?? string.Empty).Trim().ToUpperInvariant();
+            if (method == "GET")
+            {
+                await WriteAsrStatusAsync(context.Response, "asr status").ConfigureAwait(false);
+                return;
+            }
+
+            if (method != "POST")
+            {
+                context.Response.StatusCode = 405;
+                context.Response.Headers["Allow"] = "GET,POST,OPTIONS";
+                await WriteJsonAsync(context.Response, 405, "error", "method not allowed").ConfigureAwait(false);
+                return;
+            }
+
+            var request = ParseJsonBody<AsrRequest>(context.Request);
+            var action = (request.action ?? string.Empty).Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(action) || action == "status")
+            {
+                await WriteAsrStatusAsync(context.Response, "asr status").ConfigureAwait(false);
+                return;
+            }
+
+            switch (action)
+            {
+                case "set_mode":
+                case "mode":
+                {
+                    var modeRaw = string.IsNullOrWhiteSpace(request.mode) ? request.value : request.mode;
+                    var normalizedMode = NormalizeAsrMode(modeRaw);
+                    if (string.IsNullOrWhiteSpace(normalizedMode))
+                    {
+                        await WriteJsonAsync(context.Response, 400, "error", "mode must be offline or api").ConfigureAwait(false);
+                        return;
+                    }
+
+                    var setResult = await SetAsrModeAsync(normalizedMode).ConfigureAwait(false);
+                    if (!setResult.Success)
+                    {
+                        await WriteJsonAsync(context.Response, setResult.StatusCode, "error", setResult.Error).ConfigureAwait(false);
+                        return;
+                    }
+
+                    await WriteAsrStatusAsync(context.Response, $"asr mode set to {normalizedMode}").ConfigureAwait(false);
+                    return;
+                }
+                case "start_listening":
+                case "resume_listening":
+                {
+                    var ok = await SetAgentListeningAsync(true).ConfigureAwait(false);
+                    if (!ok)
+                    {
+                        await WriteJsonAsync(context.Response, 503, "error", "VoiceGameLauncher not assigned").ConfigureAwait(false);
+                        return;
+                    }
+                    await WriteAsrStatusAsync(context.Response, "agent listening started").ConfigureAwait(false);
+                    return;
+                }
+                case "pause_listening":
+                case "stop_listening":
+                {
+                    var ok = await SetAgentListeningAsync(false).ConfigureAwait(false);
+                    if (!ok)
+                    {
+                        await WriteJsonAsync(context.Response, 503, "error", "VoiceGameLauncher not assigned").ConfigureAwait(false);
+                        return;
+                    }
+                    await WriteAsrStatusAsync(context.Response, "agent listening paused").ConfigureAwait(false);
+                    return;
+                }
+                case "set_listening":
+                case "listening":
+                {
+                    var target = request.listening;
+                    if (!TryParseBool(request.value, out target))
+                    {
+                        target = request.listening;
+                    }
+
+                    var ok = await SetAgentListeningAsync(target).ConfigureAwait(false);
+                    if (!ok)
+                    {
+                        await WriteJsonAsync(context.Response, 503, "error", "VoiceGameLauncher not assigned").ConfigureAwait(false);
+                        return;
+                    }
+
+                    await WriteAsrStatusAsync(
+                        context.Response,
+                        target ? "agent listening started" : "agent listening paused").ConfigureAwait(false);
+                    return;
+                }
+                default:
+                    await WriteJsonAsync(context.Response, 400, "error", "unknown asr action").ConfigureAwait(false);
+                    return;
+            }
+        }
+
+        private async Task WriteAsrStatusAsync(HttpListenerResponse response, string message)
+        {
+            var config = await LoadAsrConfigAsync().ConfigureAwait(false);
+            if (!config.Success)
+            {
+                await WriteJsonAsync(response, config.StatusCode, "error", config.Error).ConfigureAwait(false);
+                return;
+            }
+
+            var listening = await GetAgentListeningAsync().ConfigureAwait(false);
+            var modes = config.Config.available_modes;
+            if (modes == null || modes.Length == 0)
+            {
+                modes = new[] { "offline", "api" };
+            }
+
+            var payload = new StringBuilder(256);
+            payload.Append("{\"status\":\"ok\",\"message\":\"")
+                .Append(EscapeJson(message))
+                .Append("\",\"mode\":\"")
+                .Append(EscapeJson(config.Config.mode))
+                .Append("\",\"listening\":")
+                .Append(listening ? "true" : "false")
+                .Append(",\"openai_configured\":")
+                .Append(config.Config.openai_configured ? "true" : "false")
+                .Append(",\"openai_model\":\"")
+                .Append(EscapeJson(config.Config.openai_model ?? string.Empty))
+                .Append("\",\"available_modes\":[");
+
+            for (var i = 0; i < modes.Length; i++)
+            {
+                if (i > 0)
+                {
+                    payload.Append(',');
+                }
+                payload.Append('\"').Append(EscapeJson(modes[i] ?? string.Empty)).Append('\"');
+            }
+
+            payload.Append("]}");
+            await WriteRawJsonAsync(response, 200, payload.ToString()).ConfigureAwait(false);
+        }
+
+        private string ResolveAsrServiceBaseUrl()
+        {
+            return ResolveLlmServiceBaseUrl();
+        }
+
+        private static string NormalizeAsrMode(string mode)
+        {
+            var normalized = (mode ?? string.Empty).Trim().ToLowerInvariant();
+            switch (normalized)
+            {
+                case "offline":
+                case "local":
+                case "whisper":
+                    return "offline";
+                case "api":
+                case "openai":
+                case "online":
+                    return "api";
+                default:
+                    return string.Empty;
+            }
+        }
+
+        private static bool TryParseBool(string raw, out bool value)
+        {
+            value = false;
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return false;
+            }
+
+            var normalized = raw.Trim().ToLowerInvariant();
+            if (normalized == "1" || normalized == "true" || normalized == "on" || normalized == "yes")
+            {
+                value = true;
+                return true;
+            }
+            if (normalized == "0" || normalized == "false" || normalized == "off" || normalized == "no")
+            {
+                value = false;
+                return true;
+            }
+            return false;
+        }
+
+        private string ParseAsrErrorMessage(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return "asr service returned empty response";
+            }
+
+            try
+            {
+                var parsed = JsonUtility.FromJson<AsrErrorResponse>(raw);
+                if (!string.IsNullOrWhiteSpace(parsed.detail))
+                {
+                    return parsed.detail.Trim();
+                }
+                if (!string.IsNullOrWhiteSpace(parsed.message))
+                {
+                    return parsed.message.Trim();
+                }
+            }
+            catch (Exception)
+            {
+            }
+
+            return raw.Trim();
+        }
+
+        private async Task<(bool Success, int StatusCode, AsrConfigResponse Config, string Error)> LoadAsrConfigAsync()
+        {
+            var empty = new AsrConfigResponse
+            {
+                mode = "offline",
+                available_modes = new[] { "offline", "api" },
+                openai_model = string.Empty
+            };
+
+            try
+            {
+                var url = ResolveAsrServiceBaseUrl() + "/transcribe/config";
+                var response = await SharedHttpClient.GetAsync(url).ConfigureAwait(false);
+                var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return (false, (int)response.StatusCode, empty, ParseAsrErrorMessage(body));
+                }
+
+                var parsed = JsonUtility.FromJson<AsrConfigResponse>(body);
+                if (string.IsNullOrWhiteSpace(parsed.mode))
+                {
+                    parsed.mode = "offline";
+                }
+                if (parsed.available_modes == null || parsed.available_modes.Length == 0)
+                {
+                    parsed.available_modes = new[] { "offline", "api" };
+                }
+                parsed.mode = NormalizeAsrMode(parsed.mode);
+                if (string.IsNullOrWhiteSpace(parsed.mode))
+                {
+                    parsed.mode = "offline";
+                }
+                return (true, 200, parsed, string.Empty);
+            }
+            catch (Exception ex)
+            {
+                return (false, 502, empty, $"failed to load asr config: {ex.Message}");
+            }
+        }
+
+        private async Task<(bool Success, int StatusCode, string Error)> SetAsrModeAsync(string mode)
+        {
+            try
+            {
+                var payload = "{\"mode\":\"" + EscapeJson(mode) + "\"}";
+                using (var content = new StringContent(payload, Encoding.UTF8, "application/json"))
+                {
+                    var response = await SharedHttpClient.PostAsync(ResolveAsrServiceBaseUrl() + "/transcribe/config", content).ConfigureAwait(false);
+                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        return (false, (int)response.StatusCode, ParseAsrErrorMessage(body));
+                    }
+                }
+
+                return (true, 200, string.Empty);
+            }
+            catch (Exception ex)
+            {
+                return (false, 502, $"failed to set asr mode: {ex.Message}");
+            }
+        }
+
+        private async Task<bool> SetAgentListeningAsync(bool listening)
+        {
+            if (voiceLauncher == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                return await RunOnMainThreadAsync(() => voiceLauncher.SetAgentListeningForTester(listening)).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private async Task<bool> GetAgentListeningAsync()
+        {
+            if (voiceLauncher == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                return await RunOnMainThreadAsync(() => voiceLauncher.IsAgentListeningForTester()).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         private bool IsCameraClientActive()
         {
             var lastTicks = Interlocked.Read(ref _lastCameraClientRequestUtcTicks);
@@ -1294,16 +3733,8 @@ namespace RobotVoice
                 return;
             }
 
-            byte[] jpeg = null;
-            lock (_cameraLock)
-            {
-                if (_latestJpeg != null && _latestJpeg.Length > 0)
-                {
-                    // Create a shallow copy to avoid locking while sending
-                    jpeg = new byte[_latestJpeg.Length];
-                    System.Buffer.BlockCopy(_latestJpeg, 0, jpeg, 0, _latestJpeg.Length);
-                }
-            }
+            // Give Unity one short window to produce a fresh frame instead of failing immediately.
+            var jpeg = await TryGetLatestCameraJpegWithWaitAsync(900, 40).ConfigureAwait(false);
 
             if (jpeg == null)
             {
@@ -1439,6 +3870,28 @@ namespace RobotVoice
             {
                 action();
             }
+        }
+
+        private Task<T> RunOnMainThreadAsync<T>(Func<T> action)
+        {
+            if (action == null)
+            {
+                throw new ArgumentNullException(nameof(action));
+            }
+
+            var tcs = new TaskCompletionSource<T>();
+            PostToMainThread(() =>
+            {
+                try
+                {
+                    tcs.TrySetResult(action());
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            });
+            return tcs.Task;
         }
 
         private async Task HandleVoiceOptionsAsync(HttpListenerContext context)
@@ -1813,6 +4266,621 @@ namespace RobotVoice
             response.Close();
         }
 
+        private async Task RespondWithTelemetryHtmlAsync(HttpListenerResponse response)
+        {
+            var html = BuildTelemetryLandingHtml();
+            var buffer = Encoding.UTF8.GetBytes(html);
+            response.StatusCode = 200;
+            response.ContentType = "text/html; charset=utf-8";
+            response.ContentLength64 = buffer.Length;
+            await response.OutputStream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            response.Close();
+        }
+
+        private static async Task RespondWithGameConfigHtmlAsync(HttpListenerResponse response)
+        {
+            var html = BuildGameConfigHtml();
+            var buffer = Encoding.UTF8.GetBytes(html);
+            response.StatusCode = 200;
+            response.ContentType = "text/html; charset=utf-8";
+            response.ContentLength64 = buffer.Length;
+            await response.OutputStream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            response.Close();
+        }
+
+        private static async Task RespondWithRuntimeConfigHtmlAsync(HttpListenerResponse response)
+        {
+            var html = BuildRuntimeConfigHtml();
+            var buffer = Encoding.UTF8.GetBytes(html);
+            response.StatusCode = 200;
+            response.ContentType = "text/html; charset=utf-8";
+            response.ContentLength64 = buffer.Length;
+            await response.OutputStream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            response.Close();
+        }
+
+        private static async Task RespondWithSetupWizardHtmlAsync(HttpListenerResponse response)
+        {
+            var html = BuildSetupWizardHtml();
+            var buffer = Encoding.UTF8.GetBytes(html);
+            response.StatusCode = 200;
+            response.ContentType = "text/html; charset=utf-8";
+            response.ContentLength64 = buffer.Length;
+            await response.OutputStream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            response.Close();
+        }
+
+        private string BuildTelemetryLandingHtml()
+        {
+            var dashboardBase = string.IsNullOrWhiteSpace(telemetryDashboardUrl)
+                ? "http://127.0.0.1:8101/dashboard"
+                : telemetryDashboardUrl.Trim();
+            var dashboardBaseJs = EscapeJson(dashboardBase);
+
+            var sb = new StringBuilder(4096);
+            sb.AppendLine(@"<!DOCTYPE html>");
+            sb.AppendLine(@"<html lang=""en"">");
+            sb.AppendLine(@"<head>");
+            sb.AppendLine(@"<meta charset=""utf-8"">");
+            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
+            sb.AppendLine(@"<title>Telemetry Dashboard</title>");
+            sb.AppendLine(@"<style>");
+            sb.AppendLine(@"body { margin:0; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#0f1117; color:#f4f4f4; }");
+            sb.AppendLine(@"header { padding:14px 18px; border-bottom:1px solid rgba(255,255,255,0.1); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }");
+            sb.AppendLine(@"input, select, button { border-radius:8px; border:1px solid rgba(255,255,255,0.2); background:#131c2d; color:#f4f4f4; height:34px; padding:0 10px; }");
+            sb.AppendLine(@"button { cursor:pointer; background:#2a5ca6; border-color:#4278ca; }");
+            sb.AppendLine(@"a { color:#93c5fd; text-decoration:none; border-bottom:1px dashed #93c5fd; }");
+            sb.AppendLine(@"#frame { width:100%; height:calc(100vh - 74px); border:0; background:#0b1220; }");
+            sb.AppendLine(@"</style>");
+            sb.AppendLine(@"</head>");
+            sb.AppendLine(@"<body>");
+            sb.AppendLine(@"<header>");
+            sb.AppendLine(@"<a href=""/"">Back to Panel</a>");
+            sb.AppendLine(@"<label>User</label><input id=""userId"" value=""demo_user"">");
+            sb.AppendLine(@"<label>Days</label>");
+            sb.AppendLine(@"<select id=""days""><option>7</option><option selected>14</option><option>21</option><option>30</option></select>");
+            sb.AppendLine(@"<button id=""openBtn"">Open Dashboard</button>");
+            sb.AppendLine(@"</header>");
+            sb.AppendLine(@"<iframe id=""frame"" title=""telemetry dashboard""></iframe>");
+            sb.AppendLine(@"<script>");
+            sb.AppendLine($@"const dashboardBase = ""{dashboardBaseJs}"";");
+            sb.AppendLine(@"const frame = document.getElementById('frame');");
+            sb.AppendLine(@"const userInput = document.getElementById('userId');");
+            sb.AppendLine(@"const daysInput = document.getElementById('days');");
+            sb.AppendLine(@"function buildUrl(){");
+            sb.AppendLine(@"  const user = encodeURIComponent((userInput.value || 'demo_user').trim() || 'demo_user');");
+            sb.AppendLine(@"  const days = encodeURIComponent(daysInput.value || '14');");
+            sb.AppendLine(@"  return `${dashboardBase}?user_id=${user}&days=${days}`;");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function openDash(){ frame.src = buildUrl(); }");
+            sb.AppendLine(@"document.getElementById('openBtn').addEventListener('click', openDash);");
+            sb.AppendLine(@"openDash();");
+            sb.AppendLine(@"</script>");
+            sb.AppendLine(@"</body>");
+            sb.AppendLine(@"</html>");
+            return sb.ToString();
+        }
+
+        private static string BuildGameConfigHtml()
+        {
+            var sb = new StringBuilder(8192);
+            sb.AppendLine(@"<!DOCTYPE html>");
+            sb.AppendLine(@"<html lang=""en"">");
+            sb.AppendLine(@"<head>");
+            sb.AppendLine(@"<meta charset=""utf-8"">");
+            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
+            sb.AppendLine(@"<title>Game Config</title>");
+            sb.AppendLine(@"<style>");
+            sb.AppendLine(@"body{margin:0;padding:1rem 1.1rem;background:#0f1117;color:#f5f7ff;font-family:'Segoe UI',sans-serif;}");
+            sb.AppendLine(@"h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}");
+            sb.AppendLine(@"a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}");
+            sb.AppendLine(@"small{opacity:.75;}");
+            sb.AppendLine(@".card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:.9rem;margin-top:.7rem;}");
+            sb.AppendLine(@".toolbar{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin:.6rem 0;}");
+            sb.AppendLine(@"button{cursor:pointer;border:none;border-radius:8px;padding:.55rem .9rem;background:#3b82f6;color:#fff;font-weight:600;}");
+            sb.AppendLine(@"button.secondary{background:#334155;}");
+            sb.AppendLine(@"button.warn{background:#dc2626;}");
+            sb.AppendLine(@"input{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#f5f7ff;padding:.44rem .58rem;}");
+            sb.AppendLine(@".pathRow{display:flex;gap:.4rem;align-items:center;}");
+            sb.AppendLine(@".pathRow input{flex:1;}");
+            sb.AppendLine(@".tinyBtn{padding:.42rem .55rem;font-size:.78rem;white-space:nowrap;background:#334155;}");
+            sb.AppendLine(@"table{width:100%;border-collapse:collapse;font-size:.9rem;}");
+            sb.AppendLine(@"th,td{border-bottom:1px solid rgba(255,255,255,.1);padding:.42rem .35rem;vertical-align:top;}");
+            sb.AppendLine(@"th{text-align:left;font-size:.78rem;opacity:.85;text-transform:uppercase;letter-spacing:.04em;}");
+            sb.AppendLine(@"#status{margin-top:.6rem;opacity:.9;}");
+            sb.AppendLine(@"#manifestPath{font-family:Consolas,monospace;font-size:.8rem;opacity:.8;word-break:break-all;}");
+            sb.AppendLine(@"@media(max-width:900px){table,thead,tbody,tr,th,td{display:block;} th{display:none;} tr{border:1px solid rgba(255,255,255,.12);border-radius:10px;margin:.6rem 0;padding:.45rem;} td{border:none;padding:.28rem 0;} td::before{display:block;font-size:.72rem;opacity:.7;margin-bottom:.15rem;}}");
+            sb.AppendLine(@"</style>");
+            sb.AppendLine(@"</head>");
+            sb.AppendLine(@"<body>");
+            sb.AppendLine(@"<h1>Game Config</h1>");
+            sb.AppendLine(@"<p><a href=""/index.html"">Back to User Panel</a></p>");
+            sb.AppendLine(@"<div class=""card"">");
+            sb.AppendLine(@"<small>配置会写入本机 manifest：游戏名、语音关键词和可执行路径；可用 Browse 在宿主机选文件，路径会自动规范为绝对路径。</small>");
+            sb.AppendLine(@"<div id=""manifestPath""></div>");
+            sb.AppendLine(@"<div class=""toolbar"">");
+            sb.AppendLine(@"<button onclick=""addRow()"">Add Game</button>");
+            sb.AppendLine(@"<button class=""secondary"" onclick=""reloadGames()"">Reload</button>");
+            sb.AppendLine(@"<button onclick=""saveGames()"">Save</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<table>");
+            sb.AppendLine(@"<thead><tr><th>ID</th><th>Game Name</th><th>Keywords</th><th>Executable Path</th><th>Workdir</th><th>Action</th></tr></thead>");
+            sb.AppendLine(@"<tbody id=""rows""></tbody>");
+            sb.AppendLine(@"</table>");
+            sb.AppendLine(@"<div id=""status"">Ready.</div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<script>");
+            sb.AppendLine(@"const rowsEl = document.getElementById('rows');");
+            sb.AppendLine(@"const statusEl = document.getElementById('status');");
+            sb.AppendLine(@"const manifestPathEl = document.getElementById('manifestPath');");
+            sb.AppendLine(@"let gameRows = [];");
+            sb.AppendLine(@"function esc(v){ return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'); }");
+            sb.AppendLine(@"function splitKeywords(text){");
+            sb.AppendLine(@"  return String(text||'').split(',').map(s=>s.trim()).filter(Boolean);");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function render(){");
+            sb.AppendLine(@"  if(!rowsEl) return;");
+            sb.AppendLine(@"  if(!gameRows.length){ rowsEl.innerHTML = '<tr><td colspan=""6"">No games configured.</td></tr>'; return; }");
+            sb.AppendLine(@"  rowsEl.innerHTML = gameRows.map((g,i)=>`");
+            sb.AppendLine(@"    <tr>");
+            sb.AppendLine(@"      <td data-label=""ID""><input value=""${esc(g.id)}"" oninput=""updateField(${i},'id',this.value)"" placeholder=""disc_golf""></td>");
+            sb.AppendLine(@"      <td data-label=""Game Name""><input value=""${esc(g.name)}"" oninput=""updateField(${i},'name',this.value)"" placeholder=""Disc Golf""></td>");
+            sb.AppendLine(@"      <td data-label=""Keywords""><input value=""${esc(g.keywords_text)}"" oninput=""updateField(${i},'keywords_text',this.value)"" placeholder=""disc golf,discgolf,frisbee golf""></td>");
+            sb.AppendLine(@"      <td data-label=""Executable Path""><div class=""pathRow""><input value=""${esc(g.exec)}"" oninput=""updateField(${i},'exec',this.value)"" placeholder=""D:\\Games\\DiscGolf\\DiscGolf.exe""><button type=""button"" class=""tinyBtn"" onclick=""browseExec(${i})"">Browse</button></div></td>");
+            sb.AppendLine(@"      <td data-label=""Workdir""><input value=""${esc(g.workdir)}"" oninput=""updateField(${i},'workdir',this.value)"" placeholder=""D:\\Games\\DiscGolf""></td>");
+            sb.AppendLine(@"      <td data-label=""Action""><button class=""warn"" onclick=""removeRow(${i})"">Delete</button></td>");
+            sb.AppendLine(@"    </tr>`).join('');");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"function updateField(i,key,val){ if(!gameRows[i]) return; gameRows[i][key]=val; }");
+            sb.AppendLine(@"function addRow(){ gameRows.push({id:'',name:'',keywords_text:'',exec:'',workdir:''}); render(); }");
+            sb.AppendLine(@"function removeRow(i){ gameRows.splice(i,1); render(); }");
+            sb.AppendLine(@"async function browseExec(i){");
+            sb.AppendLine(@"  if(!gameRows[i]) return;");
+            sb.AppendLine(@"  statusEl.textContent = 'Opening file picker on host...';");
+            sb.AppendLine(@"  const payload = {");
+            sb.AppendLine(@"    title: 'Select Game Executable',");
+            sb.AppendLine(@"    filter: 'Executable Files (*.exe)|*.exe|All Files (*.*)|*.*',");
+            sb.AppendLine(@"    initial_dir: String(gameRows[i].workdir || ''),");
+            sb.AppendLine(@"    initial_filename: String(gameRows[i].exec || '')");
+            sb.AppendLine(@"  };");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/file/pick', {");
+            sb.AppendLine(@"      method:'POST',");
+            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
+            sb.AppendLine(@"      body: JSON.stringify(payload)");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    const data = await resp.json();");
+            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }");
+            sb.AppendLine(@"    if(data.cancelled){ statusEl.textContent = 'Browse cancelled.'; return; }");
+            sb.AppendLine(@"    const path = String(data.path || '').trim();");
+            sb.AppendLine(@"    const dir = String(data.directory || '').trim();");
+            sb.AppendLine(@"    if(path){ gameRows[i].exec = path; }");
+            sb.AppendLine(@"    if(dir){ gameRows[i].workdir = dir; }");
+            sb.AppendLine(@"    render();");
+            sb.AppendLine(@"    statusEl.textContent = 'Selected: ' + (path || 'no file');");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function reloadGames(){");
+            sb.AppendLine(@"  statusEl.textContent = 'Loading...';");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/game/manifest');");
+            sb.AppendLine(@"    const data = await resp.json();");
+            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }");
+            sb.AppendLine(@"    const list = Array.isArray(data.games) ? data.games : [];");
+            sb.AppendLine(@"    gameRows = list.map(g=>({");
+            sb.AppendLine(@"      id: String(g.id||''),");
+            sb.AppendLine(@"      name: String(g.name||''),");
+            sb.AppendLine(@"      exec: String(g.exec||''),");
+            sb.AppendLine(@"      workdir: String(g.workdir||''),");
+            sb.AppendLine(@"      keywords_text: Array.isArray(g.keywords) ? g.keywords.join(', ') : ''");
+            sb.AppendLine(@"    }));");
+            sb.AppendLine(@"    if(manifestPathEl){ manifestPathEl.textContent = 'Manifest: ' + String(data.path||''); }");
+            sb.AppendLine(@"    render();");
+            sb.AppendLine(@"    const unresolved = Number(data.unresolved_count || 0);");
+            sb.AppendLine(@"    statusEl.textContent = unresolved > 0");
+            sb.AppendLine(@"      ? ('Loaded with warnings: ' + unresolved + ' unresolved path fields. Please fill absolute paths and save.')");
+            sb.AppendLine(@"      : 'Loaded.';");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function saveGames(){");
+            sb.AppendLine(@"  const payload = {");
+            sb.AppendLine(@"    games: gameRows.map(g=>({");
+            sb.AppendLine(@"      id: String(g.id||'').trim(),");
+            sb.AppendLine(@"      name: String(g.name||'').trim(),");
+            sb.AppendLine(@"      keywords: splitKeywords(g.keywords_text),");
+            sb.AppendLine(@"      exec: String(g.exec||'').trim(),");
+            sb.AppendLine(@"      workdir: String(g.workdir||'').trim()");
+            sb.AppendLine(@"    }))");
+            sb.AppendLine(@"  };");
+            sb.AppendLine(@"  statusEl.textContent = 'Saving...';");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/game/manifest', {");
+            sb.AppendLine(@"      method:'POST',");
+            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
+            sb.AppendLine(@"      body: JSON.stringify(payload)");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    const data = await resp.json();");
+            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }");
+            sb.AppendLine(@"    statusEl.textContent = 'Saved. ' + (data.message || 'Restart intent_service and game_launcher to apply immediately.');");
+            sb.AppendLine(@"    await reloadGames();");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"reloadGames();");
+            sb.AppendLine(@"</script>");
+            sb.AppendLine(@"</body>");
+            sb.AppendLine(@"</html>");
+            return sb.ToString();
+        }
+
+        private static string BuildRuntimeConfigHtml()
+        {
+            var sb = new StringBuilder(8192);
+            sb.AppendLine(@"<!DOCTYPE html>");
+            sb.AppendLine(@"<html lang=""en"">");
+            sb.AppendLine(@"<head>");
+            sb.AppendLine(@"<meta charset=""utf-8"">");
+            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
+            sb.AppendLine(@"<title>Runtime Config</title>");
+            sb.AppendLine(@"<style>");
+            sb.AppendLine(@"body{margin:0;padding:1rem 1.1rem;background:#0f1117;color:#f5f7ff;font-family:'Segoe UI',sans-serif;}");
+            sb.AppendLine(@"h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}");
+            sb.AppendLine(@"a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}");
+            sb.AppendLine(@"small{opacity:.75;}");
+            sb.AppendLine(@".card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:.9rem;margin-top:.7rem;}");
+            sb.AppendLine(@".grid{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;}");
+            sb.AppendLine(@".field{display:flex;flex-direction:column;gap:.3rem;}");
+            sb.AppendLine(@"label{font-size:.85rem;opacity:.9;}");
+            sb.AppendLine(@"input{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#f5f7ff;padding:.44rem .58rem;}");
+            sb.AppendLine(@".toolbar{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin-top:.8rem;}");
+            sb.AppendLine(@"button{cursor:pointer;border:none;border-radius:8px;padding:.55rem .9rem;background:#3b82f6;color:#fff;font-weight:600;}");
+            sb.AppendLine(@"button.secondary{background:#334155;}");
+            sb.AppendLine(@"details{margin-top:.8rem;border:1px solid rgba(255,255,255,.16);border-radius:10px;padding:.55rem .7rem;background:rgba(255,255,255,.03);}");
+            sb.AppendLine(@"summary{cursor:pointer;font-size:.9rem;opacity:.92;}");
+            sb.AppendLine(@"#status{margin-top:.6rem;opacity:.9;}");
+            sb.AppendLine(@"#configPath{font-family:Consolas,monospace;font-size:.8rem;opacity:.8;word-break:break-all;}");
+            sb.AppendLine(@"@media(max-width:900px){.grid{grid-template-columns:1fr;}}");
+            sb.AppendLine(@"</style>");
+            sb.AppendLine(@"</head>");
+            sb.AppendLine(@"<body>");
+            sb.AppendLine(@"<h1>Runtime Config</h1>");
+            sb.AppendLine(@"<p><a href=""/index.html"">Back to User Panel</a></p>");
+            sb.AppendLine(@"<div class=""card"">");
+            sb.AppendLine(@"<small>For most users, only OpenAI, voice command phrases, and game manifest path need changes.</small>");
+            sb.AppendLine(@"<div id=""configPath""></div>");
+            sb.AppendLine(@"<div class=""grid"">");
+            sb.AppendLine(@"<div class=""field""><label>OpenAI API Key</label><input id=""openaiKey"" type=""password"" placeholder=""sk-...""></div>");
+            sb.AppendLine(@"<div class=""field""><label>OpenAI Transcribe Model</label><input id=""openaiModel"" placeholder=""gpt-4o-mini-transcribe""></div>");
+            sb.AppendLine(@"<div class=""field""><label>OpenAI Base URL (Optional)</label><input id=""openaiBaseUrl"" placeholder=""https://api.openai.com/v1""></div>");
+            sb.AppendLine(@"<div class=""field""><label>OpenAI ASR Prompt</label><input id=""openaiPrompt"" placeholder=""Optional. Leave empty to avoid prompt bias/hallucination.""></div>");
+            sb.AppendLine(@"<div class=""field""><label>Launch Triggers (comma separated)</label><input id=""launchTriggers"" placeholder=""open, start, launch, play, begin, load""></div>");
+            sb.AppendLine(@"<div class=""field""><label>Exit Keywords (comma separated)</label><input id=""exitKeywords"" placeholder=""back home, go home, quit, exit, stop, close game""></div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<details>");
+            sb.AppendLine(@"  <summary>Advanced (optional): Manifest paths</summary>");
+            sb.AppendLine(@"  <div class=""grid"">");
+            sb.AppendLine(@"    <div class=""field""><label>Intent Manifest Path</label><input id=""intentManifest"" placeholder=""Usually leave empty (default manifest)""></div>");
+            sb.AppendLine(@"    <div class=""field""><label>Game Manifest Path</label><input id=""gameManifest"" placeholder=""Usually leave empty (same as intent manifest)""></div>");
+            sb.AppendLine(@"  </div>");
+            sb.AppendLine(@"</details>");
+            sb.AppendLine(@"<div class=""toolbar"">");
+            sb.AppendLine(@"<button onclick=""saveConfig()"">Save</button>");
+            sb.AppendLine(@"<button class=""secondary"" onclick=""reloadConfig()"">Reload</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div id=""status"">Ready.</div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<script>");
+            sb.AppendLine(@"const statusEl = document.getElementById('status');");
+            sb.AppendLine(@"const configPathEl = document.getElementById('configPath');");
+            sb.AppendLine(@"const intentManifestEl = document.getElementById('intentManifest');");
+            sb.AppendLine(@"const gameManifestEl = document.getElementById('gameManifest');");
+            sb.AppendLine(@"const openaiKeyEl = document.getElementById('openaiKey');");
+            sb.AppendLine(@"const openaiModelEl = document.getElementById('openaiModel');");
+            sb.AppendLine(@"const openaiBaseUrlEl = document.getElementById('openaiBaseUrl');");
+            sb.AppendLine(@"const openaiPromptEl = document.getElementById('openaiPrompt');");
+            sb.AppendLine(@"const launchTriggersEl = document.getElementById('launchTriggers');");
+            sb.AppendLine(@"const exitKeywordsEl = document.getElementById('exitKeywords');");
+            sb.AppendLine(@"function setText(el, v){ if(el){ el.value = String(v || ''); } }");
+            sb.AppendLine(@"function getText(el){ return el ? String(el.value || '').trim() : ''; }");
+            sb.AppendLine(@"async function reloadConfig(){");
+            sb.AppendLine(@"  statusEl.textContent = 'Loading...';");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/runtime/config');");
+            sb.AppendLine(@"    const data = await resp.json();");
+            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status)); }");
+            sb.AppendLine(@"    setText(intentManifestEl, data.intent_manifest_path);");
+            sb.AppendLine(@"    setText(gameManifestEl, data.game_manifest_path);");
+            sb.AppendLine(@"    setText(openaiKeyEl, data.openai_api_key);");
+            sb.AppendLine(@"    setText(openaiModelEl, data.openai_transcribe_model);");
+            sb.AppendLine(@"    setText(openaiBaseUrlEl, data.openai_base_url);");
+            sb.AppendLine(@"    setText(openaiPromptEl, data.openai_transcribe_prompt);");
+            sb.AppendLine(@"    setText(launchTriggersEl, data.launch_triggers);");
+            sb.AppendLine(@"    setText(exitKeywordsEl, data.exit_keywords);");
+            sb.AppendLine(@"    if(configPathEl){ configPathEl.textContent = 'Config: ' + String(data.path || ''); }");
+            sb.AppendLine(@"    statusEl.textContent = 'Loaded.';");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function saveConfig(){");
+            sb.AppendLine(@"  statusEl.textContent = 'Saving...';");
+            sb.AppendLine(@"  const payload = {");
+            sb.AppendLine(@"    intent_manifest_path: getText(intentManifestEl),");
+            sb.AppendLine(@"    game_manifest_path: getText(gameManifestEl),");
+            sb.AppendLine(@"    openai_api_key: getText(openaiKeyEl),");
+            sb.AppendLine(@"    openai_transcribe_model: getText(openaiModelEl),");
+            sb.AppendLine(@"    openai_base_url: getText(openaiBaseUrlEl),");
+            sb.AppendLine(@"    openai_transcribe_prompt: getText(openaiPromptEl),");
+            sb.AppendLine(@"    launch_triggers: getText(launchTriggersEl),");
+            sb.AppendLine(@"    exit_keywords: getText(exitKeywordsEl)");
+            sb.AppendLine(@"  };");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/runtime/config', {");
+            sb.AppendLine(@"      method:'POST',");
+            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
+            sb.AppendLine(@"      body: JSON.stringify(payload)");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    const data = await resp.json();");
+            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status)); }");
+            sb.AppendLine(@"    statusEl.textContent = data.message || 'Saved. Restart local services to apply.';");
+            sb.AppendLine(@"    await reloadConfig();");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"reloadConfig();");
+            sb.AppendLine(@"</script>");
+            sb.AppendLine(@"</body>");
+            sb.AppendLine(@"</html>");
+            return sb.ToString();
+        }
+
+        private static string BuildSetupWizardHtml()
+        {
+            var sb = new StringBuilder(12288);
+            sb.AppendLine(@"<!DOCTYPE html>");
+            sb.AppendLine(@"<html lang=""en"">");
+            sb.AppendLine(@"<head>");
+            sb.AppendLine(@"<meta charset=""utf-8"">");
+            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
+            sb.AppendLine(@"<title>First-Run Wizard</title>");
+            sb.AppendLine(@"<style>");
+            sb.AppendLine(@"body{margin:0;padding:1rem 1.1rem;background:#0f1117;color:#f5f7ff;font-family:'Segoe UI',sans-serif;}");
+            sb.AppendLine(@"h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}");
+            sb.AppendLine(@"h2{margin:.1rem 0 .6rem 0;font-size:1rem;letter-spacing:.03em;text-transform:uppercase;opacity:.9;}");
+            sb.AppendLine(@"a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}");
+            sb.AppendLine(@"small{opacity:.75;}");
+            sb.AppendLine(@".card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:.9rem;margin-top:.7rem;}");
+            sb.AppendLine(@".grid{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;}");
+            sb.AppendLine(@".field{display:flex;flex-direction:column;gap:.3rem;}");
+            sb.AppendLine(@"label{font-size:.85rem;opacity:.9;}");
+            sb.AppendLine(@"input,select{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#f5f7ff;padding:.5rem .58rem;}");
+            sb.AppendLine(@"input[type=checkbox]{width:auto;}");
+            sb.AppendLine(@".toggle{display:flex;align-items:center;gap:.5rem;margin-top:.2rem;}");
+            sb.AppendLine(@".toolbar{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin-top:.8rem;}");
+            sb.AppendLine(@"button{cursor:pointer;border:none;border-radius:8px;padding:.55rem .9rem;background:#3b82f6;color:#fff;font-weight:600;}");
+            sb.AppendLine(@"button.secondary{background:#334155;}");
+            sb.AppendLine(@"#status{margin-top:.75rem;opacity:.92;white-space:pre-wrap;}");
+            sb.AppendLine(@"@media(max-width:900px){.grid{grid-template-columns:1fr;}}");
+            sb.AppendLine(@"</style>");
+            sb.AppendLine(@"</head>");
+            sb.AppendLine(@"<body>");
+            sb.AppendLine(@"<h1>First-Run Wizard</h1>");
+            sb.AppendLine(@"<p><a href=""/index.html"">Back to User Panel</a></p>");
+            sb.AppendLine(@"<div class=""card"">");
+            sb.AppendLine(@"<h2>Step 0: Prerequisites (Piper + Ollama)</h2>");
+            sb.AppendLine(@"<div class=""grid"">");
+            sb.AppendLine(@"<div class=""field""><label>Piper Status</label><input id=""piperStatus"" readonly></div>");
+            sb.AppendLine(@"<div class=""field""><label>Piper Model Path</label><input id=""piperModelPath"" readonly></div>");
+            sb.AppendLine(@"<div class=""field""><label>Ollama Status</label><input id=""ollamaStatus"" readonly></div>");
+            sb.AppendLine(@"<div class=""field""><label>Ollama Model</label><input id=""ollamaModel"" placeholder=""gemma3:4b""></div>");
+            sb.AppendLine(@"<div class=""field""><label>Model Downloaded</label><input id=""ollamaModelReady"" readonly></div>");
+            sb.AppendLine(@"<div class=""field""><label>Ollama Hint</label><input id=""ollamaHint"" readonly></div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""toolbar"">");
+            sb.AppendLine(@"<button class=""secondary"" onclick=""refreshPrereq()"">Refresh Prerequisites</button>");
+            sb.AppendLine(@"<button class=""secondary"" onclick=""installOllama()"">Install Ollama (winget)</button>");
+            sb.AppendLine(@"<button class=""secondary"" onclick=""pullOllamaModel()"">Pull Ollama Model</button>");
+            sb.AppendLine(@"<button class=""secondary"" onclick=""openOllamaDownload()"">Open Ollama Download</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<small>Piper is bundled when packaging includes runtime/piper. Ollama is guided-install and model pull is separate.</small>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""card"">");
+            sb.AppendLine(@"<h2>Step 1: ASR Mode and Listening</h2>");
+            sb.AppendLine(@"<div class=""grid"">");
+            sb.AppendLine(@"<div class=""field""><label>ASR Mode</label><select id=""asrMode""><option value=""offline"">offline</option><option value=""api"">api (OpenAI)</option></select></div>");
+            sb.AppendLine(@"<div class=""field""><label>Agent Listening</label><div class=""toggle""><input id=""listeningOn"" type=""checkbox""><span>Enable microphone listening</span></div></div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""card"">");
+            sb.AppendLine(@"<h2>Step 2: OpenAI</h2>");
+            sb.AppendLine(@"<div class=""grid"">");
+            sb.AppendLine(@"<div class=""field""><label>OpenAI API Key</label><input id=""openaiKey"" type=""password"" placeholder=""sk-...""></div>");
+            sb.AppendLine(@"<div class=""field""><label>Transcribe Model</label><input id=""openaiModel"" placeholder=""gpt-4o-mini-transcribe""></div>");
+            sb.AppendLine(@"<div class=""field""><label>OpenAI Base URL (Optional)</label><input id=""openaiBaseUrl"" placeholder=""https://api.openai.com/v1""></div>");
+            sb.AppendLine(@"<div class=""field""><label>ASR Prompt</label><input id=""openaiPrompt"" placeholder=""Optional. Leave empty to avoid prompt bias/hallucination.""></div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""card"">");
+            sb.AppendLine(@"<h2>Step 3: Intent Rules and Manifest</h2>");
+            sb.AppendLine(@"<div class=""grid"">");
+            sb.AppendLine(@"<div class=""field""><label>Launch Triggers (comma separated)</label><input id=""launchTriggers"" placeholder=""open, start, launch, play, begin, load""></div>");
+            sb.AppendLine(@"<div class=""field""><label>Exit Keywords (comma separated)</label><input id=""exitKeywords"" placeholder=""back home, go home, quit, exit, stop, close game""></div>");
+            sb.AppendLine(@"<div class=""field""><label>Intent Manifest Path (Optional)</label><input id=""intentManifest"" placeholder=""Usually keep default""></div>");
+            sb.AppendLine(@"<div class=""field""><label>Game Manifest Path (Optional)</label><input id=""gameManifest"" placeholder=""Usually same as intent manifest""></div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<small>Advanced game rows (name/keywords/executable path) are in <a href=""/games.html"">Game Config</a>.</small>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""card"">");
+            sb.AppendLine(@"<h2>Step 4: Save</h2>");
+            sb.AppendLine(@"<div class=""toolbar"">");
+            sb.AppendLine(@"<button onclick=""saveAll()"">Save Wizard Config</button>");
+            sb.AppendLine(@"<button class=""secondary"" onclick=""reloadAll()"">Reload</button>");
+            sb.AppendLine(@"<button class=""secondary"" onclick=""location.href='/games.html'"">Open Game Config</button>");
+            sb.AppendLine(@"<button class=""secondary"" onclick=""location.href='/runtime.html'"">Open Runtime Config</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div id=""status"">Ready.</div>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<script>");
+            sb.AppendLine(@"const statusEl = document.getElementById('status');");
+            sb.AppendLine(@"const asrModeEl = document.getElementById('asrMode');");
+            sb.AppendLine(@"const listeningEl = document.getElementById('listeningOn');");
+            sb.AppendLine(@"const openaiKeyEl = document.getElementById('openaiKey');");
+            sb.AppendLine(@"const openaiModelEl = document.getElementById('openaiModel');");
+            sb.AppendLine(@"const openaiBaseUrlEl = document.getElementById('openaiBaseUrl');");
+            sb.AppendLine(@"const openaiPromptEl = document.getElementById('openaiPrompt');");
+            sb.AppendLine(@"const launchTriggersEl = document.getElementById('launchTriggers');");
+            sb.AppendLine(@"const exitKeywordsEl = document.getElementById('exitKeywords');");
+            sb.AppendLine(@"const intentManifestEl = document.getElementById('intentManifest');");
+            sb.AppendLine(@"const gameManifestEl = document.getElementById('gameManifest');");
+            sb.AppendLine(@"const piperStatusEl = document.getElementById('piperStatus');");
+            sb.AppendLine(@"const piperModelPathEl = document.getElementById('piperModelPath');");
+            sb.AppendLine(@"const ollamaStatusEl = document.getElementById('ollamaStatus');");
+            sb.AppendLine(@"const ollamaModelEl = document.getElementById('ollamaModel');");
+            sb.AppendLine(@"const ollamaModelReadyEl = document.getElementById('ollamaModelReady');");
+            sb.AppendLine(@"const ollamaHintEl = document.getElementById('ollamaHint');");
+            sb.AppendLine(@"function setText(el, v){ if(el){ el.value = String(v || ''); } }");
+            sb.AppendLine(@"function getText(el){ return el ? String(el.value || '').trim() : ''; }");
+            sb.AppendLine(@"async function fetchJson(url, opts){");
+            sb.AppendLine(@"  const resp = await fetch(url, opts);");
+            sb.AppendLine(@"  const data = await resp.json();");
+            sb.AppendLine(@"  if(!resp.ok || data.status !== 'ok'){");
+            sb.AppendLine(@"    throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  return data;");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function refreshPrereq(){");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const data = await fetchJson('/api/runtime/prereq');");
+            sb.AppendLine(@"    setText(piperStatusEl, data.piper_ready ? 'ready' : 'missing executable/model');");
+            sb.AppendLine(@"    setText(piperModelPathEl, data.piper_model_path || '');");
+            sb.AppendLine(@"    if(!getText(ollamaModelEl)){ setText(ollamaModelEl, data.ollama_model || 'gemma3:4b'); }");
+            sb.AppendLine(@"    const ollamaState = data.ollama_running ? 'running' : (data.ollama_installed ? 'installed (not running)' : 'not installed');");
+            sb.AppendLine(@"    setText(ollamaStatusEl, ollamaState);");
+            sb.AppendLine(@"    setText(ollamaModelReadyEl, data.ollama_model_available ? 'yes' : 'no');");
+            sb.AppendLine(@"    const hint = data.ollama_error ? String(data.ollama_error) : (data.needs_ollama_setup ? 'install Ollama and pull model' : 'ready');");
+            sb.AppendLine(@"    setText(ollamaHintEl, hint);");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    setText(ollamaStatusEl, 'error');");
+            sb.AppendLine(@"    setText(ollamaHintEl, String(err));");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function openOllamaDownload(){");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const data = await fetchJson('/api/runtime/ollama', {");
+            sb.AppendLine(@"      method:'POST',");
+            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
+            sb.AppendLine(@"      body: JSON.stringify({ action:'open_download' })");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    statusEl.textContent = data.message || 'opened download page';");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function installOllama(){");
+            sb.AppendLine(@"  statusEl.textContent = 'Starting Ollama install...';");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const data = await fetchJson('/api/runtime/ollama', {");
+            sb.AppendLine(@"      method:'POST',");
+            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
+            sb.AppendLine(@"      body: JSON.stringify({ action:'install' })");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    statusEl.textContent = data.message || 'install started';");
+            sb.AppendLine(@"    await refreshPrereq();");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function pullOllamaModel(){");
+            sb.AppendLine(@"  const model = getText(ollamaModelEl) || 'gemma3:4b';");
+            sb.AppendLine(@"  statusEl.textContent = 'Starting model pull: ' + model + ' ...';");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const data = await fetchJson('/api/runtime/ollama', {");
+            sb.AppendLine(@"      method:'POST',");
+            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
+            sb.AppendLine(@"      body: JSON.stringify({ action:'pull_model', model })");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    statusEl.textContent = data.message || ('model pull started: ' + model);");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function reloadAll(){");
+            sb.AppendLine(@"  statusEl.textContent = 'Loading...';");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const [asrData, runtimeData, prereqData] = await Promise.all([");
+            sb.AppendLine(@"      fetchJson('/api/asr'),");
+            sb.AppendLine(@"      fetchJson('/api/runtime/config'),");
+            sb.AppendLine(@"      fetchJson('/api/runtime/prereq')");
+            sb.AppendLine(@"    ]);");
+            sb.AppendLine(@"    setText(asrModeEl, asrData.mode || 'offline');");
+            sb.AppendLine(@"    if(listeningEl){ listeningEl.checked = !!asrData.listening; }");
+            sb.AppendLine(@"    setText(openaiKeyEl, runtimeData.openai_api_key);");
+            sb.AppendLine(@"    setText(openaiModelEl, runtimeData.openai_transcribe_model);");
+            sb.AppendLine(@"    setText(openaiBaseUrlEl, runtimeData.openai_base_url);");
+            sb.AppendLine(@"    setText(openaiPromptEl, runtimeData.openai_transcribe_prompt);");
+            sb.AppendLine(@"    setText(ollamaModelEl, runtimeData.ollama_model || prereqData.ollama_model || 'gemma3:4b');");
+            sb.AppendLine(@"    setText(launchTriggersEl, runtimeData.launch_triggers);");
+            sb.AppendLine(@"    setText(exitKeywordsEl, runtimeData.exit_keywords);");
+            sb.AppendLine(@"    setText(intentManifestEl, runtimeData.intent_manifest_path);");
+            sb.AppendLine(@"    setText(gameManifestEl, runtimeData.game_manifest_path);");
+            sb.AppendLine(@"    setText(piperStatusEl, prereqData.piper_ready ? 'ready' : 'missing executable/model');");
+            sb.AppendLine(@"    setText(piperModelPathEl, prereqData.piper_model_path || '');");
+            sb.AppendLine(@"    const ollamaState = prereqData.ollama_running ? 'running' : (prereqData.ollama_installed ? 'installed (not running)' : 'not installed');");
+            sb.AppendLine(@"    setText(ollamaStatusEl, ollamaState);");
+            sb.AppendLine(@"    setText(ollamaModelReadyEl, prereqData.ollama_model_available ? 'yes' : 'no');");
+            sb.AppendLine(@"    const hint = prereqData.ollama_error ? String(prereqData.ollama_error) : (prereqData.needs_ollama_setup ? 'install Ollama and pull model' : 'ready');");
+            sb.AppendLine(@"    setText(ollamaHintEl, hint);");
+            sb.AppendLine(@"    statusEl.textContent = 'Loaded.';");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function saveAll(){");
+            sb.AppendLine(@"  statusEl.textContent = 'Saving...';");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    await fetchJson('/api/runtime/config', {");
+            sb.AppendLine(@"      method:'POST',");
+            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
+            sb.AppendLine(@"      body: JSON.stringify({");
+            sb.AppendLine(@"        openai_api_key: getText(openaiKeyEl),");
+            sb.AppendLine(@"        openai_transcribe_model: getText(openaiModelEl),");
+            sb.AppendLine(@"        openai_base_url: getText(openaiBaseUrlEl),");
+            sb.AppendLine(@"        openai_transcribe_prompt: getText(openaiPromptEl),");
+            sb.AppendLine(@"        ollama_model: getText(ollamaModelEl),");
+            sb.AppendLine(@"        launch_triggers: getText(launchTriggersEl),");
+            sb.AppendLine(@"        exit_keywords: getText(exitKeywordsEl),");
+            sb.AppendLine(@"        intent_manifest_path: getText(intentManifestEl),");
+            sb.AppendLine(@"        game_manifest_path: getText(gameManifestEl)");
+            sb.AppendLine(@"      })");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    await fetchJson('/api/asr', {");
+            sb.AppendLine(@"      method:'POST',");
+            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
+            sb.AppendLine(@"      body: JSON.stringify({ action:'set_mode', mode:getText(asrModeEl) || 'offline' })");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    await fetchJson('/api/asr', {");
+            sb.AppendLine(@"      method:'POST',");
+            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
+            sb.AppendLine(@"      body: JSON.stringify({ action:'set_listening', listening:!!(listeningEl && listeningEl.checked) })");
+            sb.AppendLine(@"    });");
+            sb.AppendLine(@"    statusEl.textContent = 'Saved. Restart local services if executable/runtime paths changed.';");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"reloadAll();");
+            sb.AppendLine(@"</script>");
+            sb.AppendLine(@"</body>");
+            sb.AppendLine(@"</html>");
+            return sb.ToString();
+        }
+
 
         private static string BuildPanelHtml()
         {
@@ -1858,6 +4926,10 @@ namespace RobotVoice
             sb.AppendLine(@"<h1>Robot User Test Panel</h1>");
             sb.AppendLine(@"<p>Connect to the same Wi-Fi network as the host running Unity and open this page from any browser.</p>");
             sb.AppendLine(@"<p><a href=""/sdk.html"" style=""color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;"">Open SDK Visualizer</a></p>");
+            sb.AppendLine(@"<p><a href=""/telemetry.html"" style=""color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;"">Open Exercise Dashboard</a></p>");
+            sb.AppendLine(@"<p><a href=""/games.html"" style=""color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;"">Open Game Config</a></p>");
+            sb.AppendLine(@"<p><a href=""/runtime.html"" style=""color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;"">Open Runtime Config</a></p>");
+            sb.AppendLine(@"<p><a href=""/setup.html"" style=""color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;"">Open First-Run Wizard</a></p>");
             sb.AppendLine(@"<div class=""transcript-card"">");
             sb.AppendLine(@"<div class=""transcript-header"">");
             sb.AppendLine(@"<div>");
@@ -1938,7 +5010,7 @@ namespace RobotVoice
             sb.AppendLine(@"<button onclick=""stopCameraPreview()"">Stop Preview</button>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"<img id=""cameraView"" src=""/camera.jpg"" alt=""camera"" style=""max-width:100%;width:640px;height:auto;border-radius:12px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 12px 36px rgba(0,0,0,0.35)""/>");
-            sb.AppendLine(@"<small style=""opacity:0.7"">If the image does not update, ensure the camera is available and enabled.</small>");
+            sb.AppendLine(@"<small style=""opacity:0.7"">Preview polling runs only when this page has focus or is fullscreen.</small>");
             sb.AppendLine(@"</div>");
             sb.AppendLine(@"</section>");
             sb.AppendLine(@"<section>");
@@ -2004,6 +5076,21 @@ namespace RobotVoice
             sb.AppendLine(@"</section>");
 
             sb.AppendLine(@"<section>");
+            sb.AppendLine(@"<h2>Speech Recognition</h2>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<label for=""asrModeSelect"">ASR Mode</label>");
+            sb.AppendLine(@"<select id=""asrModeSelect""></select>");
+            sb.AppendLine(@"<button onclick=""applyAsrMode()"">Apply Mode</button>");
+            sb.AppendLine(@"<button onclick=""refreshAsrStatus()"">Refresh Status</button>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"<div class=""controls"">");
+            sb.AppendLine(@"<button onclick=""startAgentListening()"">Start Listening</button>");
+            sb.AppendLine(@"<button onclick=""pauseAgentListening()"">Pause Listening</button>");
+            sb.AppendLine(@"<span id=""asrState"" style=""font-size:0.9rem;opacity:0.85;"">Loading ASR status...</span>");
+            sb.AppendLine(@"</div>");
+            sb.AppendLine(@"</section>");
+
+            sb.AppendLine(@"<section>");
             sb.AppendLine(@"<h2>Qwen TTS (Speaker + Emotion)</h2>");
             sb.AppendLine(@"<div class=""controls"">");
             sb.AppendLine(@"<label for=""qwenSpeakerSelect"">Speaker</label>");
@@ -2032,6 +5119,8 @@ namespace RobotVoice
             sb.AppendLine(@"const voiceSelect = document.getElementById('voiceSelect');");
             sb.AppendLine(@"const modelSelect = document.getElementById('ttsModelSelect');");
             sb.AppendLine(@"const qwenSpeakerSelect = document.getElementById('qwenSpeakerSelect');");
+            sb.AppendLine(@"const asrModeSelect = document.getElementById('asrModeSelect');");
+            sb.AppendLine(@"const asrStateEl = document.getElementById('asrState');");
             sb.AppendLine(@"const llmPromptEl = document.getElementById('llmPromptText');");
             sb.AppendLine(@"const logContainer = document.getElementById('transcriptLog');");
             sb.AppendLine(@"const cameraView = document.getElementById('cameraView');");
@@ -2193,7 +5282,7 @@ namespace RobotVoice
             sb.AppendLine(@"  const payload = { prompt: prompt };");
             sb.AppendLine(@"  if(model){ payload.model = model; }");
             sb.AppendLine(@"  const controller = new AbortController();");
-            sb.AppendLine(@"  const timeoutId = setTimeout(() => controller.abort(), 120000);");
+            sb.AppendLine(@"  const timeoutId = setTimeout(() => controller.abort(), 300000);");
             sb.AppendLine(@"  if(statusEl){ statusEl.textContent = 'vision: requesting /api/vision/describe ...'; }");
             sb.AppendLine(@"  try {");
             sb.AppendLine(@"    const resp = await fetch('/api/vision/describe', {");
@@ -2259,6 +5348,51 @@ namespace RobotVoice
             sb.AppendLine(@"function exitGame(){");
             sb.AppendLine(@"  send('/api/game',{action:'exit'});");
             sb.AppendLine(@"}");
+            sb.AppendLine(@"function renderAsrStatus(data){");
+            sb.AppendLine(@"  if(!data) return;");
+            sb.AppendLine(@"  const mode = (typeof data.mode === 'string' && data.mode) ? data.mode : 'offline';");
+            sb.AppendLine(@"  const listening = !!data.listening;");
+            sb.AppendLine(@"  const apiReady = !!data.openai_configured;");
+            sb.AppendLine(@"  if(asrStateEl){");
+            sb.AppendLine(@"    const suffix = (mode === 'api' && !apiReady) ? ' | OPENAI_API_KEY missing' : '';");
+            sb.AppendLine(@"    asrStateEl.textContent = `Mode: ${mode} | Listening: ${listening ? 'ON' : 'PAUSED'}${suffix}`;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"  const modes = Array.isArray(data.available_modes) ? data.available_modes : ['offline','api'];");
+            sb.AppendLine(@"  if(asrModeSelect){");
+            sb.AppendLine(@"    asrModeSelect.innerHTML = modes.map(v => `<option value=""${v}"">${v}</option>`).join('');");
+            sb.AppendLine(@"    if(modes.includes(mode)){ asrModeSelect.value = mode; }");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function refreshAsrStatus(){");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    const resp = await fetch('/api/asr');");
+            sb.AppendLine(@"    const data = await resp.json();");
+            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){");
+            sb.AppendLine(@"      const msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);");
+            sb.AppendLine(@"      if(asrStateEl){ asrStateEl.textContent = 'ASR error: ' + msg; }");
+            sb.AppendLine(@"      return;");
+            sb.AppendLine(@"    }");
+            sb.AppendLine(@"    renderAsrStatus(data);");
+            sb.AppendLine(@"  } catch(err){");
+            sb.AppendLine(@"    if(asrStateEl){ asrStateEl.textContent = 'ASR error: ' + err; }");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function applyAsrMode(){");
+            sb.AppendLine(@"  const mode = asrModeSelect ? String(asrModeSelect.value || '').trim() : '';");
+            sb.AppendLine(@"  if(!mode){ statusEl.textContent = 'error: select ASR mode'; return; }");
+            sb.AppendLine(@"  const data = await send('/api/asr',{action:'set_mode',mode:mode});");
+            sb.AppendLine(@"  if(data && data.status === 'ok'){");
+            sb.AppendLine(@"    renderAsrStatus(data);");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function startAgentListening(){");
+            sb.AppendLine(@"  const data = await send('/api/asr',{action:'start_listening'});");
+            sb.AppendLine(@"  if(data && data.status === 'ok'){ renderAsrStatus(data); }");
+            sb.AppendLine(@"}");
+            sb.AppendLine(@"async function pauseAgentListening(){");
+            sb.AppendLine(@"  const data = await send('/api/asr',{action:'pause_listening'});");
+            sb.AppendLine(@"  if(data && data.status === 'ok'){ renderAsrStatus(data); }");
+            sb.AppendLine(@"}");
             sb.AppendLine(@"async function loadVoiceOptions(){");
             sb.AppendLine(@"  try {");
             sb.AppendLine(@"    const resp = await fetch('/api/voice/options');");
@@ -2304,36 +5438,60 @@ namespace RobotVoice
             sb.AppendLine(@"setInterval(refreshLog, 4000);");
             sb.AppendLine(@"loadVoiceOptions();");
             sb.AppendLine(@"loadQwenOptions();");
+            sb.AppendLine(@"refreshAsrStatus();");
+            sb.AppendLine(@"setInterval(refreshAsrStatus, 5000);");
             sb.AppendLine(@"loadLlmPrompt();");
             sb.AppendLine(@"let cameraPolling = false;");
             sb.AppendLine(@"let cameraSeq = 0;");
             sb.AppendLine(@"let cameraLastLoadAt = 0;");
             sb.AppendLine(@"let cameraLastSetAt = 0;");
+            sb.AppendLine(@"let cameraRequestInFlight = false;");
+            sb.AppendLine(@"let cameraRequestStartedAt = 0;");
             sb.AppendLine(@"let cameraPullTimer = null;");
             sb.AppendLine(@"let cameraWatchdogTimer = null;");
             sb.AppendLine(@"let cameraHeartbeatTimer = null;");
             sb.AppendLine(@"let cameraAutoStart = false;");
+            sb.AppendLine(@"function hasClientFocusOrFullscreen(){");
+            sb.AppendLine(@"  try {");
+            sb.AppendLine(@"    if(document.fullscreenElement){ return true; }");
+            sb.AppendLine(@"    if(typeof document.hidden === 'boolean' && !document.hidden){ return true; }");
+            sb.AppendLine(@"    return !!(document.hasFocus && document.hasFocus());");
+            sb.AppendLine(@"  } catch(_){");
+            sb.AppendLine(@"    return true;");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"}");
             sb.AppendLine(@"function cameraHeartbeat(){");
+            sb.AppendLine(@"  if(!hasClientFocusOrFullscreen()) return;");
             sb.AppendLine(@"  fetch('/api/camera/ping',{method:'POST',cache:'no-store'}).catch(()=>{});");
             sb.AppendLine(@"}");
             sb.AppendLine(@"function pullCameraFrame(){");
             sb.AppendLine(@"  if(!cameraView) return;");
+            sb.AppendLine(@"  if(!hasClientFocusOrFullscreen()) return;");
+            sb.AppendLine(@"  const now = Date.now();");
+            sb.AppendLine(@"  if(cameraRequestInFlight && (now - cameraRequestStartedAt) < 1800){ return; }");
             sb.AppendLine(@"  cameraSeq++;");
-            sb.AppendLine(@"  cameraLastSetAt = Date.now();");
+            sb.AppendLine(@"  cameraLastSetAt = now;");
+            sb.AppendLine(@"  cameraRequestInFlight = true;");
+            sb.AppendLine(@"  cameraRequestStartedAt = now;");
             sb.AppendLine(@"  cameraView.src = '/camera.jpg?t=' + cameraLastSetAt + '&n=' + cameraSeq;");
             sb.AppendLine(@"}");
             sb.AppendLine(@"function cameraWatchdog(){");
             sb.AppendLine(@"  if(!cameraView) return;");
+            sb.AppendLine(@"  if(!hasClientFocusOrFullscreen()) return;");
             sb.AppendLine(@"  const now = Date.now();");
+            sb.AppendLine(@"  if(cameraRequestInFlight && (now - cameraRequestStartedAt) > 2500){");
+            sb.AppendLine(@"    cameraRequestInFlight = false;");
+            sb.AppendLine(@"  }");
             sb.AppendLine(@"  if(cameraLastSetAt > 0 && (now - cameraLastSetAt) > 2200 && (now - cameraLastLoadAt) > 2200){");
             sb.AppendLine(@"    pullCameraFrame();");
             sb.AppendLine(@"  }");
             sb.AppendLine(@"}");
             sb.AppendLine(@"function startPolling(){");
             sb.AppendLine(@"  if(cameraPolling) return;");
+            sb.AppendLine(@"  if(!hasClientFocusOrFullscreen()) return;");
             sb.AppendLine(@"  cameraPolling = true;");
-            sb.AppendLine(@"  cameraView.onload = () => { cameraLastLoadAt = Date.now(); };");
-            sb.AppendLine(@"  cameraView.onerror = () => { setTimeout(pullCameraFrame, 250); };");
+            sb.AppendLine(@"  cameraView.onload = () => { cameraLastLoadAt = Date.now(); cameraRequestInFlight = false; };");
+            sb.AppendLine(@"  cameraView.onerror = () => { cameraRequestInFlight = false; setTimeout(pullCameraFrame, 250); };");
             sb.AppendLine(@"  cameraHeartbeat();");
             sb.AppendLine(@"  pullCameraFrame();");
             sb.AppendLine(@"  cameraPullTimer = setInterval(pullCameraFrame, 1000);");
@@ -2342,6 +5500,7 @@ namespace RobotVoice
             sb.AppendLine(@"}");
             sb.AppendLine(@"function stopPolling(){");
             sb.AppendLine(@"  cameraPolling = false;");
+            sb.AppendLine(@"  cameraRequestInFlight = false;");
             sb.AppendLine(@"  if(cameraPullTimer){ clearInterval(cameraPullTimer); cameraPullTimer = null; }");
             sb.AppendLine(@"  if(cameraWatchdogTimer){ clearInterval(cameraWatchdogTimer); cameraWatchdogTimer = null; }");
             sb.AppendLine(@"  if(cameraHeartbeatTimer){ clearInterval(cameraHeartbeatTimer); cameraHeartbeatTimer = null; }");
@@ -2357,7 +5516,7 @@ namespace RobotVoice
             sb.AppendLine(@"  if(cameraView){ cameraView.removeAttribute('src'); }");
             sb.AppendLine(@"}");
             sb.AppendLine(@"document.addEventListener('visibilitychange', () => {");
-            sb.AppendLine(@"  if(document.hidden){");
+            sb.AppendLine(@"  if(document.hidden && !document.fullscreenElement){");
             sb.AppendLine(@"    stopPolling();");
             sb.AppendLine(@"    return;");
             sb.AppendLine(@"  }");
@@ -2367,8 +5526,22 @@ namespace RobotVoice
             sb.AppendLine(@"    setTimeout(pullCameraFrame, 200);");
             sb.AppendLine(@"  }");
             sb.AppendLine(@"});");
+            sb.AppendLine(@"window.addEventListener('focus', () => { if(cameraAutoStart){ startPolling(); setTimeout(pullCameraFrame, 30); } });");
+            sb.AppendLine(@"window.addEventListener('blur', () => {");
+            sb.AppendLine(@"  setTimeout(() => {");
+            sb.AppendLine(@"    if(document.hidden && !document.fullscreenElement){ stopPolling(); }");
+            sb.AppendLine(@"  }, 120);");
+            sb.AppendLine(@"});");
+            sb.AppendLine(@"document.addEventListener('fullscreenchange', () => {");
+            sb.AppendLine(@"  if(cameraAutoStart && hasClientFocusOrFullscreen()){");
+            sb.AppendLine(@"    startPolling();");
+            sb.AppendLine(@"    setTimeout(pullCameraFrame, 30);");
+            sb.AppendLine(@"  } else {");
+            sb.AppendLine(@"    stopPolling();");
+            sb.AppendLine(@"  }");
+            sb.AppendLine(@"});");
             sb.AppendLine(@"window.addEventListener('beforeunload', stopPolling);");
-            sb.AppendLine(@"function initCamera(){ if(!cameraView) return; if(!document.hidden && cameraAutoStart){ startPolling(); } }");
+            sb.AppendLine(@"function initCamera(){ if(!cameraView) return; if(cameraAutoStart && hasClientFocusOrFullscreen()){ startPolling(); } }");
             sb.AppendLine(@"initCamera();");
             sb.AppendLine(@"</script>");
             sb.AppendLine(@"</body>");

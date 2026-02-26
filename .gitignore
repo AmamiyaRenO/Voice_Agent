@@ -86,6 +86,13 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# Local packaging/build artifacts
+/.build/
+/dist/
+
+# Local machine override config (keep default/sample tracked)
+/scripts/local_services.user.json
+
 # NuGet for Unity generated assets
 /[Aa]ssets/NuGetEditor/
 /[Aa]ssets/NuGetEditor.meta

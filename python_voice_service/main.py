@@ -14,6 +14,9 @@ import re
 import asyncio
 import logging
 import time
+import io
+import json
+import wave
 from collections import deque
 from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -29,6 +32,11 @@ try:  # Optional dependency used to improve resampling quality when available.
     from scipy.signal import resample_poly
 except Exception:  # pragma: no cover - SciPy is optional at runtime.
     resample_poly = None
+
+try:  # Optional dependency when using OpenAI API transcription.
+    from openai import AsyncOpenAI
+except Exception:  # pragma: no cover - openai is optional at runtime.
+    AsyncOpenAI = None
 
 APP_TITLE = "Coach Voice Agent - Python Voice Service"
 DEFAULT_SAMPLE_RATE = 16000
@@ -48,6 +56,44 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 DEFAULT_HTTP_TIMEOUT = httpx.Timeout(30.0)
+TRANSCRIBE_MODE_OFFLINE = "offline"
+TRANSCRIBE_MODE_API = "api"
+TRANSCRIBE_MODE_DEFAULT = (
+    os.getenv("TRANSCRIBE_MODE", TRANSCRIBE_MODE_OFFLINE).strip().lower() or TRANSCRIBE_MODE_OFFLINE
+)
+if TRANSCRIBE_MODE_DEFAULT not in {TRANSCRIBE_MODE_OFFLINE, TRANSCRIBE_MODE_API}:
+    TRANSCRIBE_MODE_DEFAULT = TRANSCRIBE_MODE_OFFLINE
+TRANSCRIBE_AVAILABLE_MODES = [TRANSCRIBE_MODE_OFFLINE, TRANSCRIBE_MODE_API]
+
+
+def _openai_transcribe_model() -> str:
+    return (os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe") or "gpt-4o-mini-transcribe").strip()
+
+
+def _openai_transcribe_prompt() -> str:
+    # Important: for OpenAI ASR, only send prompt when user explicitly configured it.
+    # Auto-injecting default prompt can bias decoding and cause prompt leakage/hallucinations.
+    configured = (os.getenv("OPENAI_TRANSCRIBE_PROMPT", "") or "").strip()
+    if not configured:
+        return ""
+
+    # Backward compatibility: ignore legacy auto-generated prompt text that used to be
+    # injected by default from launch triggers/game names.
+    lowered = configured.lower()
+    if (
+        lowered.startswith("english only. voice commands include launch words:")
+        and "game names include:" in lowered
+    ):
+        return ""
+    return configured
+
+
+def _openai_api_key() -> str:
+    return (os.getenv("OPENAI_API_KEY", "") or "").strip()
+
+
+def _openai_configured() -> bool:
+    return bool(_openai_api_key()) and AsyncOpenAI is not None
 
 def _resolve_whisper_model_path(raw: str) -> str:
     """Resolve WHISPER_MODEL_PATH for faster-whisper.
@@ -116,6 +162,38 @@ class _AsyncHttpClient:
             cls._client = None
 
 
+class _AsyncOpenAIClient:
+    """Singleton-style manager for a shared AsyncOpenAI client."""
+
+    _client: Optional["AsyncOpenAI"] = None
+
+    @classmethod
+    def get(cls) -> "AsyncOpenAI":
+        if AsyncOpenAI is None:
+            raise RuntimeError(
+                "OpenAI SDK is not installed. Install dependency: pip install openai"
+            )
+        api_key = _openai_api_key()
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        if cls._client is None:
+            base_url = (os.getenv("OPENAI_BASE_URL", "") or "").strip()
+            timeout_seconds = max(5.0, _environment_float("OPENAI_HTTP_TIMEOUT_SECONDS", 30.0))
+            kwargs: Dict[str, object] = {"api_key": api_key, "timeout": timeout_seconds}
+            if base_url:
+                kwargs["base_url"] = base_url
+            cls._client = AsyncOpenAI(**kwargs)
+        return cls._client
+
+    @classmethod
+    async def aclose(cls) -> None:
+        if cls._client is not None:
+            try:
+                await cls._client.close()
+            except Exception:
+                pass
+            cls._client = None
+
 logger = logging.getLogger("coach_voice_service")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
@@ -158,6 +236,28 @@ WAKE_WORD_PREFIXES = [
     for s in os.getenv("WAKE_WORD_PREFIXES", "hey, hi").split(",")
     if s.strip()
 ]
+WHISPER_OFFLINE_COMMAND_HINTS = [
+    s.strip()
+    for s in re.split(
+        r"[,\n;]+",
+        os.getenv(
+            "WHISPER_OFFLINE_COMMAND_HINTS",
+            os.getenv("WHISPER_COMMAND_HINTS", "open,back,cornhole,disc golf,disc,golf"),
+        ),
+    )
+    if s.strip()
+]
+ASR_DEFAULT_LANGUAGE = ((os.getenv("ASR_DEFAULT_LANGUAGE", "en") or "").strip() or "en")
+ASR_FORCE_LANGUAGE = (os.getenv("ASR_FORCE_LANGUAGE", "") or "").strip()
+ASR_ENGLISH_ONLY = (
+    (os.getenv("ASR_ENGLISH_ONLY", "") or "").strip().lower()
+    in {"1", "true", "t", "yes", "y", "on"}
+)
+ASR_API_LANGUAGE = ((os.getenv("ASR_API_LANGUAGE", "en") or "").strip() or "en")
+ASR_API_FORCE_LANGUAGE = (
+    (os.getenv("ASR_API_FORCE_LANGUAGE", "1") or "1").strip().lower()
+    in {"1", "true", "t", "yes", "y", "on"}
+)
 
 
 def _build_wake_word_pattern() -> re.Pattern[str]:
@@ -192,6 +292,7 @@ _KNOWN_HALLUCINATION_PHRASES = {
     "thanks for watching",
     "thank you for watching",
 }
+_ASCII_TEXT_FILTER = re.compile(r"[^A-Za-z0-9\s\.,!?:;'\-_/\\\"()\[\]{}]+")
 
 
 def _build_wake_word_prefix_pattern() -> Optional[re.Pattern[str]]:
@@ -241,6 +342,26 @@ def _canonicalize_wake_words(text: str) -> str:
         text = _WAKE_WORD_PREFIX_REGEX.sub(_replace_prefix, text)
 
     return _WAKE_WORD_REGEX.sub(WAKE_WORD, text)
+
+
+_GAME_TERM_PATTERNS = [
+    (re.compile(r"(?<!\w)corn[\s\-]*hole(?!\w)", re.IGNORECASE), "cornhole"),
+    (re.compile(r"(?<!\w)disc[\s\-]*golf(?!\w)", re.IGNORECASE), "disc golf"),
+    (re.compile(r"(?<!\w)pickle[\s\-]*ball(?!\w)", re.IGNORECASE), "pickleball"),
+]
+
+
+def _canonicalize_game_terms(text: str) -> str:
+    if not text:
+        return text
+    normalized = text
+    for pattern, replacement in _GAME_TERM_PATTERNS:
+        normalized = pattern.sub(replacement, normalized)
+    return normalized
+
+
+def _canonicalize_asr_text(text: str) -> str:
+    return _canonicalize_game_terms(_canonicalize_wake_words(text))
 
 
 def _environment_int(key: str, default: int) -> int:
@@ -512,6 +633,20 @@ class RespondConfigResponse(BaseModel):
     source: str
 
 
+class TranscribeConfigRequest(BaseModel):
+    mode: Optional[str] = Field(default=None, description="ASR mode: offline or api.")
+    reset: bool = Field(default=False, description="Clear runtime override and use env/default mode.")
+
+
+class TranscribeConfigResponse(BaseModel):
+    status: str = "ok"
+    mode: str
+    source: str
+    available_modes: List[str]
+    openai_configured: bool
+    openai_model: str
+
+
 class OllamaError(RuntimeError):
     pass
 
@@ -551,6 +686,93 @@ async def _get_effective_ollama_system_prompt() -> tuple[str, bool, str]:
             return normalized, True, "runtime"
     return _ollama_system_prompt(), False, "env_or_default"
 
+
+_RUNTIME_TRANSCRIBE_MODE: Optional[str] = None
+_RUNTIME_TRANSCRIBE_MODE_LOCK = asyncio.Lock()
+
+
+def _normalize_transcribe_mode(mode: Optional[str]) -> Optional[str]:
+    if mode is None:
+        return None
+    normalized = mode.strip().lower()
+    if not normalized:
+        return None
+    if normalized in {TRANSCRIBE_MODE_OFFLINE, "local", "whisper", "faster-whisper"}:
+        return TRANSCRIBE_MODE_OFFLINE
+    if normalized in {TRANSCRIBE_MODE_API, "openai", "online"}:
+        return TRANSCRIBE_MODE_API
+    return None
+
+
+async def _set_runtime_transcribe_mode(mode: Optional[str]) -> None:
+    global _RUNTIME_TRANSCRIBE_MODE
+    async with _RUNTIME_TRANSCRIBE_MODE_LOCK:
+        _RUNTIME_TRANSCRIBE_MODE = mode
+
+
+async def _get_runtime_transcribe_mode() -> Optional[str]:
+    async with _RUNTIME_TRANSCRIBE_MODE_LOCK:
+        return _RUNTIME_TRANSCRIBE_MODE
+
+
+async def _get_effective_transcribe_mode() -> tuple[str, str]:
+    runtime_mode = await _get_runtime_transcribe_mode()
+    if runtime_mode:
+        return runtime_mode, "runtime"
+    return TRANSCRIBE_MODE_DEFAULT, "env_or_default"
+
+
+def _duration_seconds(audio: np.ndarray, sample_rate: int) -> Optional[float]:
+    if audio.size <= 0 or sample_rate <= 0:
+        return None
+    return float(audio.size) / float(sample_rate)
+
+
+def _audio_float_to_wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
+    # OpenAI transcription endpoint accepts file-like audio payloads.
+    clipped = np.clip(audio, -1.0, 1.0)
+    pcm16 = np.asarray(clipped * 32767.0, dtype=np.int16)
+    with io.BytesIO() as buffer:
+        with wave.open(buffer, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm16.tobytes())
+        return buffer.getvalue()
+
+
+def _session_prompt_for_transcribe(
+    state: "_SessionState", now: float, *, include_command_hints: bool
+) -> str:
+    base_prompt = _wake_word_prompt(include_command_hints=include_command_hints)
+    if (
+        WHISPER_STREAM_CONTEXT_CHARS > 0
+        and state.last_text
+        and now - (state.last_ts or 0.0) <= WHISPER_STREAM_SESSION_TTL_SECONDS
+    ):
+        return (base_prompt + " " + state.last_text[-WHISPER_STREAM_CONTEXT_CHARS:]).strip()
+    return base_prompt
+
+
+def _update_transcribe_session_state(
+    *,
+    state: "_SessionState",
+    now: float,
+    audio: np.ndarray,
+    full_text: str,
+) -> None:
+    state.last_ts = now
+    state.last_text = (full_text or "").strip()
+    if WHISPER_STREAM_OVERLAP_SECONDS <= 0.0 or audio.size <= 0:
+        return
+
+    tail_samples = int(DEFAULT_SAMPLE_RATE * WHISPER_STREAM_OVERLAP_SECONDS)
+    if tail_samples <= 0:
+        return
+    if audio.size >= tail_samples:
+        state.audio_tail = np.asarray(audio[-tail_samples:], dtype=np.float32)
+    else:
+        state.audio_tail = np.asarray(audio, dtype=np.float32)
 
 def _piper_http_base_url() -> str:
     # Base URL for the Piper HTTP wrapper (piper_http.py)
@@ -601,8 +823,11 @@ async def _generate_coach_reply(user_text: str, system_override: Optional[str] =
 
 @app.on_event("startup")
 async def _startup_event() -> None:
-    # Trigger model loading during startup so the first request does not pay the cost.
-    _load_model()
+    # Trigger model loading during startup so the first offline request does not pay the cost.
+    if TRANSCRIBE_MODE_DEFAULT == TRANSCRIBE_MODE_OFFLINE:
+        _load_model()
+    else:
+        logger.info("ASR startup mode is '%s'; skipping offline model preload.", TRANSCRIBE_MODE_DEFAULT)
     # Warm the shared HTTP client so the first request can reuse an existing connection.
     _AsyncHttpClient.get()
 
@@ -610,6 +835,7 @@ async def _startup_event() -> None:
 @app.on_event("shutdown")
 async def _shutdown_event() -> None:
     await _AsyncHttpClient.aclose()
+    await _AsyncOpenAIClient.aclose()
 
 
 @app.get("/healthz")
@@ -617,7 +843,55 @@ async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def _wake_word_prompt() -> str:
+@app.get("/transcribe/config", response_model=TranscribeConfigResponse)
+async def get_transcribe_config() -> TranscribeConfigResponse:
+    mode, source = await _get_effective_transcribe_mode()
+    return TranscribeConfigResponse(
+        status="ok",
+        mode=mode,
+        source=source,
+        available_modes=TRANSCRIBE_AVAILABLE_MODES,
+        openai_configured=_openai_configured(),
+        openai_model=_openai_transcribe_model(),
+    )
+
+
+@app.post("/transcribe/config", response_model=TranscribeConfigResponse)
+async def set_transcribe_config(payload: TranscribeConfigRequest) -> TranscribeConfigResponse:
+    if payload.reset:
+        await _set_runtime_transcribe_mode(None)
+        mode, source = await _get_effective_transcribe_mode()
+        return TranscribeConfigResponse(
+            status="ok",
+            mode=mode,
+            source=source,
+            available_modes=TRANSCRIBE_AVAILABLE_MODES,
+            openai_configured=_openai_configured(),
+            openai_model=_openai_transcribe_model(),
+        )
+
+    normalized = _normalize_transcribe_mode(payload.mode)
+    if normalized is None:
+        raise HTTPException(status_code=400, detail="mode must be one of: offline, api")
+    if normalized == TRANSCRIBE_MODE_API and not _openai_configured():
+        raise HTTPException(
+            status_code=400,
+            detail="OpenAI ASR requires installed openai SDK and OPENAI_API_KEY.",
+        )
+
+    await _set_runtime_transcribe_mode(normalized)
+    mode, source = await _get_effective_transcribe_mode()
+    return TranscribeConfigResponse(
+        status="ok",
+        mode=mode,
+        source=source,
+        available_modes=TRANSCRIBE_AVAILABLE_MODES,
+        openai_configured=_openai_configured(),
+        openai_model=_openai_transcribe_model(),
+    )
+
+
+def _wake_word_prompt(*, include_command_hints: bool) -> str:
     # Include aliases to help Whisper bias toward the expected wake word variants.
     unique_terms = sorted({WAKE_WORD, *WAKE_WORD_ALIASES})
     prompt_terms: list[str] = []
@@ -629,7 +903,9 @@ def _wake_word_prompt() -> str:
         for term in unique_terms:
             prompt_terms.append(f"{prefix} {term}")
 
-    prompt_terms.extend(["open", "back", "cornhole", "disc golf", "disc",  "golf"])
+    if include_command_hints:
+        # Keep command hints for offline decoding only.
+        prompt_terms.extend(WHISPER_OFFLINE_COMMAND_HINTS)
 
     # Deduplicate while preserving the first occurrence order so the prompt stays predictable.
     ordered_terms = list(dict.fromkeys(prompt_terms))
@@ -648,6 +924,82 @@ def _normalize_language(language: Optional[str]) -> Optional[str]:
         return None
 
     return normalized
+
+
+def _effective_request_language(request_language: Optional[str]) -> Optional[str]:
+    if ASR_FORCE_LANGUAGE:
+        return _normalize_language(ASR_FORCE_LANGUAGE)
+    if request_language is None:
+        return _normalize_language(ASR_DEFAULT_LANGUAGE)
+    return _normalize_language(request_language)
+
+
+def _effective_api_request_language(request_language: Optional[str]) -> Optional[str]:
+    if ASR_API_FORCE_LANGUAGE:
+        return _normalize_language(ASR_API_LANGUAGE) or "en"
+    return _effective_request_language(request_language)
+
+
+def _sanitize_english_text(text: str) -> str:
+    cleaned = _ASCII_TEXT_FILTER.sub(" ", text or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _maybe_enforce_english_only(
+    *,
+    text: str,
+    words: List[dict],
+    language: Optional[str],
+) -> tuple[str, List[dict]]:
+    language_key = (language or "").strip().lower()
+    if not (ASR_ENGLISH_ONLY or language_key == "en"):
+        return text, words
+
+    cleaned_text = _sanitize_english_text(text)
+    if not cleaned_text:
+        return "", []
+
+    if cleaned_text == (text or "").strip():
+        return text, words
+
+    return cleaned_text, []
+
+
+def _normalize_prompt_tokens(text: str) -> List[str]:
+    return [token for token in _REPETITION_TOKEN_PATTERN.findall((text or "").lower()) if token]
+
+
+def _should_suppress_low_signal_prompt_leak(
+    *,
+    text: str,
+    prompt: str,
+    speech_fraction: float,
+    max_amplitude: float,
+    rms: float,
+) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+
+    tokens = _normalize_prompt_tokens(stripped)
+    if len(tokens) < 2 or len(tokens) > 12:
+        return False
+
+    prompt_tokens = set(_normalize_prompt_tokens(prompt))
+    if not prompt_tokens:
+        return False
+
+    covered = sum(1 for token in tokens if token in prompt_tokens)
+    coverage_ratio = covered / max(1, len(tokens))
+    if coverage_ratio < 0.8:
+        return False
+
+    return (
+        speech_fraction <= WHISPER_HALLUCINATION_MAX_SPEECH_FRACTION
+        and max_amplitude <= WHISPER_HALLUCINATION_MAX_AMPLITUDE
+        and rms <= WHISPER_HALLUCINATION_MAX_RMS
+    )
 
 
 def _collect_avg_logprobs(segments: Iterable) -> List[float]:
@@ -1095,7 +1447,7 @@ def _run_transcription(
             "min_silence_duration_ms": int(max(0, WHISPER_VAD_SILENCE_MS)),
             "speech_pad_ms": int(max(0, WHISPER_RECENT_WINDOW_PAD_MS)),
         },
-        "initial_prompt": _wake_word_prompt(),
+        "initial_prompt": _wake_word_prompt(include_command_hints=True),
         "temperature": temperature_schedule,
         "best_of": best_of,
         "length_penalty": WHISPER_LENGTH_PENALTY,
@@ -1127,16 +1479,126 @@ def _run_transcription(
     return list(segments_generator), info
 
 
+def _to_plain_dict(value: object) -> dict:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+    if hasattr(value, "dict"):
+        try:
+            dumped = value.dict()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+    return {}
+
+
+def _extract_openai_words(data: dict) -> List[dict]:
+    words_out: List[dict] = []
+    words_raw = data.get("words")
+    if isinstance(words_raw, list):
+        candidate_words = words_raw
+    else:
+        candidate_words = []
+        segments = data.get("segments")
+        if isinstance(segments, list):
+            for seg in segments:
+                if isinstance(seg, dict) and isinstance(seg.get("words"), list):
+                    candidate_words.extend(seg.get("words"))
+
+    for item in candidate_words:
+        if not isinstance(item, dict):
+            continue
+        word_text = str(item.get("word", "")).strip()
+        if not word_text:
+            continue
+        confidence_raw = item.get("probability", item.get("confidence"))
+        confidence: Optional[float] = None
+        try:
+            if confidence_raw is not None:
+                confidence = float(confidence_raw)
+        except (TypeError, ValueError):
+            confidence = None
+        words_out.append(
+            {
+                "word": _canonicalize_wake_words(word_text),
+                "start": max(0.0, float(item.get("start", 0.0) or 0.0)),
+                "end": max(0.0, float(item.get("end", 0.0) or 0.0)),
+                "confidence": round(confidence, 4) if confidence is not None else None,
+            }
+        )
+    return words_out
+
+
+async def _transcribe_with_openai(
+    *,
+    audio: np.ndarray,
+    language: Optional[str],
+    rms: float,
+    max_amplitude: float,
+    speech_fraction: float,
+    start_time: float,
+) -> dict:
+    client = _AsyncOpenAIClient.get()
+    model = _openai_transcribe_model()
+    wav_bytes = _audio_float_to_wav_bytes(audio, DEFAULT_SAMPLE_RATE)
+
+    request_kwargs = {"model": model, "file": ("speech.wav", wav_bytes, "audio/wav")}
+    if language:
+        request_kwargs["language"] = language
+    prompt = _openai_transcribe_prompt()
+    if prompt:
+        request_kwargs["prompt"] = prompt
+    result = await client.audio.transcriptions.create(**request_kwargs)
+
+    payload = _to_plain_dict(result)
+    text = str(payload.get("text", "") or getattr(result, "text", "") or "").strip()
+    text = _canonicalize_asr_text(text)
+    words: List[dict] = []
+
+    language_out = payload.get("language")
+    if not isinstance(language_out, str) or not language_out.strip():
+        language_out = language
+    if isinstance(language_out, str):
+        language_out = language_out.strip()
+    if ASR_API_FORCE_LANGUAGE:
+        language_out = _normalize_language(ASR_API_LANGUAGE) or "en"
+
+    response = {
+        "text": text,
+        "result": _build_vosk_result(words),
+        "language": language_out,
+        "duration": payload.get("duration", _duration_seconds(audio, DEFAULT_SAMPLE_RATE)),
+        "language_probability": payload.get("language_probability"),
+        "translation": False,
+        "rms": rms,
+        "max_amplitude": max_amplitude,
+        "speech_fraction": speech_fraction,
+        "provider": "openai",
+        "processing_seconds": round(time.perf_counter() - start_time, 4),
+    }
+    return response
+
+
 @app.post("/transcribe")
 async def transcribe(
     request: Request,
     sample_rate: int = Query(DEFAULT_SAMPLE_RATE, ge=8000, le=48000),
-    language: Optional[str] = Query("en", min_length=1, max_length=8),
+    language: Optional[str] = Query(None, min_length=1, max_length=8),
     beam_size: int = Query(5, ge=1, le=10),
     vad: bool = Query(True, description="Whether to enable faster-whisper VAD filter (silence trimming)."),
     vad_fallback_retry: bool = Query(True, description="If VAD removes everything and text is empty, retry once with VAD disabled."),
     session_id: Optional[str] = Query(None, description="Client/session id for streaming context and overlap."),
     hotwords: Optional[str] = Query(None, description="Optional per-request hotwords (comma/space separated)."),
+    mode: Optional[str] = Query(None, description="Optional per-request ASR mode: offline or api."),
 ) -> JSONResponse:
     start_time = time.perf_counter()
     now = time.time()
@@ -1173,9 +1635,57 @@ async def transcribe(
     rms, max_amplitude = _audio_energy_metrics(audio)
     speech_fraction = _energy_speech_fraction(audio, DEFAULT_SAMPLE_RATE)
 
+    selected_mode = _normalize_transcribe_mode(mode)
+    if mode is not None and selected_mode is None:
+        raise HTTPException(status_code=400, detail="mode must be one of: offline, api")
+    effective_mode = selected_mode
+    if effective_mode is None:
+        effective_mode, _ = await _get_effective_transcribe_mode()
+
+    request_language = language if language is not None else ASR_DEFAULT_LANGUAGE
+    if effective_mode == TRANSCRIBE_MODE_API:
+        normalized_language = _effective_api_request_language(request_language)
+    else:
+        normalized_language = _effective_request_language(request_language)
+    if effective_mode == TRANSCRIBE_MODE_API:
+        try:
+            response = await _transcribe_with_openai(
+                audio=audio,
+                language=normalized_language,
+                rms=rms,
+                max_amplitude=max_amplitude,
+                speech_fraction=speech_fraction,
+                start_time=start_time,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("OpenAI transcription failed")
+            raise HTTPException(status_code=502, detail=f"OpenAI transcription failed: {exc}") from exc
+
+        api_text, api_words = _maybe_enforce_english_only(
+            text=str(response.get("text", "") or ""),
+            words=list(response.get("result", []) or []),
+            language=str(response.get("language", normalized_language) or normalized_language),
+        )
+        response["text"] = api_text
+        response["result"] = api_words
+        response["mode"] = TRANSCRIBE_MODE_API
+        _update_transcribe_session_state(
+            state=state,
+            now=now,
+            audio=audio,
+            full_text=str(response.get("text", "") or ""),
+        )
+        return JSONResponse(response)
+
+    include_command_hints = True
+    session_prompt = _session_prompt_for_transcribe(
+        state, now, include_command_hints=include_command_hints
+    )
+
     model = _load_model()
 
-    normalized_language = _normalize_language(language)
     effective_beam_size = max(1, min(beam_size, 10))
     primary_beam_size = effective_beam_size
 
@@ -1192,11 +1702,7 @@ async def transcribe(
             # Allow per-request hotwords override (if provided).
             **({"hotwords": _parse_hotwords(hotwords)} if _parse_hotwords(hotwords) else {}),
             # If we have session context, we can optionally condition on it (helps streaming continuity).
-            "initial_prompt": (
-                (_wake_word_prompt() + " " + state.last_text[-WHISPER_STREAM_CONTEXT_CHARS :]).strip()
-                if WHISPER_STREAM_CONTEXT_CHARS > 0 and state.last_text and now - (state.last_ts or 0.0) <= WHISPER_STREAM_SESSION_TTL_SECONDS
-                else _wake_word_prompt()
-            ),
+            "initial_prompt": session_prompt,
         },
     )
 
@@ -1256,7 +1762,7 @@ async def transcribe(
             primary_beam_size,
             normalized_language,
             primary_temperatures,
-            {"vad_filter": False},
+            {"vad_filter": False, "initial_prompt": session_prompt},
         )
 
         words2: List[dict] = []
@@ -1318,16 +1824,12 @@ async def transcribe(
                 {
                     "vad_filter": bool(vad),
                     **({"hotwords": _parse_hotwords(hotwords)} if _parse_hotwords(hotwords) else {}),
-                    "initial_prompt": (
-                        (_wake_word_prompt() + " " + state.last_text[-WHISPER_STREAM_CONTEXT_CHARS :]).strip()
-                        if WHISPER_STREAM_CONTEXT_CHARS > 0 and state.last_text and now - (state.last_ts or 0.0) <= WHISPER_STREAM_SESSION_TTL_SECONDS
-                        else _wake_word_prompt()
-                    ),
+                    "initial_prompt": session_prompt,
                 },
             )
             # adopt retry result if it yields more meaningful text or better logprob
             texts_r = _collect_segment_texts(segments_r)
-            full_text_r = _canonicalize_wake_words(" ".join(texts_r).strip())
+            full_text_r = _canonicalize_asr_text(" ".join(texts_r).strip())
             avg_r_values = _collect_avg_logprobs(segments_r)
             avg_r = _mean(avg_r_values)
             if _looks_like_meaningful_text(full_text_r) and (
@@ -1359,13 +1861,13 @@ async def transcribe(
             # If retry fails, keep primary result.
             pass
 
-    full_text = _canonicalize_wake_words(full_text)
+    full_text = _canonicalize_asr_text(full_text)
 
     for word in words:
         original = word.get("word")
         if not isinstance(original, str):
             continue
-        canonical = _canonicalize_wake_words(original)
+        canonical = _canonicalize_asr_text(original)
         if canonical != original:
             word["word"] = canonical
 
@@ -1377,7 +1879,7 @@ async def transcribe(
             words = [words[index] for index in keep_indices]
             deduped_tokens = [token_strings[index] for index in keep_indices if token_strings[index]]
             if deduped_tokens:
-                full_text = _canonicalize_wake_words(" ".join(deduped_tokens).strip()) or full_text
+                full_text = _canonicalize_asr_text(" ".join(deduped_tokens).strip()) or full_text
 
     if WHISPER_SUPPRESS_KNOWN_HALLUCINATIONS:
         matched_hallucination, matched_phrase = _matches_known_hallucination_fragment(full_text)
@@ -1409,6 +1911,12 @@ async def transcribe(
                 full_text = ""
                 words = []
 
+    full_text, words = _maybe_enforce_english_only(
+        text=full_text,
+        words=words,
+        language=normalized_language,
+    )
+
     response = {
         "text": full_text,
         "result": _build_vosk_result(words),
@@ -1419,6 +1927,8 @@ async def transcribe(
         "rms": rms,
         "max_amplitude": max_amplitude,
         "speech_fraction": speech_fraction,
+        "provider": "faster-whisper",
+        "mode": TRANSCRIBE_MODE_OFFLINE,
     }
 
     if avg_logprob is not None:
@@ -1437,14 +1947,12 @@ async def transcribe(
     )
 
     # Update session state for streaming continuity
-    state.last_ts = now
-    state.last_text = full_text or state.last_text
-    if WHISPER_STREAM_OVERLAP_SECONDS > 0.0 and audio.size > 0:
-        tail_samples = int(DEFAULT_SAMPLE_RATE * WHISPER_STREAM_OVERLAP_SECONDS)
-        if tail_samples > 0 and audio.size >= tail_samples:
-            state.audio_tail = np.asarray(audio[-tail_samples:], dtype=np.float32)
-        elif tail_samples > 0:
-            state.audio_tail = np.asarray(audio, dtype=np.float32)
+    _update_transcribe_session_state(
+        state=state,
+        now=now,
+        audio=audio,
+        full_text=full_text,
+    )
 
     return JSONResponse(response)
 

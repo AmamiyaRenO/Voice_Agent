@@ -129,6 +129,17 @@ class GameManifest:
         self.alias_to_id: Dict[str, str] = {}
         self.reload()
 
+    @staticmethod
+    def _normalize_alias_key(value: str) -> str:
+        # Keep launcher matching tolerant to trailing punctuation from ASR/LLM output,
+        # e.g. "cornhole." / "disc golf.".
+        key = (value or "").strip().lower()
+        if not key:
+            return ""
+        key = key.strip(" \t\r\n.,!?;:'\"`~()[]{}<>，。！？；：")
+        key = re.sub(r"\s+", " ", key)
+        return key
+
     def reload(self) -> None:
         self.games.clear()
         self.alias_to_id.clear()
@@ -137,7 +148,7 @@ class GameManifest:
             print(f"[launcher] manifest not found: {manifest_path}")
             return
         try:
-            with manifest_path.open("r", encoding="utf-8") as handle:
+            with manifest_path.open("r", encoding="utf-8-sig") as handle:
                 data = json.load(handle)
         except Exception as exc:
             print(f"[launcher] failed to read manifest: {exc}")
@@ -164,12 +175,12 @@ class GameManifest:
 
     def _index_aliases(self, entry: GameEntry) -> None:
         for key in [entry.id, entry.name, *entry.synonyms]:
-            normalized = key.strip().lower()
+            normalized = self._normalize_alias_key(key)
             if normalized:
                 self.alias_to_id[normalized] = entry.id
 
     def resolve(self, spoken_name: str) -> Optional[GameEntry]:
-        key = (spoken_name or "").strip().lower()
+        key = self._normalize_alias_key(spoken_name)
         if not key:
             return None
         game_id = self.alias_to_id.get(key)
@@ -345,9 +356,11 @@ class GameLauncherService:
             self._stop_current(reason=command.reason or "stop")
 
     def _handle_launch(self, spoken_name: str) -> None:
+        # Reload on every launch so manifest edits from User Panel take effect immediately.
+        self.manifest.reload()
         game = self.manifest.resolve(spoken_name)
         if game is None:
-            detail = f"unknown game: {spoken_name}"
+            detail = f"unknown game: {spoken_name} (manifest={self.manifest.path})"
             print(f"[launcher] {detail}")
             self._publish_state("ERROR", detail)
             return

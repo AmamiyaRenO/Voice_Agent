@@ -106,6 +106,11 @@ public class VoskSpeechToText : MonoBehaviour
         private bool _wakeWordPrimingStopPending;
         private float _pythonLastSegmentMaxAmplitude;
         private float _pythonLastSegmentRms;
+        private bool _startListeningAfterInitialization = true;
+
+        public bool IsListening => VoiceProcessor != null && VoiceProcessor.IsRecording;
+        public bool IsInitialized => _didInit;
+        public bool IsInitializing => _isInitializing;
         void Awake()
         {
                 if (VoiceProcessor == null)
@@ -197,7 +202,7 @@ public class VoskSpeechToText : MonoBehaviour
 	/// <param name="modelPath">Unused in Python mode.</param>
 	/// <param name="startMicrophone">Should the microphone start after initialization?</param>
 	/// <param name="maxAlternatives">The maximum number of alternative phrases detected</param>
-        public void StartVoskStt(List<string> keyPhrases = null, string modelPath = default, bool startMicrophone = false, int maxAlternatives = 3)
+        public void StartVoskStt(List<string> keyPhrases = null, string modelPath = default, bool startMicrophone = true, int maxAlternatives = 3)
         {
                 if (_isInitializing)
                 {
@@ -219,6 +224,7 @@ public class VoskSpeechToText : MonoBehaviour
 		}
 
                 MaxAlternatives = maxAlternatives;
+                _startListeningAfterInitialization = startMicrophone;
 
                 StartCoroutine(StartPythonStt(startMicrophone));
         }
@@ -245,7 +251,10 @@ public class VoskSpeechToText : MonoBehaviour
                         MaxRecordLength = PythonMaxRecordLength;
                 }
 
-                ToggleRecording();
+                if (_startListeningAfterInitialization)
+                {
+                        ToggleRecording();
+                }
         }
 
 	//Wait until microphones are initialized
@@ -301,6 +310,37 @@ public class VoskSpeechToText : MonoBehaviour
                 {
                         Debug.Log("Stop Recording");
                         _running = false;
+                        VoiceProcessor.StopRecording();
+                }
+        }
+
+        public void SetListeningEnabled(bool enabled)
+        {
+                if (enabled)
+                {
+                        _startListeningAfterInitialization = true;
+                        if (_isInitializing)
+                        {
+                                return;
+                        }
+
+                        if (!_didInit)
+                        {
+                                StartVoskStt(startMicrophone: true);
+                                return;
+                        }
+
+                        if (!IsListening)
+                        {
+                                ToggleRecording();
+                        }
+                        return;
+                }
+
+                _startListeningAfterInitialization = false;
+                _running = false;
+                if (VoiceProcessor != null && VoiceProcessor.IsRecording)
+                {
                         VoiceProcessor.StopRecording();
                 }
         }

@@ -2,6 +2,14 @@
 setlocal
 cd /d "%~dp0"
 
+set "VOICE_AGENT_DEFAULT_CONFIG=%CD%\scripts\local_services.default.json"
+set "VOICE_AGENT_LAUNCHER_CONFIG=%CD%\scripts\local_services.user.json"
+
+if exist "%CD%\runtime\services\service_launcher.exe" (
+  start "" "%CD%\runtime\services\service_launcher.exe"
+  exit /b 0
+)
+
 if exist "C:\Program Files\mosquitto\mosquitto.exe" (
   set "VOICE_AGENT_MOSQUITTO_EXE=C:\Program Files\mosquitto\mosquitto.exe"
 )

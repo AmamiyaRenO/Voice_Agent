@@ -1,7 +1,7 @@
 # Voice Agent (Unity + Python Services + SDK)
 
 Voice Agent is a Unity-based voice interaction client for rehabilitation/game scenarios.  
-It integrates speech recognition, intent routing, MQTT-based robot control, and HTTP TTS playback.
+It integrates speech recognition, intent routing, MQTT-based robot control, HTTP TTS playback, and telemetry aggregation APIs.
 
 The repository also includes:
 - A Python speech service (`python_voice_service/`) for ASR + LLM reply generation.
@@ -25,6 +25,7 @@ It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for 
 - [Quick Start Paths](#quick-start-paths)
 - [Environment Requirements](#environment-requirements)
 - [Detailed Setup](#detailed-setup)
+- [Windows Packaging](#windows-packaging)
 - [Service Endpoints and MQTT Topics](#service-endpoints-and-mqtt-topics)
 - [Python SDK](#python-sdk)
 - [SDK Visualizer](#sdk-visualizer)
@@ -46,6 +47,8 @@ Unity Voice Layer (SpeechToText / VoiceGameLauncher / VoiceGameWiring)
         |                                  -> python_voice_service (ASR /respond)
         |
         +--> MQTT broker (robot/intent, robot/pi/*, robot/dialog/*, robot/tts/*)
+        |                 \
+        |                  \-> telemetry_service (voiceagent/telemetry/# -> weekly metrics API)
                    |
                    v
             Local game launcher + robot side services / hardware daemons
@@ -62,7 +65,7 @@ The maintained recognition path in this repo is `python_voice_service/main.py` (
 Assets/                   Unity scenes, scripts, prefabs, runtime components
 python_sdk/               Python client SDK for robot/voice controls
 python_voice_service/     FastAPI services (ASR, /respond, Piper/Qwen TTS wrappers)
-scripts/                  Multi-service launcher + intent/dialog helper services
+scripts/                  Multi-service launcher + intent/dialog/telemetry helper services
 docs/                     Integration guides (SDK, integration, and supporting notes)
 tests/                    Python SDK tests
 native/                   Native audio processing helpers
@@ -73,6 +76,7 @@ native/                   Native audio processing helpers
 - Unity-first voice workflow with wake-word and intent routing.
 - Optional Faster-Whisper transcription backend through FastAPI.
 - MQTT command publish for face/servo/LED and game intents.
+- Telemetry aggregation service for elder-exercise metrics (supports mock seeding).
 - Embedded remote control panel (`UserTestControlPanel`) over HTTP (default port `8787`).
 - Pluggable TTS backend on stable endpoint (`/speak`) with Piper or Qwen wrapper.
 - Python SDK parity with Unity panel actions.
@@ -140,7 +144,14 @@ Important:
 - By default, the launcher auto-starts a local MQTT broker (Mosquitto) if available.
 - `--hub-cmd` is optional and only needed when you want to override broker startup.
 - Use `--no-hub` if you already have an external broker running.
-- By default, the script starts voice service + Piper HTTP + Qwen HTTP + intent service + dialog service + game launcher.
+- By default, the script starts voice service + Piper HTTP + Qwen HTTP + intent service + dialog service + telemetry service + game launcher.
+- Launcher config file (no env var required): `scripts/local_services.user.json`
+  - Sample template: `scripts/local_services.user.sample.json`
+  - Editable from User Panel: `/runtime.html` (`/api/runtime/config`)
+  - Runtime panel stores path-like fields as absolute paths.
+  - Runtime panel supports configurable intent action phrases:
+    - launch triggers (for `LAUNCH_GAME`)
+    - exit keywords (for `BACK_HOME`)
 - Intent alias matching uses `scripts/intent_service/manifest.json` by default (override with `INTENT_MANIFEST_PATH`).
 - Game launching reads the same manifest file (override with `GAME_LAUNCHER_MANIFEST_PATH`).
 - Each game entry can include `exec`, `workdir`, `args`, and `env`; `LAUNCH_GAME` only opens a process when `exec` is configured.
@@ -157,6 +168,9 @@ python scripts/start_local_services.py --hub-cmd "mosquitto -p 1883 -v"
 
 # Optional: do not start broker (use external one)
 python scripts/start_local_services.py --no-hub
+
+# Optional: do not start telemetry service
+python scripts/start_local_services.py --no-telemetry
 ```
 
 You can also pass `--env-file` to preload environment variables.
@@ -165,16 +179,69 @@ You can also pass `--env-file` to preload environment variables.
 
 `helper.bat` now starts `scripts/start_local_services.py` from the repository root using local Python (`py -3` or `python`) and no longer depends on `Robot_opr` paths.
 
+## Windows Packaging
+
+If you want a near one-click deployment for non-programmers:
+
+1. Build Python services into `dist/services/*.exe`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\packaging\build_services_exe.ps1
+```
+
+Optional (include Qwen TTS executable):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\packaging\build_services_exe.ps1 -IncludeQwen
+```
+
+2. Put your Unity Windows build output into `dist/unity`.
+3. Build the installer (Inno Setup 6 required):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\packaging\build_installer.ps1
+```
+
+Optional (bundle Piper runtime + voice model into installer):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\packaging\build_installer.ps1 `
+  -PiperRuntimeDir "D:\runtime\piper"
+```
+
+`PiperRuntimeDir` should contain at least:
+- `piper.exe`
+- `models\*.onnx` (for example `models\en_US-lessac-medium.onnx`)
+- matching model config file (`.onnx.json` or `.json`)
+
+4. Install and run `start_voice_agent.bat`, then open:
+- `http://127.0.0.1:8787/setup.html` (first-run wizard)
+- `http://127.0.0.1:8787/games.html` (game executable path + keywords)
+
+One-command release build (services + installer, optionally bundling Piper runtime):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\packaging\build_release_oneclick.ps1 `
+  -UnityBuildDir "D:\builds\voice_agent_unity" `
+  -PiperRuntimeDir "D:\runtime\piper"
+```
+
+Installed one-click launcher behavior:
+- double-click desktop icon -> starts services + Unity + health-check wait + auto-open panel page.
+
+See full deployment notes in [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WINDOWS.md).
+
 ## Service Endpoints and MQTT Topics
 
 ### HTTP endpoints
 
 | Service | Default Port | Key Endpoints |
 |---|---:|---|
-| Unity UserTestControlPanel | `8787` | `/`, `/sdk`, `/api/speak`, `/api/llm/prompt`, `/api/vision/describe`, `/api/face`, `/api/flower`, `/api/led`, `/api/game` |
-| Python Voice Service | `8000` | `/healthz`, `/transcribe`, `/respond`, `/respond/config`, `/respond/metrics` |
+| Unity UserTestControlPanel | `8787` | `/`, `/games`, `/runtime`, `/setup`, `/sdk`, `/api/speak`, `/api/llm/prompt`, `/api/vision/describe`, `/api/face`, `/api/flower`, `/api/led`, `/api/game`, `/api/game/manifest`, `/api/runtime/config`, `/api/runtime/prereq`, `/api/runtime/ollama`, `/api/asr` |
+| Python Voice Service | `8000` | `/healthz`, `/transcribe`, `/transcribe/config`, `/respond`, `/respond/config`, `/respond/metrics` |
 | Piper wrapper | `5005` | `/speak` (GET/POST), `/speak_stream` |
 | Qwen wrapper | `5006` | `/speak` (GET/POST), `/metrics` |
+| Telemetry service | `8101` | `/healthz`, `/users`, `/dashboard`, `/metrics/user/{user_id}/weekly`, `/admin/seed-fake`, `/ingest` |
 
 ### MQTT topics (core)
 
@@ -188,8 +255,15 @@ You can also pass `--env-file` to preload environment variables.
 | `robot/dialog/answer` | publish/subscribe | Dialog answer path |
 | `robot/tts/options` | publish/subscribe | TTS voice/model/speaker options |
 | `robot/voice/text` | subscribe (intent service) | Raw recognized text input |
+| `voiceagent/telemetry/#` | publish (games), subscribe (telemetry service) | Exercise telemetry events |
 
 For payload examples, see [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+
+Telemetry quick check (mock data enabled by default):
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8101/metrics/user/demo_user/weekly?days=14
+```
 
 ## Python SDK
 
@@ -407,6 +481,8 @@ Service file: `python_voice_service/main.py`
 ### Main endpoints
 
 - `POST /transcribe` -> ASR output (Vosk-like JSON fields + metadata)
+- `GET /transcribe/config` -> read current ASR mode (`offline` or `api`)
+- `POST /transcribe/config` -> switch ASR mode at runtime
 - `POST /respond` -> LLM reply generation
 - `GET /respond/config` -> current runtime/system prompt
 - `POST /respond/config` -> set/reset runtime prompt
@@ -430,6 +506,13 @@ uvicorn main:app --host 0.0.0.0 --port 8000
   - `WHISPER_MODEL_PATH`
   - `WHISPER_DEVICE`
   - `WHISPER_COMPUTE_TYPE`
+- ASR mode / OpenAI:
+  - `TRANSCRIBE_MODE` (`offline` | `api`)
+  - `OPENAI_API_KEY`
+  - `OPENAI_TRANSCRIBE_MODEL`
+  - `OPENAI_TRANSCRIBE_PROMPT` (optional; recommended to keep empty)
+  - `ASR_API_LANGUAGE` (default `en`)
+  - `ASR_API_FORCE_LANGUAGE` (default `1`, force API requests to English)
 - Wake word normalization:
   - `WAKE_WORD`
   - `WAKE_WORD_ALIASES`
@@ -467,6 +550,11 @@ If you use Qwen TTS and Faster-Whisper together, keep separate virtual environme
   - Check microphone permission.
   - Verify Unity is configured to use the expected recognizer endpoint (`/transcribe` or your custom source).
   - Confirm Unity component references are not null.
+- OpenAI API ASR returns non-English text or unstable game words:
+  - Keep `OPENAI_TRANSCRIBE_PROMPT` empty unless you have a strict reason to set it.
+  - Prompt text is a soft bias, not a hard constraint; over-specific prompts can cause leakage/hallucination.
+  - Confirm API mode is active (`/transcribe/config`) and English forcing is enabled (`ASR_API_FORCE_LANGUAGE=1`).
+  - Restart `service_launcher` and `voice_service` after changing runtime config, because env-backed options are loaded at process start.
 - MQTT commands not received:
   - Verify broker host/port and credentials.
   - Confirm topic names match your robot-side subscribers.
