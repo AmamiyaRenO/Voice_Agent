@@ -8,6 +8,15 @@ The repository also includes:
 - A Python SDK (`python_sdk/`) for non-Unity control and automation.
 - Local orchestration scripts for multi-process development.
 
+## Recent Updates
+
+- ASR mode matrix now includes `whisper-large-v3`, `moonshine-small`, `moonshine-medium`, and `api` (OpenAI STT), with runtime switching.
+- User Panel ASR controls (`/api/asr`) now expose `available_modes`, mode switch, and listening state controls.
+- Intent routing is split into smaller modules (`manifest_resolver`, `llm_classifier`, `match_utils`) for easier maintenance and tuning.
+- Intent recognition supports both curated manifest alias matching and optional Moonshine embedding-based matching.
+- Dialog service now supports speaker-linked persistent memory with optional ONNX embeddings (MiniLM/BGE) and survives service restarts.
+- Smoke tests now default to full run (services + userpanel route contract + userpanel live checks).
+
 ## SDK Spotlight (Start Here for Integration)
 
 If your goal is to control the robot/agent from Python (without editing Unity scenes first), use:
@@ -30,6 +39,9 @@ It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for 
 - [Python SDK](#python-sdk)
 - [SDK Visualizer](#sdk-visualizer)
 - [Python Voice Service (ASR + LLM)](#python-voice-service-asr--llm)
+- [Intent Service (Routing + Manifest)](#intent-service-routing--manifest)
+- [Dialog Service (Speaker Identity + Persistent Memory)](#dialog-service-speaker-identity--persistent-memory)
+- [Runtime Config: Save vs Apply](#runtime-config-save-vs-apply)
 - [TTS Backends (Piper and Qwen)](#tts-backends-piper-and-qwen)
 - [Troubleshooting](#troubleshooting)
 - [Development and Tests](#development-and-tests)
@@ -41,23 +53,26 @@ It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for 
 Microphone / External Transcript Source
         |
         v
-Unity Voice Layer (SpeechToText / VoiceGameLauncher / VoiceGameWiring)
-        |                                \
-        |                                 \ (optional HTTP)
-        |                                  -> python_voice_service (ASR /respond)
+Unity Voice Layer (SpeechToText / VoiceGameLauncher / VoiceGameWiring / UserTestControlPanel)
+        |                \
+        |                 +--> HTTP 8000: python_voice_service (/transcribe, /respond)
         |
-        +--> MQTT broker (robot/intent, robot/pi/*, robot/dialog/*, robot/tts/*)
-        |                 \
-        |                  \-> telemetry_service (voiceagent/telemetry/# -> weekly metrics API)
-                   |
-                   v
-            Local game launcher + robot side services / hardware daemons
+        +--> MQTT broker (robot/voice/text, robot/intent, robot/dialog/*, robot/pi/*, robot/tts/*)
+               |            \
+               |             +--> intent_service (voice text -> intent/query routing)
+               |                     \
+               |                      +--> robot/intent (LAUNCH_GAME/BACK_HOME)
+               |                      +--> robot/dialog/query (QUERY)
+               |
+               +--> dialog_service (query -> /respond -> answer + memory context)
+               |
+               +--> telemetry_service (voiceagent/telemetry/# -> weekly metrics API)
 
 Unity TTS playback path:
 Unity -> HTTP GET/POST /speak (port 5005 by default) -> Piper or Qwen wrapper
 ```
 
-The maintained recognition path in this repo is `python_voice_service/main.py` (`/transcribe` with Faster-Whisper), or any custom transcript source integrated into Unity.
+The maintained recognition path in this repo is `python_voice_service/main.py` (`/transcribe` with Whisper/Moonshine/API), or any custom transcript source integrated into Unity.
 
 ## Repository Layout
 
@@ -65,32 +80,39 @@ The maintained recognition path in this repo is `python_voice_service/main.py` (
 Assets/                   Unity scenes, scripts, prefabs, runtime components
 python_sdk/               Python client SDK for robot/voice controls
 python_voice_service/     FastAPI services (ASR, /respond, Piper/Qwen TTS wrappers)
-scripts/                  Multi-service launcher + intent/dialog/telemetry helper services
+scripts/                  Multi-service launcher + helper services
+  intent_service/         MQTT intent router + manifest alias resolver + optional LLM classifier
+  dialog_service/         MQTT dialog relay + speaker-linked persistent memory
+  telemetry_service/      MQTT -> HTTP telemetry aggregation
 docs/                     Integration guides (SDK, integration, and supporting notes)
-tests/                    Python SDK tests
+tests/                    SDK tests + service smoke tests + userpanel route contract/live smoke
 native/                   Native audio processing helpers
 ```
 
 ## Features
 
 - Unity-first voice workflow with wake-word and intent routing.
-- Optional Faster-Whisper transcription backend through FastAPI.
+- ASR mode switch at runtime: `whisper-large-v3`, `moonshine-small`, `moonshine-medium`, `api`.
 - MQTT command publish for face/servo/LED and game intents.
+- Intent router with layered strategy: exact alias, fuzzy/phonetic similarity, optional LLM classifier, optional Moonshine embedding matcher.
+- Dialog service speaker identity mapping + persistent user memory (`scripts/dialog_service/user_memory.json`).
 - Telemetry aggregation service for elder-exercise metrics (supports mock seeding).
 - Embedded remote control panel (`UserTestControlPanel`) over HTTP (default port `8787`).
 - Pluggable TTS backend on stable endpoint (`/speak`) with Piper or Qwen wrapper.
 - Python SDK parity with Unity panel actions.
 - SDK Visualizer (`/sdk`) with step-by-step flow building, execution, and JSON import/export.
 - Local multi-process launcher (`scripts/start_local_services.py`).
+- Default full smoke test entrypoint (`scripts/run_smoke_tests.py`) with route coverage checks for User Panel.
 
 ## Quick Start Paths
 
-### Path A (Recommended): Unity + Python Voice Service (Faster-Whisper)
+### Path A (Recommended): Unity + Python Voice Service (Whisper/Moonshine/API)
 
 1. Set up `python_voice_service` virtual environment.
 2. Run `uvicorn main:app --host 0.0.0.0 --port 8000`.
 3. In Unity, set Python transcription URL to `http://127.0.0.1:8000/transcribe`.
 4. Keep MQTT broker running if you need robot intents/hardware controls (or use `scripts/start_local_services.py`, which can auto-start local Mosquitto).
+5. Switch ASR mode at runtime from User Panel (`/api/asr`) or `POST /transcribe/config`.
 
 ### Path B: Python SDK Only (Automation / Integration)
 
@@ -178,6 +200,12 @@ You can also pass `--env-file` to preload environment variables.
 ### 4) Optional helper.bat
 
 `helper.bat` now starts `scripts/start_local_services.py` from the repository root using local Python (`py -3` or `python`) and no longer depends on `Robot_opr` paths.
+
+Quick run:
+
+```powershell
+.\helper.bat
+```
 
 ## Windows Packaging
 
@@ -522,7 +550,121 @@ uvicorn main:app --host 0.0.0.0 --port 8000
   - `OLLAMA_MODEL`
   - `OLLAMA_SYSTEM_PROMPT`
 
+### ASR mode matrix and runtime switch
+
+| Mode | Type | Typical use |
+|---|---|---|
+| `whisper-large-v3` | local/offline | highest local accuracy baseline in this project |
+| `moonshine-medium` | local/offline | faster local inference with good command recognition |
+| `moonshine-small` | local/offline | lowest local compute cost |
+| `api` | cloud/online | OpenAI STT path (`OPENAI_API_KEY` required) |
+
+Notes:
+- Current integrated Moonshine choices in this repo are `small` and `medium`.
+- If Moonshine dependency is unavailable at service startup, `available_modes` will not include Moonshine entries.
+
+Voice service runtime switch:
+
+```powershell
+# Check active mode and available_modes
+curl http://127.0.0.1:8000/transcribe/config
+
+# Switch mode at runtime
+curl -X POST http://127.0.0.1:8000/transcribe/config `
+  -H "Content-Type: application/json" `
+  -d "{\"mode\":\"moonshine-medium\"}"
+```
+
+User Panel runtime switch (delegates to voice service):
+
+```powershell
+curl -X POST http://127.0.0.1:8787/api/asr `
+  -H "Content-Type: application/json" `
+  -d "{\"action\":\"set_mode\",\"mode\":\"moonshine-medium\"}"
+```
+
 More details are documented in [`python_voice_service/README.md`](python_voice_service/README.md).
+
+## Intent Service (Routing + Manifest)
+
+Core files:
+- `scripts/intent_service/intent_service_impl.py`: MQTT message ingress/egress and payload passthrough.
+- `scripts/intent_service/intent_routing.py`: route orchestration.
+- `scripts/intent_service/manifest_resolver.py`: manifest alias loading + canonical/fuzzy resolution.
+- `scripts/intent_service/llm_classifier.py`: optional LLM intent classification with confidence gating.
+- `scripts/intent_service/match_utils.py`: normalization, similarity, phonetic matching utilities.
+
+Routing order (high level):
+1. Wake-word gate (optional).
+2. Optional LLM classifier (`LAUNCH_GAME` / `BACK_HOME` / `QUERY`) with confidence threshold.
+3. Exact manifest alias match.
+4. BACK_HOME semantic similarity fallback.
+5. Optional Moonshine embedding intent matcher.
+6. Manifest fuzzy/phonetic fallback.
+7. Default to `QUERY` -> `robot/dialog/query`.
+
+### Manifest authoring
+
+Default manifest path:
+- `scripts/intent_service/manifest.json`
+
+Each game can define:
+- `id`, `name`, `synonyms`
+- `exec`, `workdir`, `args`, `env` (launcher-side process launch fields)
+
+Alias guidance:
+- Put likely ASR confusions in `synonyms` (for example pronunciation-near variants).
+- Keep canonical game names stable; map fuzzy variants to those canonical names.
+
+### Intent toggles and thresholds
+
+From `scripts/local_services.user.json` (`intent` section) or env:
+- `use_llm_classifier` / `INTENT_USE_LLM_CLASSIFIER`
+- `use_moonshine_intent_recognizer` / `INTENT_USE_MOONSHINE_RECOGNIZER`
+- `launch_triggers`, `exit_keywords`
+- `INTENT_BACK_HOME_SIMILARITY_THRESHOLD`
+- `INTENT_MOONSHINE_THRESHOLD`
+
+## Dialog Service (Speaker Identity + Persistent Memory)
+
+Core files:
+- `scripts/dialog_service/dialog_service_impl.py`: subscribes `robot/dialog/query`, calls `/respond`, publishes answers.
+- `scripts/dialog_service/user_memory.py`: speaker identity map + memory extraction + persistence.
+- `scripts/dialog_service/onnx_embedder.py`: optional ONNX embedding backend (MiniLM/BGE).
+- `scripts/dialog_service/dialog_config.py`: all memory/embedder runtime settings.
+
+Speaker identity key priority:
+1. `speaker_profile_id`
+2. `speaker_index` + `speaker_id` (Moonshine speaker tags)
+3. fallback `source:default`
+
+Persistence behavior:
+- Memory store path defaults to `scripts/dialog_service/user_memory.json`.
+- Identity map + profile memory are saved continuously and reused across service restarts.
+- File is intentionally gitignored as local runtime state.
+
+Embedding backends for memory retrieval:
+- MiniLM (default): `onnx-models/all-MiniLM-L6-v2-onnx`
+- BGE option: `Qdrant/bge-small-en-v1.5-onnx-Q`
+
+Useful dialog memory env vars:
+- `DIALOG_ENABLE_USER_MEMORY`
+- `DIALOG_ENABLE_USER_MEMORY_EMBEDDINGS`
+- `DIALOG_USER_MEMORY_EMBEDDER` (`minilm` or `bge`)
+- `DIALOG_USER_MEMORY_EMBEDDING_REPO_ID`
+- `DIALOG_USER_MEMORY_PATH`
+- `DIALOG_USER_MEMORY_RETRIEVE_TOP_K`
+
+## Runtime Config: Save vs Apply
+
+Not every panel save is instant for all services. Use the table below:
+
+| Operation | Endpoint | Effect timing |
+|---|---|---|
+| Save launcher/service config | `POST /api/runtime/config` | writes `scripts/local_services.user.json`; restart `scripts/start_local_services.py` to apply to managed services |
+| Save game manifest | `POST /api/game/manifest` | writes manifest immediately; restart `intent_service` and `game_launcher` for consistent pickup |
+| Switch ASR mode | `POST /api/asr` (`set_mode`) | immediate (calls voice service runtime config API) |
+| Set/reset respond system prompt | `POST /respond/config` or panel `/api/llm/prompt` | immediate |
 
 ## TTS Backends (Piper and Qwen)
 
@@ -550,11 +692,19 @@ If you use Qwen TTS and Faster-Whisper together, keep separate virtual environme
   - Check microphone permission.
   - Verify Unity is configured to use the expected recognizer endpoint (`/transcribe` or your custom source).
   - Confirm Unity component references are not null.
+- ASR dropdown shows fewer modes than expected:
+  - Check `GET /api/asr` or `GET /transcribe/config` and inspect `available_modes`.
+  - Ensure `moonshine-voice` is installed in the same venv used by `python_voice_service`.
+  - Restart voice service after dependency changes.
 - OpenAI API ASR returns non-English text or unstable game words:
   - Keep `OPENAI_TRANSCRIBE_PROMPT` empty unless you have a strict reason to set it.
   - Prompt text is a soft bias, not a hard constraint; over-specific prompts can cause leakage/hallucination.
   - Confirm API mode is active (`/transcribe/config`) and English forcing is enabled (`ASR_API_FORCE_LANGUAGE=1`).
   - Restart `service_launcher` and `voice_service` after changing runtime config, because env-backed options are loaded at process start.
+- Helper/start script raises WinError 2 (file not found):
+  - Validate Python executable paths in `scripts/local_services.user.json` (`python.asr`, `python.tts`).
+  - If paths include spaces, keep them as plain JSON strings; the launcher handles process argument splitting.
+  - Prefer launching from repo root with `python scripts/start_local_services.py` to verify baseline behavior.
 - MQTT commands not received:
   - Verify broker host/port and credentials.
   - Confirm topic names match your robot-side subscribers.
@@ -566,6 +716,14 @@ If you use Qwen TTS and Faster-Whisper together, keep separate virtual environme
 - `/respond` is slow or failing:
   - Confirm Ollama is reachable and model exists.
   - Use `/respond/metrics` for latency visibility.
+- Intent recognition misses near-pronunciation phrases:
+  - Add those variants to `scripts/intent_service/manifest.json` `synonyms`.
+  - Tune `use_moonshine_intent_recognizer` and threshold settings.
+  - Keep `launch_triggers` and `exit_keywords` focused and short to reduce false positives.
+- No LLM spoken reply from dialog path:
+  - Check `dialog_service` subscription topics: `robot/dialog/query` and `robot/tts/options`.
+  - Check `/respond` availability on port `8000`.
+  - Verify Unity TTS path is active and not blocked by backend errors.
 
 ## Development and Tests
 
@@ -586,6 +744,11 @@ Service smoke tests (intent + dialog memory pipeline):
 .\python_voice_service\.venv_asr\Scripts\python.exe scripts\run_smoke_tests.py
 ```
 
+Smoke suite composition:
+- `tests/test_smoke_services.py`: intent routing core paths, identity passthrough, dialog memory persistence/retrieval.
+- `tests/test_smoke_userpanel_contract.py`: validates every `UserTestControlPanel` route has a smoke case.
+- `tests/test_smoke_userpanel_live.py`: executes route smoke calls against live panel endpoint (`8787` by default).
+
 User Panel full API smoke (live integration against running Unity panel):
 
 ```powershell
@@ -603,7 +766,7 @@ Direct pytest target:
 ```
 
 When updating SDK behavior, keep `tests/test_voice_agent_sdk.py` aligned with API expectations.
-When updating local services (`intent_service`, `dialog_service`, `python_voice_service`) or panel APIs, run smoke tests before commit.
+When updating local services (`intent_service`, `dialog_service`, `python_voice_service`) or panel APIs, run smoke tests before commit. Default policy in this repo is full smoke first, then optional targeted reruns.
 
 ## License
 
