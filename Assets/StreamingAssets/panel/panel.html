@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Robot User Test Panel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 1.5rem; background: #0f1117; color: #f4f4f4; line-height: 1.45; }
+h1 { font-size: 1.6rem; margin-top: 0; }
+section { margin-bottom: 1.75rem; padding: 1rem; border-radius: 12px; background: rgba(255,255,255,0.05); }
+section h2 { margin-top: 0; font-size: 1.05rem; letter-spacing: 0.02em; text-transform: uppercase; opacity: 0.8; }
+button { cursor: pointer; border: none; border-radius: 8px; padding: 0.65rem 1rem; margin: 0.35rem 0.35rem 0 0; background: #7c5dfa; color: #fff; font-size: 0.95rem; font-weight: 600; box-shadow: 0 4px 20px rgba(0,0,0,0.25); transition: transform 0.1s ease, box-shadow 0.1s ease; }
+button:hover { transform: translateY(-1px); box-shadow: 0 6px 25px rgba(0,0,0,0.35); }
+button:active { transform: translateY(0); box-shadow: 0 2px 12px rgba(0,0,0,0.25); }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.65rem; }
+label { margin-right: 0.25rem; font-size: 0.85rem; opacity: 0.85; }
+input[type=number], input[type=text], select { min-width: 4rem; padding: 0.4rem 0.6rem; border-radius: 6px; border: none; background: rgba(255,255,255,0.08); color: #f4f4f4; }
+input[type=color] { width: 3rem; height: 2rem; border: none; border-radius: 6px; padding: 0; background: transparent; }
+textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0.4rem; border-radius: 8px; border: none; background: rgba(255,255,255,0.08); color: #f4f4f4; font-size: 0.95rem; resize: vertical; }
+#status { margin-top: 1rem; font-size: 0.95rem; opacity: 0.9; }
+.transcript-card { margin-bottom: 1.75rem; padding: 1.25rem; border-radius: 16px; background: linear-gradient(135deg, rgba(124,93,250,0.25), rgba(15,17,23,0.95)); border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 24px 60px rgba(0,0,0,0.45); }
+.transcript-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+.transcript-header h2 { margin: 0; font-size: 1.2rem; }
+.transcript-subtitle { font-size: 0.9rem; opacity: 0.8; margin-top: 0.25rem; }
+.ghost-btn { background: transparent; border: 1px solid rgba(255,255,255,0.35); color: #f4f4f4; padding: 0.45rem 1rem; border-radius: 999px; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; box-shadow: none; }
+.ghost-btn:hover { border-color: rgba(255,255,255,0.7); }
+.log-list { max-height: 360px; overflow-y: auto; margin-top: 1rem; padding-right: 0.25rem; }
+.log-entry { display: flex; gap: 0.75rem; padding: 0.65rem 0; border-bottom: 1px solid rgba(255,255,255,0.07); }
+.log-entry:last-child { border-bottom: none; }
+.log-icon { width: 42px; height: 42px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; font-weight: 600; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
+.log-body { flex: 1; }
+.log-meta { font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.7; display: flex; gap: 0.35rem; align-items: center; }
+.log-speaker { font-weight: 600; letter-spacing: 0.08em; }
+.log-message { margin-top: 0.2rem; font-size: 0.95rem; color: #f8fafc; }
+.log-empty { padding: 1.2rem 0; font-size: 0.9rem; opacity: 0.6; text-align: center; }
+</style>
+</head>
+<body>
+<h1>Robot User Test Panel</h1>
+<p>Connect to the same Wi-Fi network as the host running Unity and open this page from any browser.</p>
+<p><a href="/sdk.html" style="color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;">Open SDK Visualizer</a></p>
+<p><a href="/telemetry.html" style="color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;">Open Exercise Dashboard</a></p>
+<p><a href="/games.html" style="color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;">Open Game Config</a></p>
+<p><a href="/runtime.html" style="color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;">Open Runtime Config</a></p>
+<p><a href="/setup.html" style="color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;">Open First-Run Wizard</a></p>
+<div class="transcript-card">
+<div class="transcript-header">
+<div>
+<h2>Live Transcript</h2>
+<p class="transcript-subtitle">Monitor patient speech, wizard overrides, and agent coaching responses.</p>
+</div>
+<button class="ghost-btn" onclick="refreshLog()">Refresh</button>
+</div>
+<div id="transcriptLog" class="log-list"></div>
+</div>
+<section>
+<h2>LLM System Prompt</h2>
+<div class="controls" style="flex-direction:column;align-items:stretch;">
+<textarea id="llmPromptText" placeholder="Edit runtime system prompt for /respond..."></textarea>
+<div class="controls" style="width:100%;">
+<button onclick="loadLlmPrompt()">Load Prompt</button>
+<button onclick="saveLlmPrompt()">Save Prompt</button>
+<button onclick="resetLlmPrompt()">Reset Prompt</button>
+</div>
+<small style="opacity:0.75">Applied in real time by python_voice_service /respond/config.</small>
+</div>
+</section>
+<section>
+<h2>Expressions</h2>
+<div class="controls">
+<label for="faceSeconds">Duration (s)</label>
+<input id="faceSeconds" type="number" min="0" step="0.5" value="3">
+<label for="faceSelect">Preset</label>
+<select id="faceSelect">
+  <option value="">-- Select --</option>
+  <option value="neutral">neutral</option>
+  <option value="happy">happy</option>
+  <option value="excited">excited</option>
+  <option value="sad">sad</option>
+  <option value="verysad">verySad</option>
+  <option value="confused">confused</option>
+  <option value="concerned">concerned</option>
+  <option value="upset">upset</option>
+  <option disabled>──────────</option>
+  <option value="ANeutral">ANeutral</option>
+  <option value="AHappy">AHappy</option>
+  <option value="AConcerned">AConcerned</option>
+  <option value="AConfused">AConfused</option>
+  <option value="AUpset">AUpset</option>
+  <option value="BNeutral">BNeutral</option>
+  <option value="BHappy">BHappy</option>
+  <option value="BConcerned">BConcerned</option>
+  <option value="BConfused">BConfused</option>
+  <option value="BUpset">BUpset</option>
+  <option value="CNeutral">CNeutral</option>
+  <option value="CHappy">CHappy</option>
+  <option value="CConcerned">CConcerned</option>
+  <option value="CConfused">CConfused</option>
+  <option value="CUpset">CUpset</option>
+  <option value="DNeutral">DNeutral</option>
+  <option value="DHappy">DHappy</option>
+  <option value="DConcerned">DConcerned</option>
+  <option value="DConfused">DConfused</option>
+  <option value="DUpset">DUpset</option>
+</select>
+<input id="faceCustom" type="text" placeholder="custom preset name">
+</div>
+<div class="controls">
+<button onclick="facePreset('excited')">Excited</button>
+<button onclick="facePreset('happy')">Happy</button>
+<button onclick="facePreset('neutral')">Neutral</button>
+<button onclick="facePreset('sad')">Sad</button>
+<button onclick="facePreset('verySad')">Very Sad</button>
+<button onclick="faceSelected()">Send Selected</button>
+<button onclick="customFace()">Send Custom</button>
+</div>
+</section>
+<section>
+<h2>Camera</h2>
+<div class="controls" style="flex-direction:column;align-items:flex-start">
+<div class="controls">
+<button onclick="startCameraPreview()">Start Preview</button>
+<button onclick="stopCameraPreview()">Stop Preview</button>
+</div>
+<img id="cameraView" src="/camera.jpg" alt="camera" style="max-width:100%;width:640px;height:auto;border-radius:12px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 12px 36px rgba(0,0,0,0.35)"/>
+<small style="opacity:0.7">Preview keeps polling while started. Use Stop Preview to pause it.</small>
+</div>
+</section>
+<section>
+<h2>Camera Vision (LLM)</h2>
+<div class="controls" style="flex-direction:column;align-items:stretch;">
+<input id="visionModel" type="text" placeholder="Vision model (e.g. gemma3:4b)" value="gemma3:4b">
+<textarea id="visionPrompt" placeholder="Ask the model what it sees in the current camera frame...">Describe what you see and call out anything important for the current exercise.</textarea>
+<div class="controls" style="width:100%;">
+<button onclick="describeCameraNow()">Describe Current Frame</button>
+</div>
+<pre id="visionResult" style="min-height:88px;margin-top:0.4rem;padding:0.65rem 0.75rem;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.25);white-space:pre-wrap;">Result will appear here.</pre>
+</div>
+</section>
+<section>
+<h2>LED Lighting</h2>
+<div class="controls">
+<input id="ledColor" type="color" value="#00bfff">
+<label for="ledBrightness">Brightness</label>
+<input id="ledBrightness" type="number" min="0.1" max="1" step="0.1" value="0.8">
+<label for="ledPeriod">Period</label>
+<input id="ledPeriod" type="number" min="0.5" step="0.1" value="2">
+<label for="ledDuration">Duration</label>
+<input id="ledDuration" type="number" min="0" step="0.1" value="0">
+</div>
+<div class="controls">
+<button onclick="ledBreathe()">Breathe</button>
+<button onclick="ledSolid()">Solid</button>
+<button onclick="ledRandom()">Random</button>
+<button onclick="send('/api/led',{mode:'off'})">Off</button>
+</div>
+</section>
+<section>
+<h2>Flower Servo</h2>
+<div class="controls">
+<button onclick="send('/api/flower',{action:'open'})">Open</button>
+<button onclick="send('/api/flower',{action:'close'})">Close</button>
+<button onclick="send('/api/flower',{action:'open_hold'})">Hold Open</button>
+<button onclick="send('/api/flower',{action:'close_hold'})">Hold Close</button>
+<button onclick="send('/api/flower',{action:'center'})">Center</button>
+<button onclick="send('/api/flower',{action:'stop'})">Stop</button>
+<button onclick="send('/api/flower',{action:'open_slow'})">Slow Open</button>
+<button onclick="send('/api/flower',{action:'close_slow'})">Slow Close</button>
+</div>
+</section>
+<section>
+<h2>Voice &amp; TTS</h2>
+<div class="controls">
+<label for="voiceSelect">Voice</label>
+<select id="voiceSelect" onchange="setVoice(this.value)"></select>
+<label for="ttsModelSelect">TTS Model</label>
+<select id="ttsModelSelect" onchange="setTtsModel(this.value)"></select>
+</div>
+<div class="controls" style="flex-direction:column;align-items:stretch;">
+<textarea id="speakText" placeholder="Type the phrase you want the robot to say"></textarea>
+<div class="controls" style="width:100%;">
+<label for="voiceSpeed">Speed</label>
+<input id="voiceSpeed" type="number" min="0.5" max="2" step="0.1" value="1">
+<label for="voiceVolume">Volume</label>
+<input id="voiceVolume" type="number" min="0.2" max="1.5" step="0.1" value="1">
+<button onclick="speakNow()">Speak</button>
+</div>
+</div>
+</section>
+<section>
+<h2>Speech Recognition</h2>
+<div class="controls">
+<label for="asrModeSelect">ASR Mode</label>
+<select id="asrModeSelect"></select>
+<button onclick="applyAsrMode()">Apply Mode</button>
+<button onclick="refreshAsrStatus()">Refresh Status</button>
+</div>
+<div class="controls">
+<button onclick="startAgentListening()">Start Listening</button>
+<button onclick="pauseAgentListening()">Pause Listening</button>
+<span id="asrState" style="font-size:0.9rem;opacity:0.85;">Loading ASR status...</span>
+</div>
+</section>
+<section>
+<h2>Qwen TTS (Speaker + Emotion)</h2>
+<div class="controls">
+<label for="qwenSpeakerSelect">Speaker</label>
+<select id="qwenSpeakerSelect"></select>
+<label for="qwenInstruct">Emotion / Style</label>
+<input id="qwenInstruct" type="text" value="friendly" placeholder="fixed by server">
+</div>
+<div class="controls" style="flex-direction:column;align-items:stretch;">
+<textarea id="qwenSpeakText" placeholder="Text to synthesize with Qwen TTS"></textarea>
+<div class="controls" style="width:100%;">
+<button onclick="qwenSpeakNow()">Speak (Qwen)</button>
+</div>
+</div>
+</section>
+<section>
+<h2>Game Control</h2>
+<div class="controls">
+<input id="gameName" type="text" placeholder="Game ID (e.g. cornhole)">
+<button onclick="launchGame()">Launch</button>
+<button onclick="exitGame()">Exit</button>
+</div>
+</section>
+<div id="status">Ready.</div>
+<script>
+const statusEl = document.getElementById('status');
+const voiceSelect = document.getElementById('voiceSelect');
+const modelSelect = document.getElementById('ttsModelSelect');
+const qwenSpeakerSelect = document.getElementById('qwenSpeakerSelect');
+const asrModeSelect = document.getElementById('asrModeSelect');
+const asrStateEl = document.getElementById('asrState');
+const llmPromptEl = document.getElementById('llmPromptText');
+const logContainer = document.getElementById('transcriptLog');
+const cameraView = document.getElementById('cameraView');
+const logRoleStyles = {
+  user:{icon:'\uD83D\uDC64',bg:'rgba(59,130,246,0.18)',color:'#60a5fa'},
+  coach:{icon:'\uD83E\uDD16',bg:'rgba(251,146,60,0.18)',color:'#fb923c'},
+  wizard:{icon:'\uD83E\uDDEA',bg:'rgba(168,85,247,0.18)',color:'#c084fc'},
+  system:{icon:'\u2699\uFE0F',bg:'rgba(156,163,175,0.2)',color:'#d1d5db'}
+};
+function speakerFromRole(role){
+  switch(role){
+    case 'coach': return 'RACHEL';
+    case 'wizard': return 'Wizard Override';
+    case 'system': return 'System';
+    default: return 'User';
+  }
+}
+function escapeHtml(str){
+  if(!str) return '';
+  return String(str)
+    .replace(/&/g,"&amp;")
+    .replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;")
+    .replace(/'/g,"&#39;");
+}
+function formatLogTime(value){
+  if(!value) return '';
+  const date = new Date(value);
+  if(isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+}
+function renderLog(entries){
+  if(!logContainer) return;
+  if(!Array.isArray(entries) || !entries.length){
+    logContainer.innerHTML = '<div class="log-empty">Waiting for transcript...</div>';
+    return;
+  }
+  const nearBottom = (logContainer.scrollTop + logContainer.clientHeight) >= (logContainer.scrollHeight - 20);
+  const html = entries.map(entry => {
+    let role = typeof entry.role === 'string' ? entry.role.toLowerCase() : 'user';
+    const src = typeof entry.source === 'string' ? entry.source.toLowerCase() : '';
+    // 如果来源是对话服务，强制�?coach 展示，避免角色字符串异常被当�?user
+    if (src.includes('dialog_service') || src === 'dialog' || src.includes('dialog')) { role = 'coach'; }
+    // 面板触发（tester_panel）或显式标为 wizard 的，�?wizard 展示
+    if (src.includes('tester_panel') || role === 'wizard') { role = 'wizard'; }
+    const style = logRoleStyles[role] || logRoleStyles.user;
+    const speaker = escapeHtml(entry.speaker || speakerFromRole(role));
+    const text = escapeHtml(entry.message || '');
+    const timestamp = formatLogTime(entry.timestamp);
+    return `
+      <div class="log-entry">
+        <div class="log-icon" style="background:${style.bg}; color:${style.color};">${style.icon}</div>
+        <div class="log-body">
+          <div class="log-meta">
+            <span class="log-speaker">${speaker}</span>
+            ${timestamp ? `<span>${timestamp}</span>` : ''}
+          </div>
+          <div class="log-message">${text}</div>
+        </div>
+      </div>`;
+  }).join('');
+  logContainer.innerHTML = html;
+  if(nearBottom){
+    logContainer.scrollTop = logContainer.scrollHeight;
+  }
+}
+async function refreshLog(){
+  if(!logContainer) return;
+  try {
+    const resp = await fetch('/api/logs');
+    if(!resp.ok) return;
+    const data = await resp.json();
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    renderLog(entries);
+  } catch(err) {
+    console.warn('log fetch failed', err);
+  }
+}
+async function send(endpoint, payload){
+  statusEl.textContent = 'Sending ' + endpoint + ' ...';
+  try {
+    const resp = await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});
+    const data = await resp.json();
+    statusEl.textContent = data.status + ': ' + data.message;
+    return data;
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+    return null;
+  }
+}
+function parseSeconds(){
+  const seconds = parseFloat(document.getElementById('faceSeconds').value);
+  return isNaN(seconds) ? 3 : seconds;
+}
+function facePreset(name){
+  send('/api/face',{mode:name,seconds:parseSeconds()});
+}
+function customFace(){
+  const value = document.getElementById('faceCustom').value||'happy';
+  send('/api/face',{mode:'custom',value:value,seconds:parseSeconds()});
+}
+function faceSelected(){
+  const sel = document.getElementById('faceSelect');
+  if(!sel) return;
+  let value = (sel.value||'').trim();
+  if(!value){ statusEl.textContent='error: select a preset'; return; }
+  // 兼容：若用户列表里仍有空格，发送前去掉空格
+  value = value.replace(/\s+/g,'');
+  send('/api/face',{mode:value,seconds:parseSeconds()});
+}
+function ledBreathe(){
+  const color = document.getElementById('ledColor').value;
+  const brightness = parseFloat(document.getElementById('ledBrightness').value)||0.8;
+  const period = parseFloat(document.getElementById('ledPeriod').value)||2;
+  const duration = parseFloat(document.getElementById('ledDuration').value)||0;
+  send('/api/led',{mode:'breathe',color:color,brightness:brightness,period:period,duration:duration});
+}
+function ledSolid(){
+  const color = document.getElementById('ledColor').value;
+  const brightness = parseFloat(document.getElementById('ledBrightness').value)||0.8;
+  const duration = parseFloat(document.getElementById('ledDuration').value)||0;
+  send('/api/led',{mode:'solid',color:color,brightness:brightness,duration:duration});
+}
+function ledRandom(){
+  const duration = parseFloat(document.getElementById('ledDuration').value)||0;
+  send('/api/led',{mode:'random',duration:duration});
+}
+function setVoice(value){
+  if(!value) return;
+  send('/api/voice',{action:'set',voice:value});
+}
+function setTtsModel(value){
+  if(!value) return;
+  send('/api/voice',{action:'set_model',model:value});
+}
+function speakNow(){
+  const text = document.getElementById('speakText').value;
+  if(!text.trim()){
+    statusEl.textContent = 'error: enter text to speak';
+    return;
+  }
+  const speed = parseFloat(document.getElementById('voiceSpeed').value)||1;
+  const volume = parseFloat(document.getElementById('voiceVolume').value)||1;
+  const model = modelSelect ? modelSelect.value : '';
+  send('/api/speak',{text:text,voice:voiceSelect.value,model:model,speed:speed,volume:volume});
+}
+function qwenSpeakNow(){
+  const text = document.getElementById('qwenSpeakText').value;
+  if(!text.trim()){ statusEl.textContent = 'error: enter text to speak'; return; }
+  const speaker = qwenSpeakerSelect ? qwenSpeakerSelect.value : '';
+  const instruct = (document.getElementById('qwenInstruct').value||'').trim();
+  send('/api/qwen/speak',{text:text,speaker:speaker,instruct:instruct});
+}
+async function describeCameraNow(){
+  const promptEl = document.getElementById('visionPrompt');
+  const modelEl = document.getElementById('visionModel');
+  const resultEl = document.getElementById('visionResult');
+  if(resultEl){ resultEl.textContent = 'Preparing latest camera frame...'; }
+  if(statusEl){ statusEl.textContent = 'vision: preparing request...'; }
+  if(!cameraPolling){
+    cameraAutoStart = true;
+    startPolling();
+    pullCameraFrame();
+    await new Promise(resolve => setTimeout(resolve, 280));
+  }
+  const prompt = promptEl ? String(promptEl.value || '').trim() : '';
+  const model = modelEl ? String(modelEl.value || '').trim() : '';
+  const payload = { prompt: prompt };
+  if(model){ payload.model = model; }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  if(statusEl){ statusEl.textContent = 'vision: requesting /api/vision/describe ...'; }
+  try {
+    const resp = await fetch('/api/vision/describe', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    const raw = await resp.text();
+    let data = null;
+    try { data = JSON.parse(raw); } catch(err) { data = null; }
+    if(!resp.ok){
+      const msg = data && data.message ? data.message : (raw || ('HTTP ' + resp.status));
+      if(resultEl){ resultEl.textContent = 'Error: ' + msg; }
+      if(statusEl){ statusEl.textContent = 'vision error: ' + msg; }
+      return;
+    }
+    const desc = data && data.description ? String(data.description) : (raw || 'No description returned.');
+    if(resultEl){ resultEl.textContent = desc; }
+    if(statusEl){ statusEl.textContent = 'vision: done'; }
+  } catch(err){
+    const msg = (err && err.name === 'AbortError') ? 'vision request timed out' : ('vision request failed: ' + err);
+    if(resultEl){ resultEl.textContent = 'Error: ' + msg; }
+    if(statusEl){ statusEl.textContent = msg; }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+async function loadLlmPrompt(){
+  if(!llmPromptEl) return;
+  statusEl.textContent = 'Loading /api/llm/prompt ...';
+  try {
+    const resp = await fetch('/api/llm/prompt');
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){
+      const msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);
+      statusEl.textContent = 'error: ' + msg;
+      return;
+    }
+    const promptText = (typeof data.prompt === 'string') ? data.prompt : ((typeof data.system_prompt === 'string') ? data.system_prompt : '');
+    llmPromptEl.value = promptText;
+    const source = data.runtime_override_active ? 'runtime' : (data.source || 'env_or_default');
+    statusEl.textContent = 'ok: llm prompt loaded (' + source + ')';
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+async function saveLlmPrompt(){
+  if(!llmPromptEl) return;
+  const prompt = (llmPromptEl.value || '').trim();
+  if(!prompt){ statusEl.textContent = 'error: prompt required'; return; }
+  await send('/api/llm/prompt',{prompt:prompt});
+  await loadLlmPrompt();
+}
+async function resetLlmPrompt(){
+  await send('/api/llm/prompt',{reset:true});
+  await loadLlmPrompt();
+}
+function launchGame(){
+  const name = document.getElementById('gameName').value||'';
+  send('/api/game',{action:'launch',name:name});
+}
+function exitGame(){
+  send('/api/game',{action:'exit'});
+}
+function renderAsrStatus(data){
+  if(!data) return;
+  const mode = (typeof data.mode === 'string' && data.mode) ? data.mode : 'offline';
+  const listening = !!data.listening;
+  const apiReady = !!data.openai_configured;
+  if(asrStateEl){
+    const suffix = (mode === 'api' && !apiReady) ? ' | OPENAI_API_KEY missing' : '';
+    asrStateEl.textContent = `Mode: ${mode} | Listening: ${listening ? 'ON' : 'PAUSED'}${suffix}`;
+  }
+  const modes = Array.isArray(data.available_modes) ? data.available_modes : ['offline','api'];
+  if(asrModeSelect){
+    asrModeSelect.innerHTML = modes.map(v => `<option value="${v}">${v}</option>`).join('');
+    if(modes.includes(mode)){ asrModeSelect.value = mode; }
+  }
+}
+async function refreshAsrStatus(){
+  try {
+    const resp = await fetch('/api/asr');
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){
+      const msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);
+      if(asrStateEl){ asrStateEl.textContent = 'ASR error: ' + msg; }
+      return;
+    }
+    renderAsrStatus(data);
+  } catch(err){
+    if(asrStateEl){ asrStateEl.textContent = 'ASR error: ' + err; }
+  }
+}
+async function applyAsrMode(){
+  const mode = asrModeSelect ? String(asrModeSelect.value || '').trim() : '';
+  if(!mode){ statusEl.textContent = 'error: select ASR mode'; return; }
+  const data = await send('/api/asr',{action:'set_mode',mode:mode});
+  if(data && data.status === 'ok'){
+    renderAsrStatus(data);
+  }
+}
+async function startAgentListening(){
+  const data = await send('/api/asr',{action:'start_listening'});
+  if(data && data.status === 'ok'){ renderAsrStatus(data); }
+}
+async function pauseAgentListening(){
+  const data = await send('/api/asr',{action:'pause_listening'});
+  if(data && data.status === 'ok'){ renderAsrStatus(data); }
+}
+async function loadVoiceOptions(){
+  try {
+    const resp = await fetch('/api/voice/options');
+    if(!resp.ok){ return; }
+    const data = await resp.json();
+    const voices = Array.isArray(data.voices) ? data.voices : [];
+    voiceSelect.innerHTML = voices.map(v => `<option value="${v}">${v}</option>`).join('');
+    const current = typeof data.current === 'string' ? data.current : '';
+    if(current && voices.includes(current)){
+      voiceSelect.value = current;
+    } else if(voices.length){
+      voiceSelect.value = voices[0];
+    }
+    const models = Array.isArray(data.models) ? data.models : [];
+    if(modelSelect){
+      modelSelect.innerHTML = models.map(v => `<option value="${v}">${v}</option>`).join('');
+      const modelCurrent = typeof data.modelCurrent === 'string' ? data.modelCurrent : '';
+      if(modelCurrent && models.includes(modelCurrent)){
+        modelSelect.value = modelCurrent;
+      } else if(models.length){
+        modelSelect.value = models[0];
+      }
+    }
+  } catch(err) {
+    console.warn('voice options failed', err);
+  }
+}
+async function loadQwenOptions(){
+  if(!qwenSpeakerSelect) return;
+  try {
+    const resp = await fetch('/api/qwen/options');
+    if(!resp.ok){ return; }
+    const data = await resp.json();
+    const speakers = Array.isArray(data.speakers) ? data.speakers : [];
+    qwenSpeakerSelect.innerHTML = speakers.map(v => `<option value="${v}">${v}</option>`).join('');
+    const current = typeof data.current === 'string' ? data.current : '';
+    if(current && speakers.includes(current)){ qwenSpeakerSelect.value = current; }
+    else if(speakers.length){ qwenSpeakerSelect.value = speakers[0]; }
+  } catch(err) { console.warn('qwen options failed', err); }
+}
+if(logContainer){ renderLog([]); }
+refreshLog();
+setInterval(refreshLog, 4000);
+loadVoiceOptions();
+loadQwenOptions();
+refreshAsrStatus();
+setInterval(refreshAsrStatus, 5000);
+loadLlmPrompt();
+let cameraPolling = false;
+let cameraSeq = 0;
+let cameraLastLoadAt = 0;
+let cameraLastSetAt = 0;
+let cameraRequestInFlight = false;
+let cameraRequestStartedAt = 0;
+let cameraPullTimer = null;
+let cameraWatchdogTimer = null;
+let cameraHeartbeatTimer = null;
+let cameraAutoStart = false;
+function cameraHeartbeat(){
+  fetch('/api/camera/ping',{method:'POST',cache:'no-store'}).catch(()=>{});
+}
+function pullCameraFrame(){
+  if(!cameraView) return;
+  const now = Date.now();
+  if(cameraRequestInFlight && (now - cameraRequestStartedAt) < 1800){ return; }
+  cameraSeq++;
+  cameraLastSetAt = now;
+  cameraRequestInFlight = true;
+  cameraRequestStartedAt = now;
+  cameraView.src = '/camera.jpg?t=' + cameraLastSetAt + '&n=' + cameraSeq;
+}
+function cameraWatchdog(){
+  if(!cameraView) return;
+  const now = Date.now();
+  if(cameraRequestInFlight && (now - cameraRequestStartedAt) > 2500){
+    cameraRequestInFlight = false;
+  }
+  if(cameraLastSetAt > 0 && (now - cameraLastSetAt) > 2200 && (now - cameraLastLoadAt) > 2200){
+    pullCameraFrame();
+  }
+}
+function startPolling(){
+  if(cameraPolling) return;
+  cameraPolling = true;
+  cameraView.onload = () => { cameraLastLoadAt = Date.now(); cameraRequestInFlight = false; };
+  cameraView.onerror = () => { cameraRequestInFlight = false; setTimeout(pullCameraFrame, 250); };
+  cameraHeartbeat();
+  pullCameraFrame();
+  cameraPullTimer = setInterval(pullCameraFrame, 1000);
+  cameraWatchdogTimer = setInterval(cameraWatchdog, 1000);
+  cameraHeartbeatTimer = setInterval(cameraHeartbeat, 1000);
+}
+function stopPolling(){
+  cameraPolling = false;
+  cameraRequestInFlight = false;
+  if(cameraPullTimer){ clearInterval(cameraPullTimer); cameraPullTimer = null; }
+  if(cameraWatchdogTimer){ clearInterval(cameraWatchdogTimer); cameraWatchdogTimer = null; }
+  if(cameraHeartbeatTimer){ clearInterval(cameraHeartbeatTimer); cameraHeartbeatTimer = null; }
+}
+function startCameraPreview(){
+  cameraAutoStart = true;
+  startPolling();
+  pullCameraFrame();
+}
+function stopCameraPreview(){
+  cameraAutoStart = false;
+  stopPolling();
+  if(cameraView){ cameraView.removeAttribute('src'); }
+}
+document.addEventListener('visibilitychange', () => {
+  if(cameraAutoStart){
+    startPolling();
+    setTimeout(pullCameraFrame, 30);
+    setTimeout(pullCameraFrame, 200);
+  }
+});
+window.addEventListener('focus', () => { if(cameraAutoStart){ startPolling(); setTimeout(pullCameraFrame, 30); } });
+document.addEventListener('fullscreenchange', () => {
+  if(cameraAutoStart){
+    startPolling();
+    setTimeout(pullCameraFrame, 30);
+  }
+});
+window.addEventListener('beforeunload', stopPolling);
+function initCamera(){ if(!cameraView) return; if(cameraAutoStart){ startPolling(); } }
+initCamera();
+</script>
+</body>
+</html>

@@ -442,9 +442,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: f217616079a9a74489a1ae3cd9178787, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  # ModelPath removed
   UsePythonService: 1
-  PythonServiceUrl: http://127.0.0.1:8000/transcribe
+  PythonServiceUrl: "http://127.0.0.1:8000/transcribe"
   PythonServiceLanguage: 
   PythonServiceBeamSize: 5
   PythonServiceSilenceThreshold: 0.02

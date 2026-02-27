@@ -1,0 +1,672 @@
+﻿<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Voice Agent SDK Visualizer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:'Segoe UI',sans-serif;margin:0;background:#0b1220;color:#e2e8f0;padding:1.25rem;}
+h1{margin:.25rem 0 .5rem 0;font-size:1.35rem;} p{opacity:.9;}
+.wrap{display:grid;grid-template-columns:320px 1fr;gap:1rem;}
+.card{background:#111a2e;border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:1rem;}
+label{display:block;font-size:.82rem;opacity:.85;margin:.35rem 0;}
+select,input,textarea,button{width:100%;box-sizing:border-box;border-radius:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;padding:.6rem;}
+textarea{min-height:240px;font-family:Consolas,monospace;font-size:.85rem;}
+button{background:#2563eb;border:none;font-weight:700;cursor:pointer;margin-top:.6rem;}
+button.secondary{background:#334155;}
+pre{background:#020617;border:1px solid rgba(148,163,184,.25);padding:.75rem;border-radius:8px;overflow:auto;min-height:260px;}
+.mono{font-family:Consolas,monospace;font-size:.82rem;}
+.flow-grid{display:grid;grid-template-columns:280px 1fr 1fr;gap:1rem;margin-top:1rem;}
+.template-list{display:flex;flex-direction:column;gap:.5rem;max-height:360px;overflow:auto;padding-right:.2rem;}
+.template-item{border:1px dashed rgba(125,211,252,.45);border-radius:8px;padding:.55rem .6rem;background:rgba(15,23,42,.55);cursor:grab;font-size:.82rem;}
+.template-item.utility{border-color:rgba(251,191,36,.55);}
+.flow-canvas{min-height:380px;border:1px dashed rgba(148,163,184,.4);border-radius:12px;padding:.7rem;background:rgba(2,6,23,.45);display:flex;flex-direction:column;gap:.65rem;}
+.flow-empty{opacity:.75;border:1px dashed rgba(148,163,184,.35);border-radius:8px;padding:.8rem;text-align:center;}
+.flow-step{border:1px solid rgba(148,163,184,.35);border-radius:10px;padding:.6rem;background:#0f172a;}
+.flow-step.selected{border-color:#60a5fa;}
+.flow-step.running{border-color:#f59e0b;box-shadow:0 0 0 1px rgba(245,158,11,.35) inset;}
+.flow-step.ok{border-color:#10b981;}
+.flow-step.error{border-color:#ef4444;}
+.flow-head{display:flex;align-items:center;gap:.5rem;justify-content:space-between;margin-bottom:.4rem;}
+.flow-title{font-weight:700;font-size:.83rem;}
+.flow-body{display:flex;flex-direction:column;gap:.45rem;}
+.flow-row{display:flex;gap:.5rem;align-items:center;}
+.flow-row > *{margin-top:0;}
+.flow-small{font-size:.78rem;opacity:.82;}
+.flow-chip{display:inline-block;padding:.15rem .45rem;border-radius:999px;font-size:.72rem;border:1px solid rgba(148,163,184,.35);}
+.flow-chip.api{color:#93c5fd;border-color:rgba(147,197,253,.5);}
+.flow-chip.delay{color:#fcd34d;border-color:rgba(252,211,77,.55);}
+.flow-chip.cond{color:#86efac;border-color:rgba(134,239,172,.55);}
+.flow-chip.keyword{color:#f9a8d4;border-color:rgba(249,168,212,.55);}
+.flow-actions{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.3rem;}
+.flow-actions button{width:auto;padding:.45rem .65rem;font-size:.8rem;margin-top:0;}
+.flow-step button{width:auto;padding:.32rem .5rem;font-size:.76rem;margin-top:0;background:#1e293b;border:1px solid rgba(148,163,184,.35);}
+.flow-editor{border:1px solid rgba(148,163,184,.3);border-radius:10px;padding:.65rem;background:#0b1326;}
+.flow-editor textarea{min-height:130px;}
+.flow-inline{display:flex;gap:.5rem;align-items:center;}
+.flow-inline input[type="checkbox"]{width:auto;}
+@media(max-width:900px){.wrap{grid-template-columns:1fr;}}
+@media(max-width:1200px){.flow-grid{grid-template-columns:1fr;}}
+</style>
+</head>
+<body>
+<h1>SDK Visualizer</h1>
+<p>This page calls the same <span class="mono">/api/*</span> routes as <span class="mono">python_sdk/voice_agent_sdk/client.py</span>.</p>
+<p><a href="/index.html" style="color:#93c5fd;">Back to User Panel</a></p>
+<div class="wrap">
+<div class="card">
+<label for="sdkMethod">SDK Method</label>
+<select id="sdkMethod"></select>
+<label for="sdkEndpoint">HTTP Endpoint</label>
+<input id="sdkEndpoint" readonly>
+<label for="sdkPayload">JSON Payload</label>
+<textarea id="sdkPayload"></textarea>
+<button onclick="invokeSdk()">Invoke</button>
+<button class="secondary" onclick="resetPayload()">Reset Payload</button>
+</div>
+<div class="card">
+<div class="mono" id="sdkStatus">Ready.</div>
+<h3>Response</h3>
+<pre id="sdkResp"></pre>
+</div>
+</div>
+<div class="card" style="margin-top:1rem;">
+<h2 style="margin:.1rem 0 .45rem 0;font-size:1.12rem;">Flow Builder (Phase 1)</h2>
+<p class="flow-small">Drag templates into canvas, edit step params, then run sequentially.</p>
+<div class="flow-grid">
+<div>
+<h3 style="margin:.2rem 0 .45rem 0;">Templates</h3>
+<div id="flowTemplates" class="template-list"></div>
+<div class="flow-small">Includes all SDK API methods plus utility Delay/Condition nodes.</div>
+</div>
+<div>
+<h3 style="margin:.2rem 0 .45rem 0;">Canvas</h3>
+<div class="flow-actions">
+<button id="flowRunBtn" type="button">Run Flow</button>
+<button id="flowStopBtn" class="secondary" type="button">Stop</button>
+<button id="flowClearBtn" class="secondary" type="button">Clear</button>
+<button id="flowExportBtn" class="secondary" type="button">Export</button>
+<button id="flowImportBtn" class="secondary" type="button">Import</button>
+</div>
+<div id="flowCanvas" class="flow-canvas"></div>
+<label for="flowJson">Flow JSON</label>
+<textarea id="flowJson" style="min-height:135px;"></textarea>
+</div>
+<div>
+<h3 style="margin:.2rem 0 .45rem 0;">Step Editor</h3>
+<div id="flowEditor" class="flow-empty">Select a step to edit.</div>
+<h3 style="margin:.8rem 0 .45rem 0;">Run Log</h3>
+<pre id="flowLog" style="min-height:210px;"></pre>
+<div id="flowStatus" class="mono">Idle.</div>
+</div>
+</div>
+</div>
+<script>
+const sdkMap = {
+  'speak(text,voice,model,speed,volume)': { endpoint:'/api/speak', payload:{ text:'Hello from SDK visualizer', voice:'en_US', model:'', speed:1.0, volume:1.0 } },
+  'qwen_speak(text,speaker,instruct)': { endpoint:'/api/qwen/speak', payload:{ text:'Hello from Qwen', speaker:'Ryan', instruct:'friendly' } },
+  'set_tts_options(voice,model)': { endpoint:'/api/voice', payload:{ action:'set', voice:'en_US' } },
+  'set_tts_model(model)': { endpoint:'/api/voice', payload:{ action:'set_model', model:'' } },
+  'get_llm_prompt()': { endpoint:'/api/llm/prompt', method:'GET', payload:{} },
+  'set_llm_prompt(prompt)': { endpoint:'/api/llm/prompt', payload:{ prompt:'You are a concise coach. Keep replies under 2 sentences.' } },
+  'reset_llm_prompt()': { endpoint:'/api/llm/prompt', payload:{ reset:true } },
+  'describe_camera(prompt,model)': { endpoint:'/api/vision/describe', payload:{ prompt:'Describe what you see in the current camera frame.', model:'gemma3:4b' } },
+  'launch_game(name)': { endpoint:'/api/game', payload:{ action:'launch', name:'cornhole' } },
+  'exit_game()': { endpoint:'/api/game', payload:{ action:'exit' } },
+  'face_preset(mode,seconds)': { endpoint:'/api/face', payload:{ mode:'happy', seconds:3 } },
+  'flower_open()': { endpoint:'/api/flower', payload:{ action:'open' } },
+  'led_breathe(color,brightness,period,duration)': { endpoint:'/api/led', payload:{ mode:'breathe', color:'#00BFFF', brightness:0.8, period:2, duration:2 } }
+};
+const methodEl = document.getElementById('sdkMethod');
+const endpointEl = document.getElementById('sdkEndpoint');
+const payloadEl = document.getElementById('sdkPayload');
+const statusEl = document.getElementById('sdkStatus');
+const respEl = document.getElementById('sdkResp');
+const methods = Object.keys(sdkMap);
+const flowTemplatesEl = document.getElementById('flowTemplates');
+const flowCanvasEl = document.getElementById('flowCanvas');
+const flowEditorEl = document.getElementById('flowEditor');
+const flowLogEl = document.getElementById('flowLog');
+const flowJsonEl = document.getElementById('flowJson');
+const flowStatusEl = document.getElementById('flowStatus');
+const flowRunBtn = document.getElementById('flowRunBtn');
+const flowStopBtn = document.getElementById('flowStopBtn');
+const flowClearBtn = document.getElementById('flowClearBtn');
+const flowExportBtn = document.getElementById('flowExportBtn');
+const flowImportBtn = document.getElementById('flowImportBtn');
+let flowSteps = [];
+let flowSelectedId = '';
+let flowRunToken = 0;
+let flowRunning = false;
+let dragTemplateKey = '';
+let dragStepId = '';
+methodEl.innerHTML = methods.map(m => `<option value="${m}">${m}</option>`).join('');
+function syncMethod(){
+  const m = methodEl.value;
+  const cfg = sdkMap[m];
+  endpointEl.value = cfg.endpoint;
+  payloadEl.value = JSON.stringify(cfg.payload, null, 2);
+  respEl.textContent = '';
+}
+function resetPayload(){ syncMethod(); }
+function cloneValue(v){ return JSON.parse(JSON.stringify(v)); }
+function makeStepId(){ return 'step_' + Math.random().toString(36).slice(2, 10); }
+function escapeHtml(value){
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+async function invokeSdk(){
+  const cfg = sdkMap[methodEl.value] || { endpoint:endpointEl.value, payload:{} };
+  const endpoint = endpointEl.value;
+  const httpMethod = String(cfg.method || 'POST').toUpperCase();
+  let payload = {};
+  try { payload = JSON.parse(payloadEl.value || '{}'); }
+  catch(err){ statusEl.textContent = 'Invalid JSON: ' + err; return; }
+  statusEl.textContent = httpMethod + ' ' + endpoint + ' ...';
+  try {
+    const req = httpMethod === 'GET'
+      ? { method:'GET' }
+      : { method:httpMethod, headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) };
+    const resp = await fetch(endpoint, req);
+    const txt = await resp.text();
+    statusEl.textContent = `HTTP ${resp.status} ${resp.statusText}`;
+    try { respEl.textContent = JSON.stringify(JSON.parse(txt), null, 2); }
+    catch { respEl.textContent = txt; }
+  } catch(err){
+    statusEl.textContent = 'Request failed: ' + err;
+  }
+}
+async function callEndpoint(endpoint, httpMethod, payload){
+  const method = String(httpMethod || 'POST').toUpperCase();
+  const req = method === 'GET'
+    ? { method:'GET' }
+    : { method:method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload || {}) };
+  const resp = await fetch(endpoint, req);
+  const raw = await resp.text();
+  let json = null;
+  try { json = JSON.parse(raw); } catch (err) { }
+  return { ok:resp.ok, status:resp.status, statusText:resp.statusText, raw:raw, json:json };
+}
+function buildTemplateCatalog(){
+  const apiTemplates = methods.map(m => ({ key:'api:' + m, label:m, kind:'api' }));
+  apiTemplates.push({ key:'util:delay', label:'delay(ms)', kind:'delay' });
+  apiTemplates.push({ key:'util:condition', label:'condition(expr)', kind:'condition' });
+  apiTemplates.push({ key:'util:keyword_wait', label:'wait_keyword(keyword)', kind:'condition' });
+  return apiTemplates;
+}
+const templateCatalog = buildTemplateCatalog();
+function createStepFromTemplate(key){
+  if(!key) return null;
+  if(key.startsWith('api:')){
+    const methodName = key.slice(4);
+    const cfg = sdkMap[methodName];
+    if(!cfg) return null;
+    return {
+      id: makeStepId(),
+      type: 'api',
+      name: methodName,
+      endpoint: cfg.endpoint,
+      method: String(cfg.method || 'POST').toUpperCase(),
+      payload: cloneValue(cfg.payload || {}),
+      continueOnError: false
+    };
+  }
+  if(key === 'util:delay'){
+    return { id: makeStepId(), type:'delay', name:'delay(ms)', delayMs:600 };
+  }
+  if(key === 'util:condition'){
+    return { id: makeStepId(), type:'condition', name:'condition(expr)', expression:'ctx.lastStatus >= 200 && ctx.lastStatus < 300' };
+  }
+  if(key === 'util:keyword_wait'){
+    return { id: makeStepId(), type:'keyword_wait', name:'wait_keyword', keyword:'thanks', timeoutMs:12000, pollMs:350, source:'user', caseSensitive:false, onlyNew:true };
+  }
+  return null;
+}
+function exportFlowData(){
+  return flowSteps.map(step => {
+    if(step.type === 'api'){
+      return { type:'api', name:step.name || '', endpoint:step.endpoint || '', method:step.method || 'POST', payload:cloneValue(step.payload || {}), continueOnError:!!step.continueOnError };
+    }
+    if(step.type === 'delay'){
+      return { type:'delay', name:step.name || 'delay(ms)', delayMs:Math.max(0, Number(step.delayMs) || 0) };
+    }
+    if(step.type === 'condition'){
+      return { type:'condition', name:step.name || 'condition(expr)', expression:String(step.expression || '').trim() };
+    }
+    if(step.type === 'keyword_wait'){
+      return { type:'keyword_wait', name:step.name || 'wait_keyword', keyword:String(step.keyword || ''), timeoutMs:Math.max(100, Number(step.timeoutMs) || 12000), pollMs:Math.max(100, Number(step.pollMs) || 350), source:String(step.source || 'user'), caseSensitive:!!step.caseSensitive, onlyNew:step.onlyNew !== false };
+    }
+    return { type:'unknown' };
+  });
+}
+function syncFlowJson(){ flowJsonEl.value = JSON.stringify(exportFlowData(), null, 2); }
+function appendFlowLog(line){
+  const ts = new Date().toLocaleTimeString();
+  const nextLine = `[${ts}] ${line}`;
+  if(!flowLogEl.textContent){ flowLogEl.textContent = nextLine; }
+  else { flowLogEl.textContent += '\n' + nextLine; }
+  flowLogEl.scrollTop = flowLogEl.scrollHeight;
+}
+function moveStepBefore(stepId, targetId){
+  const srcIndex = flowSteps.findIndex(s => s.id === stepId);
+  const targetIndex = flowSteps.findIndex(s => s.id === targetId);
+  if(srcIndex < 0 || targetIndex < 0 || srcIndex === targetIndex) return;
+  const src = flowSteps[srcIndex];
+  flowSteps.splice(srcIndex, 1);
+  const nextTargetIndex = flowSteps.findIndex(s => s.id === targetId);
+  flowSteps.splice(nextTargetIndex, 0, src);
+}
+function moveStepToEnd(stepId){
+  const idx = flowSteps.findIndex(s => s.id === stepId);
+  if(idx < 0) return;
+  const src = flowSteps[idx];
+  flowSteps.splice(idx, 1);
+  flowSteps.push(src);
+}
+function keywordMatch(text, keyword, caseSensitive){
+  const src = String(text || '');
+  const kw = String(keyword || '').trim();
+  if(!kw) return false;
+  if(caseSensitive) return src.includes(kw);
+  return src.toLowerCase().includes(kw.toLowerCase());
+}
+async function fetchLatestLogEntry(sourceMode){
+  const resp = await fetch('/api/logs');
+  if(!resp.ok) return null;
+  const data = await resp.json();
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  const mode = String(sourceMode || 'user').toLowerCase();
+  for(let i = entries.length - 1; i >= 0; i--){
+    const e = entries[i] || {};
+    const role = String(e.role || '').toLowerCase();
+    const source = String(e.source || '').toLowerCase();
+    const message = String(e.message || e.text || '').trim();
+    if(!message) continue;
+    if(mode === 'user'){
+      const isUserLike = role === 'user' || source.includes('whisper') || source.includes('voice');
+      if(!isUserLike) continue;
+    } else if(mode === 'coach'){
+      const isCoachLike = role === 'coach' || source.includes('dialog');
+      if(!isCoachLike) continue;
+    }
+    const ts = String(e.timestamp || '');
+    return { text:message, role:role, source:source, timestamp:ts, key:ts + '|' + message };
+  }
+  return null;
+}
+function renderTemplates(){
+  flowTemplatesEl.innerHTML = templateCatalog.map(t => `<div class="template-item ${t.kind === 'api' ? '' : 'utility'}" draggable="true" data-template="${t.key}">${escapeHtml(t.label)}</div>`).join('');
+  flowTemplatesEl.querySelectorAll('.template-item').forEach(el => {
+    el.addEventListener('dragstart', ev => {
+      dragTemplateKey = ev.currentTarget.getAttribute('data-template') || '';
+      dragStepId = '';
+    });
+  });
+}
+function renderFlowCanvas(){
+  if(!flowSteps.length){
+    flowCanvasEl.innerHTML = '<div class="flow-empty">Drop templates here to build a flow.</div>';
+    syncFlowJson();
+    renderStepEditor();
+    return;
+  }
+  flowCanvasEl.innerHTML = flowSteps.map((step, index) => {
+    const cls = ['flow-step'];
+    if(step.id === flowSelectedId) cls.push('selected');
+    if(step._state === 'ok') cls.push('ok');
+    if(step._state === 'error') cls.push('error');
+    if(step._state === 'running') cls.push('running');
+    const chipClass = step.type === 'api' ? 'api' : (step.type === 'delay' ? 'delay' : (step.type === 'keyword_wait' ? 'keyword' : 'cond'));
+    const title = step.type === 'api' ? step.name : (step.name || step.type);
+    const summary = step.type === 'api' ? (step.endpoint || '') : (step.type === 'condition' ? (step.expression || '') : (step.type === 'keyword_wait' ? (`keyword="${step.keyword || ''}" timeout=${Number(step.timeoutMs || 12000)}ms`) : (String(step.delayMs || 0) + ' ms')));
+    return `<div class="${cls.join(' ')}" draggable="true" data-step-id="${step.id}"><div class="flow-head"><div><span class="flow-chip ${chipClass}">${step.type}</span> <span class="flow-title">${index + 1}. ${escapeHtml(title)}</span></div><div class="flow-actions"><button type="button" data-action="select" data-id="${step.id}">Edit</button><button type="button" data-action="up" data-id="${step.id}">Up</button><button type="button" data-action="down" data-id="${step.id}">Down</button><button type="button" data-action="delete" data-id="${step.id}">Delete</button></div></div><div class="flow-small">${escapeHtml(summary)}</div></div>`;
+  }).join('');
+  flowCanvasEl.querySelectorAll('.flow-step').forEach(el => {
+    el.addEventListener('dragstart', ev => {
+      dragStepId = ev.currentTarget.getAttribute('data-step-id') || '';
+      dragTemplateKey = '';
+    });
+    el.addEventListener('dragover', ev => ev.preventDefault());
+    el.addEventListener('drop', ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const targetId = ev.currentTarget.getAttribute('data-step-id');
+      if(dragTemplateKey){
+        const step = createStepFromTemplate(dragTemplateKey);
+        if(step){
+          const idx = flowSteps.findIndex(s => s.id === targetId);
+          const insertAt = idx < 0 ? flowSteps.length : idx;
+          flowSteps.splice(insertAt, 0, step);
+          flowSelectedId = step.id;
+          renderFlowCanvas();
+        }
+      } else if(dragStepId && dragStepId !== targetId){
+        moveStepBefore(dragStepId, targetId);
+        renderFlowCanvas();
+      }
+      dragTemplateKey = '';
+      dragStepId = '';
+    });
+  });
+  syncFlowJson();
+  renderStepEditor();
+}
+function renderStepEditor(){
+  const step = flowSteps.find(s => s.id === flowSelectedId);
+  if(!step){
+    flowEditorEl.innerHTML = '<div class="flow-empty">Select a step to edit.</div>';
+    return;
+  }
+  if(step.type === 'api'){
+    flowEditorEl.innerHTML = `<div class="flow-editor"><div class="flow-small">Type: API</div><label>Step Name</label><input id="editName" value="${escapeHtml(step.name || '')}"><label>Endpoint</label><input id="editEndpoint" value="${escapeHtml(step.endpoint || '')}"><label>HTTP Method</label><select id="editMethod"><option value="POST">POST</option><option value="GET">GET</option></select><div class="flow-inline"><input type="checkbox" id="editContinue"><label for="editContinue" style="margin:0;">Continue on error</label></div><label>Payload JSON</label><textarea id="editPayload"></textarea><div id="editMsg" class="flow-small mono"></div></div>`;
+    const nameEl = document.getElementById('editName');
+    const endpointEditEl = document.getElementById('editEndpoint');
+    const methodEditEl = document.getElementById('editMethod');
+    const continueEl = document.getElementById('editContinue');
+    const payloadEditEl = document.getElementById('editPayload');
+    const msgEl = document.getElementById('editMsg');
+    methodEditEl.value = String(step.method || 'POST').toUpperCase();
+    continueEl.checked = !!step.continueOnError;
+    payloadEditEl.value = JSON.stringify(step.payload || {}, null, 2);
+    nameEl.addEventListener('input', () => { step.name = nameEl.value; renderFlowCanvas(); });
+    endpointEditEl.addEventListener('input', () => { step.endpoint = endpointEditEl.value; syncFlowJson(); renderFlowCanvas(); });
+    methodEditEl.addEventListener('change', () => { step.method = methodEditEl.value; syncFlowJson(); renderFlowCanvas(); });
+    continueEl.addEventListener('change', () => { step.continueOnError = continueEl.checked; syncFlowJson(); });
+    payloadEditEl.addEventListener('change', () => {
+      try {
+        step.payload = JSON.parse(payloadEditEl.value || '{}');
+        msgEl.textContent = 'Payload JSON valid.';
+        syncFlowJson();
+      } catch(err){
+        msgEl.textContent = 'Invalid JSON: ' + err;
+      }
+    });
+    return;
+  }
+  if(step.type === 'delay'){
+    flowEditorEl.innerHTML = `<div class="flow-editor"><div class="flow-small">Type: Delay</div><label>Step Name</label><input id="editDelayName" value="${escapeHtml(step.name || 'delay(ms)')}"><label>Delay (ms)</label><input id="editDelayMs" type="number" min="0" step="10" value="${Number(step.delayMs || 0)}"></div>`;
+    const delayNameEl = document.getElementById('editDelayName');
+    const delayMsEl = document.getElementById('editDelayMs');
+    delayNameEl.addEventListener('input', () => { step.name = delayNameEl.value; renderFlowCanvas(); });
+    delayMsEl.addEventListener('input', () => { step.delayMs = Math.max(0, Number(delayMsEl.value) || 0); syncFlowJson(); renderFlowCanvas(); });
+    return;
+  }
+  if(step.type === 'keyword_wait'){
+    flowEditorEl.innerHTML = `<div class="flow-editor"><div class="flow-small">Type: Wait Keyword</div><label>Step Name</label><input id="editKeywordName" value="${escapeHtml(step.name || 'wait_keyword')}"><label>Keyword</label><input id="editKeywordValue" value="${escapeHtml(step.keyword || '')}"><label>Source</label><select id="editKeywordSource"><option value="user">User Speech</option><option value="coach">Coach Reply</option><option value="any">Any Message</option></select><label>Timeout (ms)</label><input id="editKeywordTimeout" type="number" min="100" step="100" value="${Number(step.timeoutMs || 12000)}"><label>Poll Interval (ms)</label><input id="editKeywordPoll" type="number" min="100" step="50" value="${Number(step.pollMs || 350)}"><div class="flow-inline"><input type="checkbox" id="editKeywordCase"><label for="editKeywordCase" style="margin:0;">Case sensitive</label></div><div class="flow-inline"><input type="checkbox" id="editKeywordOnlyNew"><label for="editKeywordOnlyNew" style="margin:0;">Only match new recognized text</label></div></div>`;
+    const nameEl = document.getElementById('editKeywordName');
+    const valueEl = document.getElementById('editKeywordValue');
+    const sourceEl = document.getElementById('editKeywordSource');
+    const timeoutEl = document.getElementById('editKeywordTimeout');
+    const pollEl = document.getElementById('editKeywordPoll');
+    const caseEl = document.getElementById('editKeywordCase');
+    const onlyNewEl = document.getElementById('editKeywordOnlyNew');
+    sourceEl.value = String(step.source || 'user').toLowerCase();
+    caseEl.checked = !!step.caseSensitive;
+    onlyNewEl.checked = step.onlyNew !== false;
+    nameEl.addEventListener('input', () => { step.name = nameEl.value; renderFlowCanvas(); });
+    valueEl.addEventListener('input', () => { step.keyword = valueEl.value; syncFlowJson(); renderFlowCanvas(); });
+    sourceEl.addEventListener('change', () => { step.source = sourceEl.value; syncFlowJson(); renderFlowCanvas(); });
+    timeoutEl.addEventListener('input', () => { step.timeoutMs = Math.max(100, Number(timeoutEl.value) || 12000); syncFlowJson(); renderFlowCanvas(); });
+    pollEl.addEventListener('input', () => { step.pollMs = Math.max(100, Number(pollEl.value) || 350); syncFlowJson(); renderFlowCanvas(); });
+    caseEl.addEventListener('change', () => { step.caseSensitive = caseEl.checked; syncFlowJson(); });
+    onlyNewEl.addEventListener('change', () => { step.onlyNew = onlyNewEl.checked; syncFlowJson(); });
+    return;
+  }
+  flowEditorEl.innerHTML = `<div class="flow-editor"><div class="flow-small">Type: Condition</div><label>Step Name</label><input id="editCondName" value="${escapeHtml(step.name || 'condition(expr)')}"><label>Expression (JS)</label><textarea id="editConditionExpr">${escapeHtml(step.expression || '')}</textarea><div class="flow-small">Use <span class="mono">ctx.lastStatus</span>, <span class="mono">ctx.lastJson</span>, <span class="mono">ctx.lastRaw</span>, <span class="mono">ctx.lastRecognized</span>.</div></div>`;
+  const condNameEl = document.getElementById('editCondName');
+  const condExprEl = document.getElementById('editConditionExpr');
+  condNameEl.addEventListener('input', () => { step.name = condNameEl.value; renderFlowCanvas(); });
+  condExprEl.addEventListener('change', () => { step.expression = condExprEl.value; syncFlowJson(); renderFlowCanvas(); });
+}
+function evaluateCondition(expr, ctx){
+  const source = String(expr || '').trim();
+  if(!source){ return true; }
+  const body = source.includes('return') ? source : `return (${source});`;
+  const fn = new Function('ctx', body);
+  return !!fn(ctx);
+}
+async function runFlow(){
+  if(flowRunning){ flowStatusEl.textContent = 'Flow already running.'; return; }
+  if(!flowSteps.length){ flowStatusEl.textContent = 'No steps in flow.'; return; }
+  flowRunning = true;
+  flowRunToken += 1;
+  const token = flowRunToken;
+  flowStatusEl.textContent = 'Running...';
+  appendFlowLog('Flow started with ' + flowSteps.length + ' steps.');
+  flowSteps.forEach(s => { s._state = ''; });
+  const ctx = { lastStatus:0, lastJson:null, lastRaw:'', lastRecognized:'', lastRecognizedEntry:null };
+  for(let i = 0; i < flowSteps.length; i++){
+    if(token !== flowRunToken){
+      flowStatusEl.textContent = 'Stopped.';
+      appendFlowLog('Flow stopped.');
+      flowRunning = false;
+      renderFlowCanvas();
+      return;
+    }
+    const step = flowSteps[i];
+    step._state = 'running';
+    flowSelectedId = step.id;
+    renderFlowCanvas();
+    try {
+      if(step.type === 'api'){
+        const result = await callEndpoint(step.endpoint, step.method, step.payload);
+        ctx.lastStatus = result.status;
+        ctx.lastJson = result.json;
+        ctx.lastRaw = result.raw;
+        if(result.ok){
+          step._state = 'ok';
+          appendFlowLog(`Step ${i + 1} OK: ${step.method} ${step.endpoint} -> HTTP ${result.status}`);
+        } else if(step.continueOnError){
+          step._state = 'error';
+          appendFlowLog(`Step ${i + 1} HTTP ${result.status} but continueOnError=true.`);
+        } else {
+          throw new Error(`HTTP ${result.status} ${result.statusText}`);
+        }
+      } else if(step.type === 'delay'){
+        const ms = Math.max(0, Number(step.delayMs) || 0);
+        await new Promise(resolve => setTimeout(resolve, ms));
+        if(token !== flowRunToken){ throw new Error('Stopped'); }
+        step._state = 'ok';
+        appendFlowLog(`Step ${i + 1} OK: delay ${ms}ms`);
+      } else if(step.type === 'keyword_wait'){
+        const keyword = String(step.keyword || '').trim();
+        const timeoutMs = Math.max(100, Number(step.timeoutMs) || 12000);
+        const pollMs = Math.max(100, Number(step.pollMs) || 350);
+        const source = String(step.source || 'user').toLowerCase();
+        const caseSensitive = !!step.caseSensitive;
+        const onlyNew = step.onlyNew !== false;
+        if(!keyword){ throw new Error('keyword required'); }
+        let baselineKey = '';
+        try {
+          const baseline = await fetchLatestLogEntry(source);
+          baselineKey = baseline ? baseline.key : '';
+        } catch(err) { }
+        const waitStart = Date.now();
+        let matched = null;
+        appendFlowLog(`Step ${i + 1} waiting keyword: ${keyword}`);
+        while((Date.now() - waitStart) <= timeoutMs){
+          if(token !== flowRunToken){ throw new Error('Stopped'); }
+          try {
+            const latest = await fetchLatestLogEntry(source);
+            if(latest){
+              const isFresh = !onlyNew || latest.key !== baselineKey;
+              if(isFresh && keywordMatch(latest.text, keyword, caseSensitive)){
+                matched = latest;
+                break;
+              }
+            }
+          } catch(err) { }
+          await new Promise(resolve => setTimeout(resolve, pollMs));
+        }
+        if(!matched){ throw new Error(`Keyword not detected within ${timeoutMs}ms: ${keyword}`); }
+        ctx.lastRecognized = matched.text;
+        ctx.lastRecognizedEntry = matched;
+        step._state = 'ok';
+        appendFlowLog(`Step ${i + 1} OK: keyword matched -> ${matched.text}`);
+      } else if(step.type === 'condition'){
+        const pass = evaluateCondition(step.expression, ctx);
+        if(!pass){ throw new Error('Condition returned false'); }
+        step._state = 'ok';
+        appendFlowLog(`Step ${i + 1} OK: condition true`);
+      } else {
+        throw new Error('Unknown step type: ' + step.type);
+      }
+    } catch(err){
+      if(String(err) === 'Error: Stopped'){
+        flowStatusEl.textContent = 'Stopped.';
+        flowRunning = false;
+        renderFlowCanvas();
+        return;
+      }
+      if(step.type === 'api' && step.continueOnError){
+        step._state = 'error';
+        appendFlowLog(`Step ${i + 1} error ignored: ${err}`);
+      } else {
+        step._state = 'error';
+        flowStatusEl.textContent = `Failed at step ${i + 1}: ${err}`;
+        appendFlowLog(`Flow failed at step ${i + 1}: ${err}`);
+        flowRunning = false;
+        renderFlowCanvas();
+        return;
+      }
+    }
+    renderFlowCanvas();
+  }
+  flowStatusEl.textContent = 'Completed.';
+  appendFlowLog('Flow completed.');
+  flowRunning = false;
+}
+function stopFlow(){
+  if(!flowRunning){ flowStatusEl.textContent = 'Flow is not running.'; return; }
+  flowRunToken += 1;
+  flowRunning = false;
+  flowStatusEl.textContent = 'Stop requested...';
+  appendFlowLog('Stop requested.');
+}
+function clearFlow(){
+  if(flowRunning){ flowStatusEl.textContent = 'Stop flow first.'; return; }
+  flowSteps = [];
+  flowSelectedId = '';
+  flowLogEl.textContent = '';
+  flowStatusEl.textContent = 'Flow cleared.';
+  renderFlowCanvas();
+}
+function exportFlow(){
+  syncFlowJson();
+  flowStatusEl.textContent = 'Flow exported to JSON box.';
+}
+function importFlow(){
+  if(flowRunning){ flowStatusEl.textContent = 'Stop flow first.'; return; }
+  let data;
+  try { data = JSON.parse(flowJsonEl.value || '[]'); }
+  catch(err){ flowStatusEl.textContent = 'Import failed: invalid JSON'; return; }
+  if(!Array.isArray(data)){ flowStatusEl.textContent = 'Import failed: JSON root must be array'; return; }
+  const nextSteps = [];
+  for(let i = 0; i < data.length; i++){
+    const raw = data[i] || {};
+    if(raw.type === 'api'){
+      nextSteps.push({
+        id: makeStepId(),
+        type: 'api',
+        name: String(raw.name || 'api'),
+        endpoint: String(raw.endpoint || ''),
+        method: String(raw.method || 'POST').toUpperCase(),
+        payload: (raw.payload && typeof raw.payload === 'object') ? raw.payload : {},
+        continueOnError: !!raw.continueOnError
+      });
+      continue;
+    }
+    if(raw.type === 'delay'){
+      nextSteps.push({ id: makeStepId(), type:'delay', name:String(raw.name || 'delay(ms)'), delayMs:Math.max(0, Number(raw.delayMs) || 0) });
+      continue;
+    }
+    if(raw.type === 'condition'){
+      nextSteps.push({ id: makeStepId(), type:'condition', name:String(raw.name || 'condition(expr)'), expression:String(raw.expression || '') });
+      continue;
+    }
+    if(raw.type === 'keyword_wait'){
+      nextSteps.push({
+        id: makeStepId(),
+        type:'keyword_wait',
+        name:String(raw.name || 'wait_keyword'),
+        keyword:String(raw.keyword || ''),
+        timeoutMs:Math.max(100, Number(raw.timeoutMs) || 12000),
+        pollMs:Math.max(100, Number(raw.pollMs) || 350),
+        source:String(raw.source || 'user').toLowerCase(),
+        caseSensitive:!!raw.caseSensitive,
+        onlyNew:raw.onlyNew !== false
+      });
+      continue;
+    }
+    flowStatusEl.textContent = `Import warning: skipped unknown type at index ${i}`;
+  }
+  flowSteps = nextSteps;
+  flowSelectedId = flowSteps.length ? flowSteps[0].id : '';
+  flowStatusEl.textContent = `Imported ${flowSteps.length} steps.`;
+  renderFlowCanvas();
+}
+flowCanvasEl.addEventListener('dragover', ev => ev.preventDefault());
+flowCanvasEl.addEventListener('drop', ev => {
+  ev.preventDefault();
+  if(dragTemplateKey){
+    const step = createStepFromTemplate(dragTemplateKey);
+    if(step){
+      flowSteps.push(step);
+      flowSelectedId = step.id;
+      renderFlowCanvas();
+    }
+  } else if(dragStepId){
+    moveStepToEnd(dragStepId);
+    renderFlowCanvas();
+  }
+  dragTemplateKey = '';
+  dragStepId = '';
+});
+flowCanvasEl.addEventListener('click', ev => {
+  const btn = ev.target.closest('button[data-action]');
+  if(!btn) return;
+  const action = btn.getAttribute('data-action');
+  const id = btn.getAttribute('data-id');
+  if(!id) return;
+  const idx = flowSteps.findIndex(s => s.id === id);
+  if(idx < 0) return;
+  if(action === 'select'){
+    flowSelectedId = id;
+    renderFlowCanvas();
+    return;
+  }
+  if(action === 'delete'){
+    flowSteps.splice(idx, 1);
+    if(flowSelectedId === id){ flowSelectedId = flowSteps.length ? flowSteps[Math.max(0, idx - 1)].id : ''; }
+    renderFlowCanvas();
+    return;
+  }
+  if(action === 'up' && idx > 0){
+    const tmp = flowSteps[idx - 1];
+    flowSteps[idx - 1] = flowSteps[idx];
+    flowSteps[idx] = tmp;
+    renderFlowCanvas();
+    return;
+  }
+  if(action === 'down' && idx < flowSteps.length - 1){
+    const tmp = flowSteps[idx + 1];
+    flowSteps[idx + 1] = flowSteps[idx];
+    flowSteps[idx] = tmp;
+    renderFlowCanvas();
+  }
+});
+flowRunBtn.addEventListener('click', runFlow);
+flowStopBtn.addEventListener('click', stopFlow);
+flowClearBtn.addEventListener('click', clearFlow);
+flowExportBtn.addEventListener('click', exportFlow);
+flowImportBtn.addEventListener('click', importFlow);
+methodEl.addEventListener('change', syncMethod);
+syncMethod();
+renderTemplates();
+renderFlowCanvas();
+</script>
+</body>
+</html>

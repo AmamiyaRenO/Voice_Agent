@@ -1,0 +1,41 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telemetry Dashboard</title>
+<style>
+body { margin:0; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#0f1117; color:#f4f4f4; }
+header { padding:14px 18px; border-bottom:1px solid rgba(255,255,255,0.1); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+input, select, button { border-radius:8px; border:1px solid rgba(255,255,255,0.2); background:#131c2d; color:#f4f4f4; height:34px; padding:0 10px; }
+button { cursor:pointer; background:#2a5ca6; border-color:#4278ca; }
+a { color:#93c5fd; text-decoration:none; border-bottom:1px dashed #93c5fd; }
+#frame { width:100%; height:calc(100vh - 74px); border:0; background:#0b1220; }
+</style>
+</head>
+<body>
+<header>
+<a href="/">Back to Panel</a>
+<label>User</label><input id="userId" value="demo_user">
+<label>Days</label>
+<select id="days"><option>7</option><option selected>14</option><option>21</option><option>30</option></select>
+<button id="openBtn">Open Dashboard</button>
+</header>
+<iframe id="frame" title="telemetry dashboard"></iframe>
+<script>
+const dashboardBase = "{{TELEMETRY_DASHBOARD_URL}}";
+const frame = document.getElementById('frame');
+const userInput = document.getElementById('userId');
+const daysInput = document.getElementById('days');
+function buildUrl(){
+  const user = encodeURIComponent((userInput.value || 'demo_user').trim() || 'demo_user');
+  const days = encodeURIComponent(daysInput.value || '14');
+  return `${dashboardBase}?user_id=${user}&days=${days}`;
+}
+function openDash(){ frame.src = buildUrl(); }
+document.getElementById('openBtn').addEventListener('click', openDash);
+openDash();
+</script>
+</body>
+</html>
+<!DOCTYPE html>

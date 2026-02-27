@@ -1,0 +1,151 @@
+﻿<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Game Config</title>
+<style>
+body{margin:0;padding:1rem 1.1rem;background:#0f1117;color:#f5f7ff;font-family:'Segoe UI',sans-serif;}
+h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}
+a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}
+small{opacity:.75;}
+.card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:.9rem;margin-top:.7rem;}
+.toolbar{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin:.6rem 0;}
+button{cursor:pointer;border:none;border-radius:8px;padding:.55rem .9rem;background:#3b82f6;color:#fff;font-weight:600;}
+button.secondary{background:#334155;}
+button.warn{background:#dc2626;}
+input{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#f5f7ff;padding:.44rem .58rem;}
+.pathRow{display:flex;gap:.4rem;align-items:center;}
+.pathRow input{flex:1;}
+.tinyBtn{padding:.42rem .55rem;font-size:.78rem;white-space:nowrap;background:#334155;}
+table{width:100%;border-collapse:collapse;font-size:.9rem;}
+th,td{border-bottom:1px solid rgba(255,255,255,.1);padding:.42rem .35rem;vertical-align:top;}
+th{text-align:left;font-size:.78rem;opacity:.85;text-transform:uppercase;letter-spacing:.04em;}
+#status{margin-top:.6rem;opacity:.9;}
+#manifestPath{font-family:Consolas,monospace;font-size:.8rem;opacity:.8;word-break:break-all;}
+@media(max-width:900px){table,thead,tbody,tr,th,td{display:block;} th{display:none;} tr{border:1px solid rgba(255,255,255,.12);border-radius:10px;margin:.6rem 0;padding:.45rem;} td{border:none;padding:.28rem 0;} td::before{display:block;font-size:.72rem;opacity:.7;margin-bottom:.15rem;}}
+</style>
+</head>
+<body>
+<h1>Game Config</h1>
+<p><a href="/index.html">Back to User Panel</a></p>
+<div class="card">
+<small>閰嶇疆浼氬啓鍏ユ湰鏈?manifest锛氭父鎴忓悕銆佽闊冲叧閿瘝鍜屽彲鎵ц璺緞锛涘彲鐢?Browse 鍦ㄥ涓绘満閫夋枃浠讹紝璺緞浼氳嚜鍔ㄨ鑼冧负缁濆璺緞銆?/small>
+<div id="manifestPath"></div>
+<div class="toolbar">
+<button onclick="addRow()">Add Game</button>
+<button class="secondary" onclick="reloadGames()">Reload</button>
+<button onclick="saveGames()">Save</button>
+</div>
+<table>
+<thead><tr><th>ID</th><th>Game Name</th><th>Keywords</th><th>Executable Path</th><th>Workdir</th><th>Action</th></tr></thead>
+<tbody id="rows"></tbody>
+</table>
+<div id="status">Ready.</div>
+</div>
+<script>
+const rowsEl = document.getElementById('rows');
+const statusEl = document.getElementById('status');
+const manifestPathEl = document.getElementById('manifestPath');
+let gameRows = [];
+function esc(v){ return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function splitKeywords(text){
+  return String(text||'').split(',').map(s=>s.trim()).filter(Boolean);
+}
+function render(){
+  if(!rowsEl) return;
+  if(!gameRows.length){ rowsEl.innerHTML = '<tr><td colspan="6">No games configured.</td></tr>'; return; }
+  rowsEl.innerHTML = gameRows.map((g,i)=>`
+    <tr>
+      <td data-label="ID"><input value="${esc(g.id)}" oninput="updateField(${i},'id',this.value)" placeholder="disc_golf"></td>
+      <td data-label="Game Name"><input value="${esc(g.name)}" oninput="updateField(${i},'name',this.value)" placeholder="Disc Golf"></td>
+      <td data-label="Keywords"><input value="${esc(g.keywords_text)}" oninput="updateField(${i},'keywords_text',this.value)" placeholder="disc golf,discgolf,frisbee golf"></td>
+      <td data-label="Executable Path"><div class="pathRow"><input value="${esc(g.exec)}" oninput="updateField(${i},'exec',this.value)" placeholder="D:\\Games\\DiscGolf\\DiscGolf.exe"><button type="button" class="tinyBtn" onclick="browseExec(${i})">Browse</button></div></td>
+      <td data-label="Workdir"><input value="${esc(g.workdir)}" oninput="updateField(${i},'workdir',this.value)" placeholder="D:\\Games\\DiscGolf"></td>
+      <td data-label="Action"><button class="warn" onclick="removeRow(${i})">Delete</button></td>
+    </tr>`).join('');
+}
+function updateField(i,key,val){ if(!gameRows[i]) return; gameRows[i][key]=val; }
+function addRow(){ gameRows.push({id:'',name:'',keywords_text:'',exec:'',workdir:''}); render(); }
+function removeRow(i){ gameRows.splice(i,1); render(); }
+async function browseExec(i){
+  if(!gameRows[i]) return;
+  statusEl.textContent = 'Opening file picker on host...';
+  const payload = {
+    title: 'Select Game Executable',
+    filter: 'Executable Files (*.exe)|*.exe|All Files (*.*)|*.*',
+    initial_dir: String(gameRows[i].workdir || ''),
+    initial_filename: String(gameRows[i].exec || '')
+  };
+  try {
+    const resp = await fetch('/api/file/pick', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }
+    if(data.cancelled){ statusEl.textContent = 'Browse cancelled.'; return; }
+    const path = String(data.path || '').trim();
+    const dir = String(data.directory || '').trim();
+    if(path){ gameRows[i].exec = path; }
+    if(dir){ gameRows[i].workdir = dir; }
+    render();
+    statusEl.textContent = 'Selected: ' + (path || 'no file');
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+async function reloadGames(){
+  statusEl.textContent = 'Loading...';
+  try {
+    const resp = await fetch('/api/game/manifest');
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }
+    const list = Array.isArray(data.games) ? data.games : [];
+    gameRows = list.map(g=>({
+      id: String(g.id||''),
+      name: String(g.name||''),
+      exec: String(g.exec||''),
+      workdir: String(g.workdir||''),
+      keywords_text: Array.isArray(g.keywords) ? g.keywords.join(', ') : ''
+    }));
+    if(manifestPathEl){ manifestPathEl.textContent = 'Manifest: ' + String(data.path||''); }
+    render();
+    const unresolved = Number(data.unresolved_count || 0);
+    statusEl.textContent = unresolved > 0
+      ? ('Loaded with warnings: ' + unresolved + ' unresolved path fields. Please fill absolute paths and save.')
+      : 'Loaded.';
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+async function saveGames(){
+  const payload = {
+    games: gameRows.map(g=>({
+      id: String(g.id||'').trim(),
+      name: String(g.name||'').trim(),
+      keywords: splitKeywords(g.keywords_text),
+      exec: String(g.exec||'').trim(),
+      workdir: String(g.workdir||'').trim()
+    }))
+  };
+  statusEl.textContent = 'Saving...';
+  try {
+    const resp = await fetch('/api/game/manifest', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }
+    statusEl.textContent = 'Saved. ' + (data.message || 'Restart intent_service and game_launcher to apply immediately.');
+    await reloadGames();
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+reloadGames();
+</script>
+</body>
+</html>
+<!DOCTYPE html>

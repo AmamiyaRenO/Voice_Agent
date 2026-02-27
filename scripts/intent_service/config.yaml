@@ -16,6 +16,13 @@ rules:
     - "hello rachel"
   fuzzy_threshold: 70   # 0-100，分数越高越严格
   dedupe_window_sec: 1.2
+  use_llm_classifier: false
+  llm_classifier_url: "http://127.0.0.1:8000/respond"
+  llm_timeout_sec: 0.9
+  llm_min_confidence: 0.72
+  llm_max_chars: 120
+  llm_cache_ttl_sec: 12.0
+  back_home_similarity_threshold: 70.0
   exit_keywords:
     - "back home"
     - "go home"

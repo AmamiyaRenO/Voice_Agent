@@ -1,0 +1,124 @@
+﻿<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runtime Config</title>
+<style>
+body{margin:0;padding:1rem 1.1rem;background:#0f1117;color:#f5f7ff;font-family:'Segoe UI',sans-serif;}
+h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}
+a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}
+small{opacity:.75;}
+.card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:.9rem;margin-top:.7rem;}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;}
+.field{display:flex;flex-direction:column;gap:.3rem;}
+label{font-size:.85rem;opacity:.9;}
+input{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#f5f7ff;padding:.44rem .58rem;}
+input[type=checkbox]{width:auto;}
+.toggle{display:flex;align-items:center;gap:.5rem;margin-top:.2rem;}
+.toolbar{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin-top:.8rem;}
+button{cursor:pointer;border:none;border-radius:8px;padding:.55rem .9rem;background:#3b82f6;color:#fff;font-weight:600;}
+button.secondary{background:#334155;}
+details{margin-top:.8rem;border:1px solid rgba(255,255,255,.16);border-radius:10px;padding:.55rem .7rem;background:rgba(255,255,255,.03);}
+summary{cursor:pointer;font-size:.9rem;opacity:.92;}
+#status{margin-top:.6rem;opacity:.9;}
+#configPath{font-family:Consolas,monospace;font-size:.8rem;opacity:.8;word-break:break-all;}
+@media(max-width:900px){.grid{grid-template-columns:1fr;}}
+</style>
+</head>
+<body>
+<h1>Runtime Config</h1>
+<p><a href="/index.html">Back to User Panel</a></p>
+<div class="card">
+<small>For most users, only OpenAI, voice command phrases, and game manifest path need changes.</small>
+<div id="configPath"></div>
+<div class="grid">
+<div class="field"><label>OpenAI API Key</label><input id="openaiKey" type="password" placeholder="sk-..."></div>
+<div class="field"><label>OpenAI Transcribe Model</label><input id="openaiModel" placeholder="gpt-4o-mini-transcribe"></div>
+<div class="field"><label>OpenAI Base URL (Optional)</label><input id="openaiBaseUrl" placeholder="https://api.openai.com/v1"></div>
+<div class="field"><label>OpenAI ASR Prompt</label><input id="openaiPrompt" placeholder="Optional. Leave empty to avoid prompt bias/hallucination."></div>
+<div class="field"><label>Launch Triggers (comma separated)</label><input id="launchTriggers" placeholder="open, start, launch, play, begin, load"></div>
+<div class="field"><label>Exit Keywords (comma separated)</label><input id="exitKeywords" placeholder="back home, go home, quit, exit, stop, close game"></div>
+<div class="field"><label>LLM Intent Classifier</label><div class="toggle"><input id="llmIntentClassifier" type="checkbox"><span>Use LLM fallback for ambiguous command intent</span></div></div>
+</div>
+<details>
+  <summary>Advanced (optional): Manifest paths</summary>
+  <div class="grid">
+    <div class="field"><label>Intent Manifest Path</label><input id="intentManifest" placeholder="Usually leave empty (default manifest)"></div>
+    <div class="field"><label>Game Manifest Path</label><input id="gameManifest" placeholder="Usually leave empty (same as intent manifest)"></div>
+  </div>
+</details>
+<div class="toolbar">
+<button onclick="saveConfig()">Save</button>
+<button class="secondary" onclick="reloadConfig()">Reload</button>
+</div>
+<div id="status">Ready.</div>
+</div>
+<script>
+const statusEl = document.getElementById('status');
+const configPathEl = document.getElementById('configPath');
+const intentManifestEl = document.getElementById('intentManifest');
+const gameManifestEl = document.getElementById('gameManifest');
+const openaiKeyEl = document.getElementById('openaiKey');
+const openaiModelEl = document.getElementById('openaiModel');
+const openaiBaseUrlEl = document.getElementById('openaiBaseUrl');
+const openaiPromptEl = document.getElementById('openaiPrompt');
+const launchTriggersEl = document.getElementById('launchTriggers');
+const exitKeywordsEl = document.getElementById('exitKeywords');
+const llmIntentClassifierEl = document.getElementById('llmIntentClassifier');
+function setText(el, v){ if(el){ el.value = String(v || ''); } }
+function getText(el){ return el ? String(el.value || '').trim() : ''; }
+function setChecked(el, v){ if(el){ el.checked = !!v; } }
+function getChecked(el){ return !!(el && el.checked); }
+async function reloadConfig(){
+  statusEl.textContent = 'Loading...';
+  try {
+    const resp = await fetch('/api/runtime/config');
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status)); }
+    setText(intentManifestEl, data.intent_manifest_path);
+    setText(gameManifestEl, data.game_manifest_path);
+    setText(openaiKeyEl, data.openai_api_key);
+    setText(openaiModelEl, data.openai_transcribe_model);
+    setText(openaiBaseUrlEl, data.openai_base_url);
+    setText(openaiPromptEl, data.openai_transcribe_prompt);
+    setText(launchTriggersEl, data.launch_triggers);
+    setText(exitKeywordsEl, data.exit_keywords);
+    setChecked(llmIntentClassifierEl, !!data.use_llm_intent_classifier);
+    if(configPathEl){ configPathEl.textContent = 'Config: ' + String(data.path || ''); }
+    statusEl.textContent = 'Loaded.';
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+async function saveConfig(){
+  statusEl.textContent = 'Saving...';
+  const payload = {
+    intent_manifest_path: getText(intentManifestEl),
+    game_manifest_path: getText(gameManifestEl),
+    openai_api_key: getText(openaiKeyEl),
+    openai_transcribe_model: getText(openaiModelEl),
+    openai_base_url: getText(openaiBaseUrlEl),
+    openai_transcribe_prompt: getText(openaiPromptEl),
+    launch_triggers: getText(launchTriggersEl),
+    exit_keywords: getText(exitKeywordsEl),
+    use_llm_intent_classifier: getChecked(llmIntentClassifierEl)
+  };
+  try {
+    const resp = await fetch('/api/runtime/config', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status)); }
+    statusEl.textContent = data.message || 'Saved. Restart local services to apply.';
+    await reloadConfig();
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+reloadConfig();
+</script>
+</body>
+</html>
+<!DOCTYPE html>

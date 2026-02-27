@@ -6,6 +6,7 @@
     "transcribe_prompt": ""
   },
   "intent": {
+    "use_llm_classifier": false,
     "launch_triggers": [
       "open",
       "start",

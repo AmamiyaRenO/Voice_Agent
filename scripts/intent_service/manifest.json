@@ -2,8 +2,11 @@
   "games" : [
     {
       "id" : "cornhole",
-      "name" : "Cornhole",
+      "name" : "Bean Bag Toss",
       "synonyms" : [
+        "bean bag toss",
+        "beanbag toss",
+        "bean bag",
         "cornhole",
         "corn hole"
       ],

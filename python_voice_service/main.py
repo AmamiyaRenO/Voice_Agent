@@ -2,8 +2,7 @@
 
 This module exposes a FastAPI application that accepts raw PCM audio
 from the Unity client, performs transcription with Faster-Whisper and
-returns a Vosk-compatible JSON payload so the rest of the Unity project
-can reuse the existing message hub pipeline.
+returns a speech JSON payload with legacy compatibility fields.
 """
 
 from __future__ import annotations
@@ -1423,8 +1422,8 @@ def _remove_dc(audio: np.ndarray) -> np.ndarray:
     return (audio - mean).astype(np.float32, copy=False)
 
 
-def _build_vosk_result(words: Iterable[dict]) -> List[dict]:
-    # Vosk uses "result" for word-level entries. Unity expects "word" and timing fields.
+def _build_legacy_word_result(words: Iterable[dict]) -> List[dict]:
+    # Keep legacy "result" schema for compatibility with existing Unity parsers.
     return list(words)
 
 
@@ -1562,7 +1561,7 @@ async def _transcribe_with_openai(
     payload = _to_plain_dict(result)
     text = str(payload.get("text", "") or getattr(result, "text", "") or "").strip()
     text = _canonicalize_asr_text(text)
-    words: List[dict] = []
+    words: List[dict] = _extract_openai_words(payload)
 
     language_out = payload.get("language")
     if not isinstance(language_out, str) or not language_out.strip():
@@ -1574,7 +1573,7 @@ async def _transcribe_with_openai(
 
     response = {
         "text": text,
-        "result": _build_vosk_result(words),
+        "result": _build_legacy_word_result(words),
         "language": language_out,
         "duration": payload.get("duration", _duration_seconds(audio, DEFAULT_SAMPLE_RATE)),
         "language_probability": payload.get("language_probability"),
@@ -1630,17 +1629,20 @@ async def transcribe(
         except Exception:
             pass
 
-    audio = _extract_recent_speech_window(audio, DEFAULT_SAMPLE_RATE)
-
-    rms, max_amplitude = _audio_energy_metrics(audio)
-    speech_fraction = _energy_speech_fraction(audio, DEFAULT_SAMPLE_RATE)
-
     selected_mode = _normalize_transcribe_mode(mode)
     if mode is not None and selected_mode is None:
         raise HTTPException(status_code=400, detail="mode must be one of: offline, api")
     effective_mode = selected_mode
     if effective_mode is None:
         effective_mode, _ = await _get_effective_transcribe_mode()
+
+    # Recent-speech extraction is useful for offline decoding but can clip leading
+    # words for API mode when phrase boundaries are noisy.
+    if effective_mode != TRANSCRIBE_MODE_API:
+        audio = _extract_recent_speech_window(audio, DEFAULT_SAMPLE_RATE)
+
+    rms, max_amplitude = _audio_energy_metrics(audio)
+    speech_fraction = _energy_speech_fraction(audio, DEFAULT_SAMPLE_RATE)
 
     request_language = language if language is not None else ASR_DEFAULT_LANGUAGE
     if effective_mode == TRANSCRIBE_MODE_API:
@@ -1919,7 +1921,7 @@ async def transcribe(
 
     response = {
         "text": full_text,
-        "result": _build_vosk_result(words),
+        "result": _build_legacy_word_result(words),
         "language": getattr(info, "language", normalized_language),
         "duration": getattr(info, "duration", None),
         "language_probability": getattr(info, "language_probability", None),

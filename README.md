@@ -480,7 +480,7 @@ Service file: `python_voice_service/main.py`
 
 ### Main endpoints
 
-- `POST /transcribe` -> ASR output (Vosk-like JSON fields + metadata)
+- `POST /transcribe` -> ASR output (speech JSON + metadata)
 - `GET /transcribe/config` -> read current ASR mode (`offline` or `api`)
 - `POST /transcribe/config` -> switch ASR mode at runtime
 - `POST /respond` -> LLM reply generation

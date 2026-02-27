@@ -15,11 +15,11 @@ namespace RobotVoice
         [SerializeField, Tooltip("Disable Unity-side MQTT intent publishing to avoid duplication with external pipeline")] 
         private bool disablePublishing = true;
         [Header("MQTT Broker")]
-        [SerializeField] private string host = "127.0.0.1";
-        [SerializeField] private int port = 1883;
+        [SerializeField] private string host = VoiceAgentDefaults.LocalHost;
+        [SerializeField] private int port = VoiceAgentDefaults.MqttPort;
         [SerializeField] private string username = string.Empty;
         [SerializeField] private string password = string.Empty;
-        [SerializeField] private string intentTopic = "robot/intent";
+        [SerializeField] private string intentTopic = VoiceAgentDefaults.IntentTopic;
         [SerializeField] private string clientId = "unity-voice";
         [Header("MQTT TLS")]
         [SerializeField] private bool useTls;

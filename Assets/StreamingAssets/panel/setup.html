@@ -1,0 +1,239 @@
+﻿<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>First-Run Wizard</title>
+<style>
+body{margin:0;padding:1rem 1.1rem;background:#0f1117;color:#f5f7ff;font-family:'Segoe UI',sans-serif;}
+h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}
+h2{margin:.1rem 0 .6rem 0;font-size:1rem;letter-spacing:.03em;text-transform:uppercase;opacity:.9;}
+a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}
+small{opacity:.75;}
+.card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:.9rem;margin-top:.7rem;}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;}
+.field{display:flex;flex-direction:column;gap:.3rem;}
+label{font-size:.85rem;opacity:.9;}
+input,select{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#f5f7ff;padding:.5rem .58rem;}
+input[type=checkbox]{width:auto;}
+.toggle{display:flex;align-items:center;gap:.5rem;margin-top:.2rem;}
+.toolbar{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin-top:.8rem;}
+button{cursor:pointer;border:none;border-radius:8px;padding:.55rem .9rem;background:#3b82f6;color:#fff;font-weight:600;}
+button.secondary{background:#334155;}
+#status{margin-top:.75rem;opacity:.92;white-space:pre-wrap;}
+@media(max-width:900px){.grid{grid-template-columns:1fr;}}
+</style>
+</head>
+<body>
+<h1>First-Run Wizard</h1>
+<p><a href="/index.html">Back to User Panel</a></p>
+<div class="card">
+<h2>Step 0: Prerequisites (Piper + Ollama)</h2>
+<div class="grid">
+<div class="field"><label>Piper Status</label><input id="piperStatus" readonly></div>
+<div class="field"><label>Piper Model Path</label><input id="piperModelPath" readonly></div>
+<div class="field"><label>Ollama Status</label><input id="ollamaStatus" readonly></div>
+<div class="field"><label>Ollama Model</label><input id="ollamaModel" placeholder="gemma3:4b"></div>
+<div class="field"><label>Model Downloaded</label><input id="ollamaModelReady" readonly></div>
+<div class="field"><label>Ollama Hint</label><input id="ollamaHint" readonly></div>
+</div>
+<div class="toolbar">
+<button class="secondary" onclick="refreshPrereq()">Refresh Prerequisites</button>
+<button class="secondary" onclick="installOllama()">Install Ollama (winget)</button>
+<button class="secondary" onclick="pullOllamaModel()">Pull Ollama Model</button>
+<button class="secondary" onclick="openOllamaDownload()">Open Ollama Download</button>
+</div>
+<small>Piper is bundled when packaging includes runtime/piper. Ollama is guided-install and model pull is separate.</small>
+</div>
+<div class="card">
+<h2>Step 1: ASR Mode and Listening</h2>
+<div class="grid">
+<div class="field"><label>ASR Mode</label><select id="asrMode"><option value="offline">offline</option><option value="api">api (OpenAI)</option></select></div>
+<div class="field"><label>Agent Listening</label><div class="toggle"><input id="listeningOn" type="checkbox"><span>Enable microphone listening</span></div></div>
+</div>
+</div>
+<div class="card">
+<h2>Step 2: OpenAI</h2>
+<div class="grid">
+<div class="field"><label>OpenAI API Key</label><input id="openaiKey" type="password" placeholder="sk-..."></div>
+<div class="field"><label>Transcribe Model</label><input id="openaiModel" placeholder="gpt-4o-mini-transcribe"></div>
+<div class="field"><label>OpenAI Base URL (Optional)</label><input id="openaiBaseUrl" placeholder="https://api.openai.com/v1"></div>
+<div class="field"><label>ASR Prompt</label><input id="openaiPrompt" placeholder="Optional. Leave empty to avoid prompt bias/hallucination."></div>
+</div>
+</div>
+<div class="card">
+<h2>Step 3: Intent Rules and Manifest</h2>
+<div class="grid">
+<div class="field"><label>Launch Triggers (comma separated)</label><input id="launchTriggers" placeholder="open, start, launch, play, begin, load"></div>
+<div class="field"><label>Exit Keywords (comma separated)</label><input id="exitKeywords" placeholder="back home, go home, quit, exit, stop, close game"></div>
+<div class="field"><label>LLM Intent Classifier</label><div class="toggle"><input id="llmIntentClassifier" type="checkbox"><span>Use LLM fallback for ambiguous command intent</span></div></div>
+<div class="field"><label>Intent Manifest Path (Optional)</label><input id="intentManifest" placeholder="Usually keep default"></div>
+<div class="field"><label>Game Manifest Path (Optional)</label><input id="gameManifest" placeholder="Usually same as intent manifest"></div>
+</div>
+<small>Advanced game rows (name/keywords/executable path) are in <a href="/games.html">Game Config</a>.</small>
+</div>
+<div class="card">
+<h2>Step 4: Save</h2>
+<div class="toolbar">
+<button onclick="saveAll()">Save Wizard Config</button>
+<button class="secondary" onclick="reloadAll()">Reload</button>
+<button class="secondary" onclick="location.href='/games.html'">Open Game Config</button>
+<button class="secondary" onclick="location.href='/runtime.html'">Open Runtime Config</button>
+</div>
+<div id="status">Ready.</div>
+</div>
+<script>
+const statusEl = document.getElementById('status');
+const asrModeEl = document.getElementById('asrMode');
+const listeningEl = document.getElementById('listeningOn');
+const openaiKeyEl = document.getElementById('openaiKey');
+const openaiModelEl = document.getElementById('openaiModel');
+const openaiBaseUrlEl = document.getElementById('openaiBaseUrl');
+const openaiPromptEl = document.getElementById('openaiPrompt');
+const launchTriggersEl = document.getElementById('launchTriggers');
+const exitKeywordsEl = document.getElementById('exitKeywords');
+const llmIntentClassifierEl = document.getElementById('llmIntentClassifier');
+const intentManifestEl = document.getElementById('intentManifest');
+const gameManifestEl = document.getElementById('gameManifest');
+const piperStatusEl = document.getElementById('piperStatus');
+const piperModelPathEl = document.getElementById('piperModelPath');
+const ollamaStatusEl = document.getElementById('ollamaStatus');
+const ollamaModelEl = document.getElementById('ollamaModel');
+const ollamaModelReadyEl = document.getElementById('ollamaModelReady');
+const ollamaHintEl = document.getElementById('ollamaHint');
+function setText(el, v){ if(el){ el.value = String(v || ''); } }
+function getText(el){ return el ? String(el.value || '').trim() : ''; }
+async function fetchJson(url, opts){
+  const resp = await fetch(url, opts);
+  const data = await resp.json();
+  if(!resp.ok || data.status !== 'ok'){
+    throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+  }
+  return data;
+}
+async function refreshPrereq(){
+  try {
+    const data = await fetchJson('/api/runtime/prereq');
+    setText(piperStatusEl, data.piper_ready ? 'ready' : 'missing executable/model');
+    setText(piperModelPathEl, data.piper_model_path || '');
+    if(!getText(ollamaModelEl)){ setText(ollamaModelEl, data.ollama_model || 'gemma3:4b'); }
+    const ollamaState = data.ollama_running ? 'running' : (data.ollama_installed ? 'installed (not running)' : 'not installed');
+    setText(ollamaStatusEl, ollamaState);
+    setText(ollamaModelReadyEl, data.ollama_model_available ? 'yes' : 'no');
+    const hint = data.ollama_error ? String(data.ollama_error) : (data.needs_ollama_setup ? 'install Ollama and pull model' : 'ready');
+    setText(ollamaHintEl, hint);
+  } catch(err){
+    setText(ollamaStatusEl, 'error');
+    setText(ollamaHintEl, String(err));
+  }
+}
+async function openOllamaDownload(){
+  try {
+    const data = await fetchJson('/api/runtime/ollama', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action:'open_download' })
+    });
+    statusEl.textContent = data.message || 'opened download page';
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+async function installOllama(){
+  statusEl.textContent = 'Starting Ollama install...';
+  try {
+    const data = await fetchJson('/api/runtime/ollama', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action:'install' })
+    });
+    statusEl.textContent = data.message || 'install started';
+    await refreshPrereq();
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+async function pullOllamaModel(){
+  const model = getText(ollamaModelEl) || 'gemma3:4b';
+  statusEl.textContent = 'Starting model pull: ' + model + ' ...';
+  try {
+    const data = await fetchJson('/api/runtime/ollama', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action:'pull_model', model })
+    });
+    statusEl.textContent = data.message || ('model pull started: ' + model);
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+async function reloadAll(){
+  statusEl.textContent = 'Loading...';
+  try {
+    const [asrData, runtimeData, prereqData] = await Promise.all([
+      fetchJson('/api/asr'),
+      fetchJson('/api/runtime/config'),
+      fetchJson('/api/runtime/prereq')
+    ]);
+    setText(asrModeEl, asrData.mode || 'offline');
+    if(listeningEl){ listeningEl.checked = !!asrData.listening; }
+    setText(openaiKeyEl, runtimeData.openai_api_key);
+    setText(openaiModelEl, runtimeData.openai_transcribe_model);
+    setText(openaiBaseUrlEl, runtimeData.openai_base_url);
+    setText(openaiPromptEl, runtimeData.openai_transcribe_prompt);
+    setText(ollamaModelEl, runtimeData.ollama_model || prereqData.ollama_model || 'gemma3:4b');
+    setText(launchTriggersEl, runtimeData.launch_triggers);
+    setText(exitKeywordsEl, runtimeData.exit_keywords);
+    if(llmIntentClassifierEl){ llmIntentClassifierEl.checked = !!runtimeData.use_llm_intent_classifier; }
+    setText(intentManifestEl, runtimeData.intent_manifest_path);
+    setText(gameManifestEl, runtimeData.game_manifest_path);
+    setText(piperStatusEl, prereqData.piper_ready ? 'ready' : 'missing executable/model');
+    setText(piperModelPathEl, prereqData.piper_model_path || '');
+    const ollamaState = prereqData.ollama_running ? 'running' : (prereqData.ollama_installed ? 'installed (not running)' : 'not installed');
+    setText(ollamaStatusEl, ollamaState);
+    setText(ollamaModelReadyEl, prereqData.ollama_model_available ? 'yes' : 'no');
+    const hint = prereqData.ollama_error ? String(prereqData.ollama_error) : (prereqData.needs_ollama_setup ? 'install Ollama and pull model' : 'ready');
+    setText(ollamaHintEl, hint);
+    statusEl.textContent = 'Loaded.';
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+async function saveAll(){
+  statusEl.textContent = 'Saving...';
+  try {
+    await fetchJson('/api/runtime/config', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        openai_api_key: getText(openaiKeyEl),
+        openai_transcribe_model: getText(openaiModelEl),
+        openai_base_url: getText(openaiBaseUrlEl),
+        openai_transcribe_prompt: getText(openaiPromptEl),
+        ollama_model: getText(ollamaModelEl),
+        launch_triggers: getText(launchTriggersEl),
+        exit_keywords: getText(exitKeywordsEl),
+        use_llm_intent_classifier: !!(llmIntentClassifierEl && llmIntentClassifierEl.checked),
+        intent_manifest_path: getText(intentManifestEl),
+        game_manifest_path: getText(gameManifestEl)
+      })
+    });
+    await fetchJson('/api/asr', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action:'set_mode', mode:getText(asrModeEl) || 'offline' })
+    });
+    await fetchJson('/api/asr', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action:'set_listening', listening:!!(listeningEl && listeningEl.checked) })
+    });
+    statusEl.textContent = 'Saved. Restart local services if executable/runtime paths changed.';
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+reloadAll();
+</script>
+</body>
+</html>
+<!DOCTYPE html>

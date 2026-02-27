@@ -5,16 +5,16 @@ using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
+using RobotVoice;
 using RobotVoice.Audio;
 
 public class VoskSpeechToText : MonoBehaviour
 {
+        // Legacy class name is retained for scene/prefab compatibility.
         [Header("Python Speech Service")]
-        [Tooltip("If enabled, audio is sent to an external Python service that performs speech recognition using Faster-Whisper.")]
-        public bool UsePythonService;
 
         [Tooltip("HTTP endpoint for the Python speech service transcribe API.")]
-        public string PythonServiceUrl = "http://127.0.0.1:8000/transcribe";
+        public string PythonServiceUrl = VoiceAgentDefaults.AsrTranscribeUrl;
 
         [Tooltip("Optional language hint passed to the Python speech service (e.g. 'zh').")]
         public string PythonServiceLanguage = string.Empty;
@@ -24,31 +24,47 @@ public class VoskSpeechToText : MonoBehaviour
 
         [Tooltip("Minimum normalized amplitude required before audio is sent to the Python speech service (0-1).")]
         [Range(0f, 1f)]
-        public float PythonServiceSilenceThreshold = 0.02f;
+        public float PythonServiceSilenceThreshold = 0.015f;
 
         [Tooltip("Max record length per segment when using the Python speech service (seconds).")]
         [Range(0.1f, 10f)]
-        public float PythonMaxRecordLength = 3.0f;
+        public float PythonMaxRecordLength = 4.0f;
+
+        [Header("Segmentation (VAD + Max Duration)")]
+        [Tooltip("Use voice activity detection to cut segments instead of only using fixed time windows.")]
+        public bool UseVadSegmentation = true;
+
+        [Tooltip("Sustained speech duration required to start a segment (seconds).")]
+        [Range(0.01f, 1.5f)]
+        public float VadActivationSeconds = 0.14f;
+
+        [Tooltip("Sustained silence duration required to end a segment (seconds).")]
+        [Range(0.05f, 2f)]
+        public float VadSilenceSeconds = 0.45f;
+
+        [Tooltip("Audio kept before speech start so the first syllable is not cut (seconds).")]
+        [Range(0f, 0.8f)]
+        public float VadPreRollSeconds = 0.2f;
+
+        [Tooltip("Start threshold multiplier relative to PythonServiceSilenceThreshold.")]
+        [Range(1f, 2f)]
+        public float VadStartThresholdMultiplier = 1.2f;
+
+        [Tooltip("RMS gate scaling factor relative to the peak threshold.")]
+        [Range(0.2f, 1f)]
+        public float VadRmsThresholdScale = 0.6f;
 
         [Tooltip("Frame length for VoiceProcessor when using the Python speech service.")]
         public int PythonFrameLength = 256;
 
         [Tooltip("The source of the microphone input.")]
         public VoiceProcessor VoiceProcessor;
-	[Tooltip("The Max number of alternatives that will be processed.")]
-	public int MaxAlternatives = 3;
 
 	[Tooltip("How long should we record before restarting?")]
 	public float MaxRecordLength = 5;
 
 	[Tooltip("Should the recognizer start when the application is launched?")]
 	public bool AutoStart = true;
-
-	[Tooltip("The phrases that will be detected. If left empty, all words will be detected.")]
-	public List<string> KeyPhrases = new List<string>();
-
-	//Holds all of the audio data until the user stops talking.
-	private readonly List<short> _buffer = new List<short>();
 
 	//Called when the the state of the controller changes.
 	public Action<string> OnStatusUpdated;
@@ -85,14 +101,10 @@ public class VoskSpeechToText : MonoBehaviour
 	// Flag to signal we are ending
 	private bool _running;
 
-	//Thread safe queue of microphone data.
-	private readonly ConcurrentQueue<short[]> _threadedBufferQueue = new ConcurrentQueue<short[]>();
-
         //Thread safe queue of resuts
         private readonly ConcurrentQueue<string> _threadedResultQueue = new ConcurrentQueue<string>();
 
         // Python speech service state
-        private bool _usePythonService;
         private bool _playbackMute; // when true, drop captured frames to avoid TTS feedback
         private readonly object _pythonBufferLock = new object();
         private readonly List<short> _pythonBuffer = new List<short>();
@@ -100,6 +112,10 @@ public class VoskSpeechToText : MonoBehaviour
         private float _pythonSegmentStartTime;
         private bool _pythonForceFlushRequested;
         private bool _pythonRequestInFlight;
+        private int _activeRecordingSampleRate = 16000;
+        private float _vadSpeechTimerSec;
+        private float _vadSilenceTimerSec;
+        private readonly List<short> _vadPreRollBuffer = new List<short>();
         private float _defaultMaxRecordLength;
         private bool _defaultMaxRecordLengthCaptured;
         private bool _wakeWordOverrideActive;
@@ -185,24 +201,20 @@ public class VoskSpeechToText : MonoBehaviour
                 return EnableAec && AecEngine != null && AecEngine.enableAec && AecEngine.IsAvailable;
         }
 
-	//If Auto start is enabled, starts vosk speech to text.
+	// If AutoStart is enabled, begin speech recognition on startup.
 	void Start()
 	{
-		//KeyPhrases = new List<string> { "forward", "backward", "left", "right" };
 		if (AutoStart)
 		{
-			StartVoskStt();
+			StartSpeechRecognition();
 		}
 	}
 
 	/// <summary>
-	/// Start speech to text (Python service only; Vosk implementation removed)
+	/// Start speech recognition (Python speech service).
 	/// </summary>
-	/// <param name="keyPhrases">Unused in Python mode.</param>
-	/// <param name="modelPath">Unused in Python mode.</param>
 	/// <param name="startMicrophone">Should the microphone start after initialization?</param>
-	/// <param name="maxAlternatives">The maximum number of alternative phrases detected</param>
-        public void StartVoskStt(List<string> keyPhrases = null, string modelPath = default, bool startMicrophone = true, int maxAlternatives = 3)
+        public void StartSpeechRecognition(bool startMicrophone = true)
         {
                 if (_isInitializing)
                 {
@@ -215,15 +227,6 @@ public class VoskSpeechToText : MonoBehaviour
 			return;
 		}
 
-                // Force Python service usage; Vosk implementation removed.
-                _usePythonService = true;
-
-                if (keyPhrases != null)
-		{
-			KeyPhrases = keyPhrases;
-		}
-
-                MaxAlternatives = maxAlternatives;
                 _startListeningAfterInitialization = startMicrophone;
 
                 StartCoroutine(StartPythonStt(startMicrophone));
@@ -300,11 +303,13 @@ public class VoskSpeechToText : MonoBehaviour
                                         }
                                 }
                                 VoiceProcessor.StartRecording(sr, fl, false);
+                                _activeRecordingSampleRate = sr > 0 ? sr : 16000;
                                 return;
                         }
 
                         GetRecordingFormat(out var sampleRate, out var frameLength);
                         VoiceProcessor.StartRecording(sampleRate, frameLength, false);
+                        _activeRecordingSampleRate = sampleRate > 0 ? sampleRate : 16000;
                 }
                 else
                 {
@@ -326,7 +331,7 @@ public class VoskSpeechToText : MonoBehaviour
 
                         if (!_didInit)
                         {
-                                StartVoskStt(startMicrophone: true);
+                                StartSpeechRecognition(startMicrophone: true);
                                 return;
                         }
 
@@ -353,13 +358,115 @@ public class VoskSpeechToText : MonoBehaviour
                         _pythonForceFlushRequested = false;
                         if (_running)
                         {
-                                VoiceProcessor.StopRecording();
+                                FlushCurrentSegment();
                         }
                 }
 
                 if (_threadedResultQueue.TryDequeue(out string voiceResult))
                 {
                     OnTranscriptionResult?.Invoke(voiceResult);
+                }
+        }
+
+        private int GetCurrentRecordingSampleRate()
+        {
+                if (_activeRecordingSampleRate > 0)
+                {
+                        return _activeRecordingSampleRate;
+                }
+                if (VoiceProcessor != null && VoiceProcessor.SampleRate > 0)
+                {
+                        return VoiceProcessor.SampleRate;
+                }
+                return 16000;
+        }
+
+        private static void AnalyzeAudioFrame(short[] samples, out float maxAmplitude, out float rms)
+        {
+                maxAmplitude = 0f;
+                rms = 0f;
+                if (samples == null || samples.Length == 0)
+                {
+                        return;
+                }
+
+                double sumSquares = 0.0;
+                for (int i = 0; i < samples.Length; i++)
+                {
+                        float amplitude = Mathf.Abs(samples[i]) / 32768f;
+                        if (amplitude > maxAmplitude)
+                        {
+                                maxAmplitude = amplitude;
+                        }
+                        sumSquares += amplitude * amplitude;
+                }
+
+                rms = Mathf.Sqrt((float)(sumSquares / samples.Length));
+        }
+
+        private void AppendPreRollLocked(short[] samples, int sampleRate)
+        {
+                if (!UseVadSegmentation || VadPreRollSeconds <= 0f || samples == null || samples.Length == 0)
+                {
+                        return;
+                }
+
+                _vadPreRollBuffer.AddRange(samples);
+                int maxSamples = Mathf.Max(0, Mathf.RoundToInt(Mathf.Max(0f, VadPreRollSeconds) * sampleRate));
+                if (maxSamples <= 0)
+                {
+                        _vadPreRollBuffer.Clear();
+                        return;
+                }
+
+                int overflow = _vadPreRollBuffer.Count - maxSamples;
+                if (overflow > 0)
+                {
+                        _vadPreRollBuffer.RemoveRange(0, overflow);
+                }
+        }
+
+        private void ApplyWakeWordWindowBoundary()
+        {
+                if (!_wakeWordOverrideActive)
+                {
+                        return;
+                }
+
+                if (_wakeWordPrimingStopPending)
+                {
+                        _wakeWordPrimingStopPending = false;
+                        return;
+                }
+
+                if (_defaultMaxRecordLengthCaptured)
+                {
+                        MaxRecordLength = _defaultMaxRecordLength;
+                }
+                _wakeWordOverrideActive = false;
+        }
+
+        private void FlushCurrentSegment()
+        {
+                short[] samples = null;
+                lock (_pythonBufferLock)
+                {
+                        if (_pythonBuffer.Count > 0)
+                        {
+                                samples = _pythonBuffer.ToArray();
+                                _pythonBuffer.Clear();
+                        }
+                        _pythonSegmentActive = false;
+                        _pythonSegmentStartTime = 0f;
+                        _vadSpeechTimerSec = 0f;
+                        _vadSilenceTimerSec = 0f;
+                }
+
+                ApplyWakeWordWindowBoundary();
+
+                if (samples != null && samples.Length > 0)
+                {
+                        StartCoroutine(SendAudioToPython(samples));
                 }
         }
 
@@ -372,6 +479,11 @@ public class VoskSpeechToText : MonoBehaviour
                         return;
                 }
 
+                if (samples == null || samples.Length == 0)
+                {
+                        return;
+                }
+
                 // If AEC is active, process the frame before buffering it for ASR.
                 if (EnableAec && AecEngine != null && AecEngine.enableAec && AecEngine.IsAvailable)
                 {
@@ -380,24 +492,92 @@ public class VoskSpeechToText : MonoBehaviour
                                 samples = processed;
                         }
                 }
+
+                int sampleRate = GetCurrentRecordingSampleRate();
+                float frameDurationSec = sampleRate > 0 ? (samples.Length / (float)sampleRate) : 0f;
+                AnalyzeAudioFrame(samples, out var framePeak, out var frameRms);
+
+                float endThreshold = Mathf.Max(0.001f, PythonServiceSilenceThreshold);
+                float startThreshold = Mathf.Max(endThreshold, endThreshold * Mathf.Max(1f, VadStartThresholdMultiplier));
+                float rmsScale = Mathf.Clamp(VadRmsThresholdScale, 0.2f, 1f);
+
+                bool isSpeechFrame = framePeak >= startThreshold || frameRms >= (startThreshold * rmsScale);
+                bool isSilenceFrame = framePeak < endThreshold && frameRms < (endThreshold * rmsScale);
+
+                bool shouldFlush = false;
+
                 lock (_pythonBufferLock)
                 {
-                        _pythonBuffer.AddRange(samples);
-                }
-
-                if (!_pythonSegmentActive)
-                {
-                        _pythonSegmentActive = true;
-                        _pythonSegmentStartTime = Time.realtimeSinceStartup;
-                }
-
-                if (MaxRecordLength > 0 && _pythonSegmentActive)
-                {
-                        var elapsed = Time.realtimeSinceStartup - _pythonSegmentStartTime;
-                        if (elapsed >= MaxRecordLength)
+                        if (UseVadSegmentation)
                         {
-                                _pythonForceFlushRequested = true;
+                                if (!_pythonSegmentActive)
+                                {
+                                        if (isSpeechFrame)
+                                        {
+                                                _vadSpeechTimerSec += frameDurationSec;
+                                        }
+                                        else
+                                        {
+                                                _vadSpeechTimerSec = 0f;
+                                        }
+
+                                        if (_vadSpeechTimerSec >= Mathf.Max(0.01f, VadActivationSeconds))
+                                        {
+                                                _pythonSegmentActive = true;
+                                                _pythonSegmentStartTime = Time.realtimeSinceStartup;
+                                                _pythonBuffer.Clear();
+                                                if (_vadPreRollBuffer.Count > 0)
+                                                {
+                                                        _pythonBuffer.AddRange(_vadPreRollBuffer);
+                                                }
+                                                _vadSpeechTimerSec = 0f;
+                                                _vadSilenceTimerSec = 0f;
+                                        }
+                                }
                         }
+                        else if (!_pythonSegmentActive)
+                        {
+                                _pythonSegmentActive = true;
+                                _pythonSegmentStartTime = Time.realtimeSinceStartup;
+                        }
+
+                        if (_pythonSegmentActive)
+                        {
+                                _pythonBuffer.AddRange(samples);
+
+                                if (UseVadSegmentation)
+                                {
+                                        if (isSilenceFrame)
+                                        {
+                                                _vadSilenceTimerSec += frameDurationSec;
+                                        }
+                                        else
+                                        {
+                                                _vadSilenceTimerSec = 0f;
+                                        }
+
+                                        if (VadSilenceSeconds > 0f && _vadSilenceTimerSec >= VadSilenceSeconds)
+                                        {
+                                                shouldFlush = true;
+                                        }
+                                }
+
+                                if (MaxRecordLength > 0f)
+                                {
+                                        var elapsed = Time.realtimeSinceStartup - _pythonSegmentStartTime;
+                                        if (elapsed >= MaxRecordLength)
+                                        {
+                                                shouldFlush = true;
+                                        }
+                                }
+                        }
+
+                        AppendPreRollLocked(samples, sampleRate);
+                }
+
+                if (shouldFlush)
+                {
+                        _pythonForceFlushRequested = true;
                 }
         }
 
@@ -405,8 +585,6 @@ public class VoskSpeechToText : MonoBehaviour
         private void VoiceProcessorOnRecordingStart()
         {
                 ClearPythonBuffer();
-                _pythonSegmentActive = false;
-                _pythonSegmentStartTime = 0f;
         }
 
         private void VoiceProcessorOnOnRecordingStop()
@@ -414,7 +592,7 @@ public class VoskSpeechToText : MonoBehaviour
                 StartCoroutine(HandlePythonRecordingStop(_running));
                 if (VerboseStopLogging)
                 {
-                        Debug.Log("[VoskSpeechToText] Recording stopped");
+                        Debug.Log("[SpeechToText] Recording stopped");
                 }
         }
 
@@ -448,6 +626,7 @@ public class VoskSpeechToText : MonoBehaviour
                         ClearPythonBuffer();
                         GetRecordingFormat(out var sampleRate, out var frameLength);
                         VoiceProcessor.StartRecording(sampleRate, frameLength, false);
+                        _activeRecordingSampleRate = sampleRate > 0 ? sampleRate : 16000;
                 }
                 else
                 {
@@ -462,6 +641,9 @@ public class VoskSpeechToText : MonoBehaviour
                 lock (_pythonBufferLock)
                 {
                         _pythonBuffer.Clear();
+                        _vadPreRollBuffer.Clear();
+                        _vadSpeechTimerSec = 0f;
+                        _vadSilenceTimerSec = 0f;
                 }
 
                 _pythonSegmentActive = false;
@@ -480,37 +662,30 @@ public class VoskSpeechToText : MonoBehaviour
                                 _pythonBuffer.Clear();
                         }
 
+                        _vadPreRollBuffer.Clear();
+                        _vadSpeechTimerSec = 0f;
+                        _vadSilenceTimerSec = 0f;
                         _pythonSegmentActive = false;
                         _pythonSegmentStartTime = 0f;
-                }
-
-                if (samples != null && samples.Length > 0)
-                {
-                        yield return SendAudioToPython(samples);
-                }
-
-                if (_wakeWordOverrideActive)
-                {
-                        if (_wakeWordPrimingStopPending)
-                        {
-                                _wakeWordPrimingStopPending = false;
-                        }
-                        else
-                        {
-                                if (_defaultMaxRecordLengthCaptured)
-                                {
-                                        MaxRecordLength = _defaultMaxRecordLength;
-                                }
-
-                                _wakeWordOverrideActive = false;
-                        }
                 }
 
                 if (restartRecording && _running)
                 {
                         GetRecordingFormat(out var sampleRate, out var frameLength);
                         VoiceProcessor.StartRecording(sampleRate, frameLength, false);
+                        _activeRecordingSampleRate = sampleRate > 0 ? sampleRate : 16000;
                 }
+
+                ApplyWakeWordWindowBoundary();
+
+                // Do not block restart on HTTP round-trip; otherwise we create
+                // dead-air gaps and lose words between chunks.
+                if (samples != null && samples.Length > 0)
+                {
+                        StartCoroutine(SendAudioToPython(samples));
+                }
+
+                yield break;
         }
 
         private IEnumerator SendAudioToPython(short[] samples)
@@ -547,7 +722,7 @@ public class VoskSpeechToText : MonoBehaviour
                 var payload = new byte[samples.Length * sizeof(short)];
                 Buffer.BlockCopy(samples, 0, payload, 0, payload.Length);
 
-                var sampleRate = VoiceProcessor.SampleRate > 0 ? VoiceProcessor.SampleRate : 16000;
+                var sampleRate = _activeRecordingSampleRate > 0 ? _activeRecordingSampleRate : 16000;
                 var url = BuildPythonServiceUrl(sampleRate);
                 if (string.IsNullOrEmpty(url))
                 {
@@ -628,8 +803,8 @@ public class VoskSpeechToText : MonoBehaviour
                 return maxAmplitude < PythonServiceSilenceThreshold;
         }
 
-        // Allow external components to temporarily mute microphone capture while local audio is playing
-        private void SetPlaybackMute(bool value)
+        // Allow external components to temporarily mute microphone capture while local audio is playing.
+        public void SetPlaybackMute(bool value)
         {
                 _playbackMute = value;
         }

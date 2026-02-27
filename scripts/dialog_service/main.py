@@ -27,6 +27,18 @@ _TRAILING_CONNECTOR_RE = re.compile(
     r"(?:\b(?:and|or|but|to|of|with|for|in|on|at|through|about|into|from)\b[\s,;:]*)+$",
     re.IGNORECASE,
 )
+_LEADING_STAGE_CUE_RE = re.compile(
+    r"^\s*(?:\([^)]{1,180}\)|\[[^\]]{1,180}\]|\*[^*]{1,180}\*)[\s,;:!\.\-]*"
+)
+_WRAPPED_STAGE_RE = re.compile(r"^\s*(?:\([^)]{1,260}\)|\[[^\]]{1,260}\]|\*[^*]{1,260}\*)\s*$")
+_STAGE_HINT_RE = re.compile(
+    r"\b("
+    r"chuckle|chuckles|laugh|laughs|sigh|sighs|whisper|whispers|"
+    r"tone|voice|rasp|raspy|smile|smiles|grin|grins|giggle|giggles|"
+    r"narrat|stage|emotion|mood|sarcastic|dramatic|warmly|softly"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -135,6 +147,38 @@ def _compress_reply_by_words(text: str, max_words: int) -> str:
     if len(words) <= max_words:
         return (text or "").strip()
     return " ".join(words[:max_words]).strip()
+
+
+def _strip_leading_stage_cues(text: str) -> str:
+    current = (text or "").strip()
+    while current:
+        match = _LEADING_STAGE_CUE_RE.match(current)
+        if not match:
+            break
+        cue = match.group(0) or ""
+        if not _STAGE_HINT_RE.search(cue):
+            break
+        next_value = current[match.end() :].lstrip()
+        if next_value == current:
+            break
+        current = next_value
+    return current
+
+
+def _sanitize_tts_text(text: str) -> str:
+    current = (text or "").strip()
+    if not current:
+        return ""
+
+    current = _strip_leading_stage_cues(current)
+    if not current:
+        return ""
+
+    # Drop pure stage-direction outputs such as "(A low chuckle, ...)".
+    if _WRAPPED_STAGE_RE.match(current) and _STAGE_HINT_RE.search(current):
+        return ""
+
+    return current.strip()
 
 
 class DialogService:
@@ -249,6 +293,10 @@ class DialogService:
             return
 
         answer_text = self._extract_answer_text(reply_text)
+        answer_text = _sanitize_tts_text(answer_text)
+        if not answer_text:
+            print("[dialog] dropped stage-direction-like reply text")
+            return
         if self.reply_compress:
             answer_text = _compress_reply_for_latency(
                 answer_text,

@@ -37,6 +37,7 @@ class LauncherDefaults:
     openai_transcribe_prompt: str
     intent_launch_triggers: List[str]
     intent_exit_keywords: List[str]
+    intent_use_llm_classifier: bool
     extra_env: Dict[str, str]
     default_voice_cmd: str
     default_voice_dir: str
@@ -136,6 +137,26 @@ def _config_get_string_list(data: Dict[str, object], *path: str) -> List[str]:
         return [value for value in values if value]
 
     return []
+
+
+def _config_get_bool(data: Dict[str, object], *path: str) -> Optional[bool]:
+    node: object = data
+    for key in path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+
+    if isinstance(node, bool):
+        return node
+    if isinstance(node, (int, float)):
+        return bool(node)
+    if isinstance(node, str):
+        text = node.strip().lower()
+        if text in {"1", "true", "t", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "f", "no", "n", "off"}:
+            return False
+    return None
 
 
 def _normalize_manifest_path(raw: str, repo_root: Path) -> str:
@@ -540,22 +561,34 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
     intent_exit_keywords = _config_get_string_list(
         intent_cfg, "exit_keywords"
     ) or _config_get_string_list(launcher_config, "exit_keywords")
+    intent_use_llm_classifier = _config_get_bool(intent_cfg, "use_llm_classifier")
+    if intent_use_llm_classifier is None:
+        intent_use_llm_classifier = False
 
     asr_python_cmd = _quote_command_token(asr_python)
     tts_python_cmd = _quote_command_token(tts_python)
     telemetry_main = _quote_command_token(str(script_dir / "telemetry_service" / "main.py"))
     launcher_main = _quote_command_token(str(script_dir / "game_launcher" / "main.py"))
 
-    # Packaged runtime detection priority:
-    # 1) bundled service executables under runtime/dist/services
-    # 2) python module/script commands (dev mode)
-    voice_exe = _find_packaged_service_executable(repo_root, "voice_service")
-    piper_exe = _find_packaged_service_executable(repo_root, "piper_http")
-    qwen_exe = _find_packaged_service_executable(repo_root, "qwen_tts_http")
-    intent_exe = _find_packaged_service_executable(repo_root, "intent_service")
-    dialog_exe = _find_packaged_service_executable(repo_root, "dialog_service")
-    telemetry_exe = _find_packaged_service_executable(repo_root, "telemetry_service")
-    launcher_exe = _find_packaged_service_executable(repo_root, "game_launcher")
+    # In source/dev mode we should default to Python scripts so local edits take
+    # effect immediately. Packaged services are used by default only when frozen.
+    use_packaged_services = running_frozen or _env_bool("VOICE_AGENT_USE_PACKAGED_SERVICES", False)
+    if use_packaged_services:
+        voice_exe = _find_packaged_service_executable(repo_root, "voice_service")
+        piper_exe = _find_packaged_service_executable(repo_root, "piper_http")
+        qwen_exe = _find_packaged_service_executable(repo_root, "qwen_tts_http")
+        intent_exe = _find_packaged_service_executable(repo_root, "intent_service")
+        dialog_exe = _find_packaged_service_executable(repo_root, "dialog_service")
+        telemetry_exe = _find_packaged_service_executable(repo_root, "telemetry_service")
+        launcher_exe = _find_packaged_service_executable(repo_root, "game_launcher")
+    else:
+        voice_exe = ""
+        piper_exe = ""
+        qwen_exe = ""
+        intent_exe = ""
+        dialog_exe = ""
+        telemetry_exe = ""
+        launcher_exe = ""
 
     source_service_available = service_dir.exists()
 
@@ -649,6 +682,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         openai_transcribe_prompt=openai_transcribe_prompt,
         intent_launch_triggers=intent_launch_triggers,
         intent_exit_keywords=intent_exit_keywords,
+        intent_use_llm_classifier=intent_use_llm_classifier,
         extra_env=env_cfg,
         default_voice_cmd=default_voice_cmd,
         default_voice_dir=default_voice_dir,
@@ -961,6 +995,7 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
         env["INTENT_LAUNCH_TRIGGERS"] = json.dumps(defaults.intent_launch_triggers, ensure_ascii=False)
     if defaults.intent_exit_keywords:
         env["INTENT_EXIT_KEYWORDS"] = json.dumps(defaults.intent_exit_keywords, ensure_ascii=False)
+    env["INTENT_USE_LLM_CLASSIFIER"] = "1" if defaults.intent_use_llm_classifier else "0"
     if args.env_file is not None:
         apply_env_file(args.env_file, env)
 
@@ -1114,6 +1149,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     dirs = _resolve_directories(args)
     _validate_paths(parser=parser, args=args, commands=commands, dirs=dirs)
     env = _build_runtime_env(args, defaults)
+    if commands.intent is not None:
+        print("[voice-agent] intent command:", " ".join(commands.intent))
+    else:
+        print("[voice-agent] intent command: <disabled>")
+    print(
+        "[voice-agent] INTENT_USE_LLM_CLASSIFIER="
+        + str(env.get("INTENT_USE_LLM_CLASSIFIER", ""))
+    )
     handles = _build_handles(commands, dirs, env)
     return _run_supervisor(handles, env, no_wait=args.no_wait)
 

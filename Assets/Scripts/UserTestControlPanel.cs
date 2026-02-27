@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -26,7 +26,7 @@ namespace RobotVoice
 
         [Header("Voice Service")]
         [SerializeField, Tooltip("HTTP endpoint for the Piper HTTP /speak route")]
-        private string voiceServiceUrl = "http://127.0.0.1:5005/speak";
+        private string voiceServiceUrl = VoiceAgentDefaults.PiperSpeakUrl;
         [SerializeField, Tooltip("Default voice code passed to the TTS endpoint")]
         private string defaultVoiceCode = "en_US";
         [SerializeField, Tooltip("Additional voice codes shown in the dropdown")]
@@ -97,15 +97,15 @@ namespace RobotVoice
         private float cameraClientActiveWindowSeconds = 6f;
 
         [SerializeField, Tooltip("Python voice service base URL used to get/set runtime LLM system prompt.")]
-        private string llmServiceBaseUrl = "http://127.0.0.1:8000";
+        private string llmServiceBaseUrl = VoiceAgentDefaults.AsrBaseUrl;
         [SerializeField, Tooltip("Ollama base URL used by /api/vision/describe.")]
-        private string ollamaBaseUrl = "http://127.0.0.1:11434";
+        private string ollamaBaseUrl = VoiceAgentDefaults.OllamaBaseUrl;
         [SerializeField, Tooltip("Default multimodal model for camera description.")]
-        private string defaultVisionModel = "gemma3:4b";
+        private string defaultVisionModel = VoiceAgentDefaults.DefaultVisionModel;
         [SerializeField, Tooltip("Default prompt used when /api/vision/describe request has empty prompt.")]
         private string defaultVisionPrompt = "Describe what you see in this camera frame in 2-4 concise sentences.";
         [SerializeField, Tooltip("Telemetry dashboard base URL served by telemetry_service.")]
-        private string telemetryDashboardUrl = "http://127.0.0.1:8101/dashboard";
+        private string telemetryDashboardUrl = VoiceAgentDefaults.TelemetryDashboardUrl;
 
         private HttpListener listener;
         private CancellationTokenSource shutdownToken;
@@ -161,7 +161,7 @@ namespace RobotVoice
         {
             try
             {
-                // 优先取环境变量覆盖：VOICE_MODELS_DIR 或 PIPER_MODELS_DIR
+                // 浼樺厛鍙栫幆澧冨彉閲忚鐩栵細VOICE_MODELS_DIR 鎴?PIPER_MODELS_DIR
                 var keys = new[] { "VOICE_MODELS_DIR", "PIPER_MODELS_DIR" };
                 foreach (var key in keys)
                 {
@@ -432,7 +432,7 @@ namespace RobotVoice
                 return;
             }
 
-            if (optimizeExternalPreviewForTracking && !IsCameraClientActive())
+            if (useExternalCameraTexture && optimizeExternalPreviewForTracking && !IsCameraClientActive())
             {
                 // No active viewer: skip camera encoding to avoid stealing CPU from tracking.
                 return;
@@ -459,7 +459,7 @@ namespace RobotVoice
                     }
                     return;
                 }
-                if (tex is WebCamTexture extCam && !extCam.isPlaying && _appIsVisible)
+                if (tex is WebCamTexture extCam && !extCam.isPlaying)
                 {
                     try { extCam.Play(); } catch { }
                 }
@@ -692,7 +692,7 @@ namespace RobotVoice
                     await piHub.SendFacePresetAsync("sad", duration).ConfigureAwait(false);
                     await WriteJsonAsync(context.Response, 200, "ok", "face set to sad").ConfigureAwait(false);
                     return;
-                case "verysad": // verySad → lower-cased
+                case "verysad": // verySad 鈫?lower-cased
                     await piHub.SendFacePresetAsync("verySad", duration).ConfigureAwait(false);
                     await WriteJsonAsync(context.Response, 200, "ok", "face set to verySad").ConfigureAwait(false);
                     return;
@@ -707,8 +707,7 @@ namespace RobotVoice
                     await WriteJsonAsync(context.Response, 200, "ok", $"face command {value}").ConfigureAwait(false);
                     return;
                 default:
-                    // 未知模式统一按“预设名”处理，走与 happy 等相同路径
-                    // 发送所选预设名（避免多变体覆盖导致瞬时回退 neutral）
+                    // Unknown mode: treat it as a preset name (same path as "happy"/etc).
                     await piHub.SendFacePresetAsync(mode, duration).ConfigureAwait(false);
                     await WriteJsonAsync(context.Response, 200, "ok", $"face preset set to {mode}").ConfigureAwait(false);
                     return;
@@ -928,7 +927,7 @@ namespace RobotVoice
                 requestedInstruct = string.Empty;
             }
 
-            // 优先让 Unity 侧直接播放（经由 VoiceGameLauncher → Piper /speak）
+            // Prefer Unity local playback via VoiceGameLauncher -> Piper /speak.
             if (voiceLauncher != null)
             {
                 ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel");
@@ -939,7 +938,7 @@ namespace RobotVoice
                 return;
             }
 
-            // 回退：如果未绑定 VoiceGameLauncher，则仍向语音服务发送请求（但不会在本机播放）
+            // Fallback: if VoiceGameLauncher is not bound, call voice service directly (no local playback).
             var url = (voiceServiceUrl ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(url))
             {
@@ -1046,7 +1045,7 @@ namespace RobotVoice
             var url = (llmServiceBaseUrl ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(url))
             {
-                url = "http://127.0.0.1:8000";
+                url = VoiceAgentDefaults.AsrBaseUrl;
             }
             return url.TrimEnd('/');
         }
@@ -1060,7 +1059,7 @@ namespace RobotVoice
             }
             if (string.IsNullOrWhiteSpace(url))
             {
-                url = "http://127.0.0.1:11434";
+                url = VoiceAgentDefaults.OllamaBaseUrl;
             }
             return url.TrimEnd('/');
         }
@@ -1082,7 +1081,7 @@ namespace RobotVoice
             {
                 return model;
             }
-            return "gemma3:4b";
+            return VoiceAgentDefaults.DefaultVisionModel;
         }
 
         private bool TryGetLatestCameraJpegCopy(out byte[] jpeg)
@@ -2033,6 +2032,11 @@ namespace RobotVoice
             {
                 SetOrRemoveStringList(intentObj, "exit_keywords", ParsePhraseList(value));
             }
+            bool boolValue;
+            if (TryReadOptionalBool(requestObj, "use_llm_intent_classifier", out boolValue))
+            {
+                SetOrRemoveString(intentObj, "use_llm_classifier", boolValue ? "true" : "false");
+            }
 
             // Clean up legacy flat keys when intent rules are stored in nested intent object.
             root.Remove("launch_triggers");
@@ -2095,6 +2099,7 @@ namespace RobotVoice
             {
                 exitKeywords = GetDefaultExitKeywords();
             }
+            var useLlmIntentClassifier = ReadOptionalBool(intentObj, "use_llm_classifier", false);
 
             var openaiApiKey = (openaiObj["api_key"]?.Value ?? string.Empty).Trim();
             var payload = new JSONObject();
@@ -2130,11 +2135,12 @@ namespace RobotVoice
             }
             if (string.IsNullOrWhiteSpace(ollamaModel))
             {
-                ollamaModel = "gemma3:4b";
+                ollamaModel = VoiceAgentDefaults.DefaultVisionModel;
             }
             payload["ollama_model"] = ollamaModel;
             payload["launch_triggers"] = string.Join(", ", launchTriggers);
             payload["exit_keywords"] = string.Join(", ", exitKeywords);
+            payload["use_llm_intent_classifier"] = useLlmIntentClassifier;
             payload["effective_game_manifest_path"] = ResolveGameManifestPath();
             await WriteRawJsonAsync(response, 200, payload.ToString()).ConfigureAwait(false);
         }
@@ -2285,13 +2291,13 @@ namespace RobotVoice
             var model = NormalizeOllamaModelName(requiredModel);
             if (string.IsNullOrWhiteSpace(model))
             {
-                model = "gemma3:4b";
+                model = VoiceAgentDefaults.DefaultVisionModel;
             }
 
             var url = (baseUrl ?? string.Empty).Trim().TrimEnd('/');
             if (string.IsNullOrWhiteSpace(url))
             {
-                url = "http://127.0.0.1:11434";
+                url = VoiceAgentDefaults.OllamaBaseUrl;
             }
             url += "/api/tags";
 
@@ -2361,7 +2367,7 @@ namespace RobotVoice
                 return fromEnv;
             }
 
-            return "gemma3:4b";
+            return VoiceAgentDefaults.DefaultVisionModel;
         }
 
         private static string NormalizeOllamaModelName(string raw)
@@ -2587,6 +2593,18 @@ namespace RobotVoice
             return true;
         }
 
+        private static bool TryReadOptionalBool(JSONObject obj, string key, out bool value)
+        {
+            value = false;
+            if (obj == null || string.IsNullOrWhiteSpace(key) || !obj.HasKey(key))
+            {
+                return false;
+            }
+
+            var raw = (obj[key]?.Value ?? string.Empty).Trim();
+            return TryParseBool(raw, out value);
+        }
+
         private static JSONObject EnsureObjectNode(JSONObject root, string key)
         {
             if (root != null)
@@ -2684,6 +2702,18 @@ namespace RobotVoice
             return values;
         }
 
+        private static bool ReadOptionalBool(JSONObject obj, string key, bool fallback)
+        {
+            if (obj == null || string.IsNullOrWhiteSpace(key) || !obj.HasKey(key))
+            {
+                return fallback;
+            }
+
+            var raw = (obj[key]?.Value ?? string.Empty).Trim();
+            bool value;
+            return TryParseBool(raw, out value) ? value : fallback;
+        }
+
         private static List<string> ParsePhraseList(string text)
         {
             var values = new List<string>();
@@ -2695,8 +2725,8 @@ namespace RobotVoice
 
             var merged = text
                 .Replace("\r\n", "\n")
-                .Replace('，', ',')
-                .Replace('；', ';')
+                .Replace('\uFF0C', ',')
+                .Replace('\uFF1B', ';')
                 .Replace(';', ',')
                 .Replace('\n', ',');
             var parts = merged.Split(',');
@@ -4313,1921 +4343,88 @@ namespace RobotVoice
         private string BuildTelemetryLandingHtml()
         {
             var dashboardBase = string.IsNullOrWhiteSpace(telemetryDashboardUrl)
-                ? "http://127.0.0.1:8101/dashboard"
+                ? VoiceAgentDefaults.TelemetryDashboardUrl
                 : telemetryDashboardUrl.Trim();
-            var dashboardBaseJs = EscapeJson(dashboardBase);
 
-            var sb = new StringBuilder(4096);
-            sb.AppendLine(@"<!DOCTYPE html>");
-            sb.AppendLine(@"<html lang=""en"">");
-            sb.AppendLine(@"<head>");
-            sb.AppendLine(@"<meta charset=""utf-8"">");
-            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
-            sb.AppendLine(@"<title>Telemetry Dashboard</title>");
-            sb.AppendLine(@"<style>");
-            sb.AppendLine(@"body { margin:0; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#0f1117; color:#f4f4f4; }");
-            sb.AppendLine(@"header { padding:14px 18px; border-bottom:1px solid rgba(255,255,255,0.1); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }");
-            sb.AppendLine(@"input, select, button { border-radius:8px; border:1px solid rgba(255,255,255,0.2); background:#131c2d; color:#f4f4f4; height:34px; padding:0 10px; }");
-            sb.AppendLine(@"button { cursor:pointer; background:#2a5ca6; border-color:#4278ca; }");
-            sb.AppendLine(@"a { color:#93c5fd; text-decoration:none; border-bottom:1px dashed #93c5fd; }");
-            sb.AppendLine(@"#frame { width:100%; height:calc(100vh - 74px); border:0; background:#0b1220; }");
-            sb.AppendLine(@"</style>");
-            sb.AppendLine(@"</head>");
-            sb.AppendLine(@"<body>");
-            sb.AppendLine(@"<header>");
-            sb.AppendLine(@"<a href=""/"">Back to Panel</a>");
-            sb.AppendLine(@"<label>User</label><input id=""userId"" value=""demo_user"">");
-            sb.AppendLine(@"<label>Days</label>");
-            sb.AppendLine(@"<select id=""days""><option>7</option><option selected>14</option><option>21</option><option>30</option></select>");
-            sb.AppendLine(@"<button id=""openBtn"">Open Dashboard</button>");
-            sb.AppendLine(@"</header>");
-            sb.AppendLine(@"<iframe id=""frame"" title=""telemetry dashboard""></iframe>");
-            sb.AppendLine(@"<script>");
-            sb.AppendLine($@"const dashboardBase = ""{dashboardBaseJs}"";");
-            sb.AppendLine(@"const frame = document.getElementById('frame');");
-            sb.AppendLine(@"const userInput = document.getElementById('userId');");
-            sb.AppendLine(@"const daysInput = document.getElementById('days');");
-            sb.AppendLine(@"function buildUrl(){");
-            sb.AppendLine(@"  const user = encodeURIComponent((userInput.value || 'demo_user').trim() || 'demo_user');");
-            sb.AppendLine(@"  const days = encodeURIComponent(daysInput.value || '14');");
-            sb.AppendLine(@"  return `${dashboardBase}?user_id=${user}&days=${days}`;");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function openDash(){ frame.src = buildUrl(); }");
-            sb.AppendLine(@"document.getElementById('openBtn').addEventListener('click', openDash);");
-            sb.AppendLine(@"openDash();");
-            sb.AppendLine(@"</script>");
-            sb.AppendLine(@"</body>");
-            sb.AppendLine(@"</html>");
-            return sb.ToString();
+            var html = LoadPanelTemplate("telemetry.html");
+            if (string.IsNullOrEmpty(html))
+            {
+                return BuildMissingTemplateHtml("telemetry.html");
+            }
+
+            return html.Replace("{{TELEMETRY_DASHBOARD_URL}}", EscapeJson(dashboardBase));
         }
 
         private static string BuildGameConfigHtml()
         {
-            var sb = new StringBuilder(8192);
-            sb.AppendLine(@"<!DOCTYPE html>");
-            sb.AppendLine(@"<html lang=""en"">");
-            sb.AppendLine(@"<head>");
-            sb.AppendLine(@"<meta charset=""utf-8"">");
-            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
-            sb.AppendLine(@"<title>Game Config</title>");
-            sb.AppendLine(@"<style>");
-            sb.AppendLine(@"body{margin:0;padding:1rem 1.1rem;background:#0f1117;color:#f5f7ff;font-family:'Segoe UI',sans-serif;}");
-            sb.AppendLine(@"h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}");
-            sb.AppendLine(@"a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}");
-            sb.AppendLine(@"small{opacity:.75;}");
-            sb.AppendLine(@".card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:.9rem;margin-top:.7rem;}");
-            sb.AppendLine(@".toolbar{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin:.6rem 0;}");
-            sb.AppendLine(@"button{cursor:pointer;border:none;border-radius:8px;padding:.55rem .9rem;background:#3b82f6;color:#fff;font-weight:600;}");
-            sb.AppendLine(@"button.secondary{background:#334155;}");
-            sb.AppendLine(@"button.warn{background:#dc2626;}");
-            sb.AppendLine(@"input{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#f5f7ff;padding:.44rem .58rem;}");
-            sb.AppendLine(@".pathRow{display:flex;gap:.4rem;align-items:center;}");
-            sb.AppendLine(@".pathRow input{flex:1;}");
-            sb.AppendLine(@".tinyBtn{padding:.42rem .55rem;font-size:.78rem;white-space:nowrap;background:#334155;}");
-            sb.AppendLine(@"table{width:100%;border-collapse:collapse;font-size:.9rem;}");
-            sb.AppendLine(@"th,td{border-bottom:1px solid rgba(255,255,255,.1);padding:.42rem .35rem;vertical-align:top;}");
-            sb.AppendLine(@"th{text-align:left;font-size:.78rem;opacity:.85;text-transform:uppercase;letter-spacing:.04em;}");
-            sb.AppendLine(@"#status{margin-top:.6rem;opacity:.9;}");
-            sb.AppendLine(@"#manifestPath{font-family:Consolas,monospace;font-size:.8rem;opacity:.8;word-break:break-all;}");
-            sb.AppendLine(@"@media(max-width:900px){table,thead,tbody,tr,th,td{display:block;} th{display:none;} tr{border:1px solid rgba(255,255,255,.12);border-radius:10px;margin:.6rem 0;padding:.45rem;} td{border:none;padding:.28rem 0;} td::before{display:block;font-size:.72rem;opacity:.7;margin-bottom:.15rem;}}");
-            sb.AppendLine(@"</style>");
-            sb.AppendLine(@"</head>");
-            sb.AppendLine(@"<body>");
-            sb.AppendLine(@"<h1>Game Config</h1>");
-            sb.AppendLine(@"<p><a href=""/index.html"">Back to User Panel</a></p>");
-            sb.AppendLine(@"<div class=""card"">");
-            sb.AppendLine(@"<small>配置会写入本机 manifest：游戏名、语音关键词和可执行路径；可用 Browse 在宿主机选文件，路径会自动规范为绝对路径。</small>");
-            sb.AppendLine(@"<div id=""manifestPath""></div>");
-            sb.AppendLine(@"<div class=""toolbar"">");
-            sb.AppendLine(@"<button onclick=""addRow()"">Add Game</button>");
-            sb.AppendLine(@"<button class=""secondary"" onclick=""reloadGames()"">Reload</button>");
-            sb.AppendLine(@"<button onclick=""saveGames()"">Save</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<table>");
-            sb.AppendLine(@"<thead><tr><th>ID</th><th>Game Name</th><th>Keywords</th><th>Executable Path</th><th>Workdir</th><th>Action</th></tr></thead>");
-            sb.AppendLine(@"<tbody id=""rows""></tbody>");
-            sb.AppendLine(@"</table>");
-            sb.AppendLine(@"<div id=""status"">Ready.</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<script>");
-            sb.AppendLine(@"const rowsEl = document.getElementById('rows');");
-            sb.AppendLine(@"const statusEl = document.getElementById('status');");
-            sb.AppendLine(@"const manifestPathEl = document.getElementById('manifestPath');");
-            sb.AppendLine(@"let gameRows = [];");
-            sb.AppendLine(@"function esc(v){ return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'); }");
-            sb.AppendLine(@"function splitKeywords(text){");
-            sb.AppendLine(@"  return String(text||'').split(',').map(s=>s.trim()).filter(Boolean);");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function render(){");
-            sb.AppendLine(@"  if(!rowsEl) return;");
-            sb.AppendLine(@"  if(!gameRows.length){ rowsEl.innerHTML = '<tr><td colspan=""6"">No games configured.</td></tr>'; return; }");
-            sb.AppendLine(@"  rowsEl.innerHTML = gameRows.map((g,i)=>`");
-            sb.AppendLine(@"    <tr>");
-            sb.AppendLine(@"      <td data-label=""ID""><input value=""${esc(g.id)}"" oninput=""updateField(${i},'id',this.value)"" placeholder=""disc_golf""></td>");
-            sb.AppendLine(@"      <td data-label=""Game Name""><input value=""${esc(g.name)}"" oninput=""updateField(${i},'name',this.value)"" placeholder=""Disc Golf""></td>");
-            sb.AppendLine(@"      <td data-label=""Keywords""><input value=""${esc(g.keywords_text)}"" oninput=""updateField(${i},'keywords_text',this.value)"" placeholder=""disc golf,discgolf,frisbee golf""></td>");
-            sb.AppendLine(@"      <td data-label=""Executable Path""><div class=""pathRow""><input value=""${esc(g.exec)}"" oninput=""updateField(${i},'exec',this.value)"" placeholder=""D:\\Games\\DiscGolf\\DiscGolf.exe""><button type=""button"" class=""tinyBtn"" onclick=""browseExec(${i})"">Browse</button></div></td>");
-            sb.AppendLine(@"      <td data-label=""Workdir""><input value=""${esc(g.workdir)}"" oninput=""updateField(${i},'workdir',this.value)"" placeholder=""D:\\Games\\DiscGolf""></td>");
-            sb.AppendLine(@"      <td data-label=""Action""><button class=""warn"" onclick=""removeRow(${i})"">Delete</button></td>");
-            sb.AppendLine(@"    </tr>`).join('');");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function updateField(i,key,val){ if(!gameRows[i]) return; gameRows[i][key]=val; }");
-            sb.AppendLine(@"function addRow(){ gameRows.push({id:'',name:'',keywords_text:'',exec:'',workdir:''}); render(); }");
-            sb.AppendLine(@"function removeRow(i){ gameRows.splice(i,1); render(); }");
-            sb.AppendLine(@"async function browseExec(i){");
-            sb.AppendLine(@"  if(!gameRows[i]) return;");
-            sb.AppendLine(@"  statusEl.textContent = 'Opening file picker on host...';");
-            sb.AppendLine(@"  const payload = {");
-            sb.AppendLine(@"    title: 'Select Game Executable',");
-            sb.AppendLine(@"    filter: 'Executable Files (*.exe)|*.exe|All Files (*.*)|*.*',");
-            sb.AppendLine(@"    initial_dir: String(gameRows[i].workdir || ''),");
-            sb.AppendLine(@"    initial_filename: String(gameRows[i].exec || '')");
-            sb.AppendLine(@"  };");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch('/api/file/pick', {");
-            sb.AppendLine(@"      method:'POST',");
-            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
-            sb.AppendLine(@"      body: JSON.stringify(payload)");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    const data = await resp.json();");
-            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }");
-            sb.AppendLine(@"    if(data.cancelled){ statusEl.textContent = 'Browse cancelled.'; return; }");
-            sb.AppendLine(@"    const path = String(data.path || '').trim();");
-            sb.AppendLine(@"    const dir = String(data.directory || '').trim();");
-            sb.AppendLine(@"    if(path){ gameRows[i].exec = path; }");
-            sb.AppendLine(@"    if(dir){ gameRows[i].workdir = dir; }");
-            sb.AppendLine(@"    render();");
-            sb.AppendLine(@"    statusEl.textContent = 'Selected: ' + (path || 'no file');");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function reloadGames(){");
-            sb.AppendLine(@"  statusEl.textContent = 'Loading...';");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch('/api/game/manifest');");
-            sb.AppendLine(@"    const data = await resp.json();");
-            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }");
-            sb.AppendLine(@"    const list = Array.isArray(data.games) ? data.games : [];");
-            sb.AppendLine(@"    gameRows = list.map(g=>({");
-            sb.AppendLine(@"      id: String(g.id||''),");
-            sb.AppendLine(@"      name: String(g.name||''),");
-            sb.AppendLine(@"      exec: String(g.exec||''),");
-            sb.AppendLine(@"      workdir: String(g.workdir||''),");
-            sb.AppendLine(@"      keywords_text: Array.isArray(g.keywords) ? g.keywords.join(', ') : ''");
-            sb.AppendLine(@"    }));");
-            sb.AppendLine(@"    if(manifestPathEl){ manifestPathEl.textContent = 'Manifest: ' + String(data.path||''); }");
-            sb.AppendLine(@"    render();");
-            sb.AppendLine(@"    const unresolved = Number(data.unresolved_count || 0);");
-            sb.AppendLine(@"    statusEl.textContent = unresolved > 0");
-            sb.AppendLine(@"      ? ('Loaded with warnings: ' + unresolved + ' unresolved path fields. Please fill absolute paths and save.')");
-            sb.AppendLine(@"      : 'Loaded.';");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function saveGames(){");
-            sb.AppendLine(@"  const payload = {");
-            sb.AppendLine(@"    games: gameRows.map(g=>({");
-            sb.AppendLine(@"      id: String(g.id||'').trim(),");
-            sb.AppendLine(@"      name: String(g.name||'').trim(),");
-            sb.AppendLine(@"      keywords: splitKeywords(g.keywords_text),");
-            sb.AppendLine(@"      exec: String(g.exec||'').trim(),");
-            sb.AppendLine(@"      workdir: String(g.workdir||'').trim()");
-            sb.AppendLine(@"    }))");
-            sb.AppendLine(@"  };");
-            sb.AppendLine(@"  statusEl.textContent = 'Saving...';");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch('/api/game/manifest', {");
-            sb.AppendLine(@"      method:'POST',");
-            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
-            sb.AppendLine(@"      body: JSON.stringify(payload)");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    const data = await resp.json();");
-            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }");
-            sb.AppendLine(@"    statusEl.textContent = 'Saved. ' + (data.message || 'Restart intent_service and game_launcher to apply immediately.');");
-            sb.AppendLine(@"    await reloadGames();");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"reloadGames();");
-            sb.AppendLine(@"</script>");
-            sb.AppendLine(@"</body>");
-            sb.AppendLine(@"</html>");
-            return sb.ToString();
+            return LoadPanelTemplateOrFallback("games.html");
         }
 
         private static string BuildRuntimeConfigHtml()
         {
-            var sb = new StringBuilder(8192);
-            sb.AppendLine(@"<!DOCTYPE html>");
-            sb.AppendLine(@"<html lang=""en"">");
-            sb.AppendLine(@"<head>");
-            sb.AppendLine(@"<meta charset=""utf-8"">");
-            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
-            sb.AppendLine(@"<title>Runtime Config</title>");
-            sb.AppendLine(@"<style>");
-            sb.AppendLine(@"body{margin:0;padding:1rem 1.1rem;background:#0f1117;color:#f5f7ff;font-family:'Segoe UI',sans-serif;}");
-            sb.AppendLine(@"h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}");
-            sb.AppendLine(@"a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}");
-            sb.AppendLine(@"small{opacity:.75;}");
-            sb.AppendLine(@".card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:.9rem;margin-top:.7rem;}");
-            sb.AppendLine(@".grid{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;}");
-            sb.AppendLine(@".field{display:flex;flex-direction:column;gap:.3rem;}");
-            sb.AppendLine(@"label{font-size:.85rem;opacity:.9;}");
-            sb.AppendLine(@"input{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#f5f7ff;padding:.44rem .58rem;}");
-            sb.AppendLine(@".toolbar{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin-top:.8rem;}");
-            sb.AppendLine(@"button{cursor:pointer;border:none;border-radius:8px;padding:.55rem .9rem;background:#3b82f6;color:#fff;font-weight:600;}");
-            sb.AppendLine(@"button.secondary{background:#334155;}");
-            sb.AppendLine(@"details{margin-top:.8rem;border:1px solid rgba(255,255,255,.16);border-radius:10px;padding:.55rem .7rem;background:rgba(255,255,255,.03);}");
-            sb.AppendLine(@"summary{cursor:pointer;font-size:.9rem;opacity:.92;}");
-            sb.AppendLine(@"#status{margin-top:.6rem;opacity:.9;}");
-            sb.AppendLine(@"#configPath{font-family:Consolas,monospace;font-size:.8rem;opacity:.8;word-break:break-all;}");
-            sb.AppendLine(@"@media(max-width:900px){.grid{grid-template-columns:1fr;}}");
-            sb.AppendLine(@"</style>");
-            sb.AppendLine(@"</head>");
-            sb.AppendLine(@"<body>");
-            sb.AppendLine(@"<h1>Runtime Config</h1>");
-            sb.AppendLine(@"<p><a href=""/index.html"">Back to User Panel</a></p>");
-            sb.AppendLine(@"<div class=""card"">");
-            sb.AppendLine(@"<small>For most users, only OpenAI, voice command phrases, and game manifest path need changes.</small>");
-            sb.AppendLine(@"<div id=""configPath""></div>");
-            sb.AppendLine(@"<div class=""grid"">");
-            sb.AppendLine(@"<div class=""field""><label>OpenAI API Key</label><input id=""openaiKey"" type=""password"" placeholder=""sk-...""></div>");
-            sb.AppendLine(@"<div class=""field""><label>OpenAI Transcribe Model</label><input id=""openaiModel"" placeholder=""gpt-4o-mini-transcribe""></div>");
-            sb.AppendLine(@"<div class=""field""><label>OpenAI Base URL (Optional)</label><input id=""openaiBaseUrl"" placeholder=""https://api.openai.com/v1""></div>");
-            sb.AppendLine(@"<div class=""field""><label>OpenAI ASR Prompt</label><input id=""openaiPrompt"" placeholder=""Optional. Leave empty to avoid prompt bias/hallucination.""></div>");
-            sb.AppendLine(@"<div class=""field""><label>Launch Triggers (comma separated)</label><input id=""launchTriggers"" placeholder=""open, start, launch, play, begin, load""></div>");
-            sb.AppendLine(@"<div class=""field""><label>Exit Keywords (comma separated)</label><input id=""exitKeywords"" placeholder=""back home, go home, quit, exit, stop, close game""></div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<details>");
-            sb.AppendLine(@"  <summary>Advanced (optional): Manifest paths</summary>");
-            sb.AppendLine(@"  <div class=""grid"">");
-            sb.AppendLine(@"    <div class=""field""><label>Intent Manifest Path</label><input id=""intentManifest"" placeholder=""Usually leave empty (default manifest)""></div>");
-            sb.AppendLine(@"    <div class=""field""><label>Game Manifest Path</label><input id=""gameManifest"" placeholder=""Usually leave empty (same as intent manifest)""></div>");
-            sb.AppendLine(@"  </div>");
-            sb.AppendLine(@"</details>");
-            sb.AppendLine(@"<div class=""toolbar"">");
-            sb.AppendLine(@"<button onclick=""saveConfig()"">Save</button>");
-            sb.AppendLine(@"<button class=""secondary"" onclick=""reloadConfig()"">Reload</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div id=""status"">Ready.</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<script>");
-            sb.AppendLine(@"const statusEl = document.getElementById('status');");
-            sb.AppendLine(@"const configPathEl = document.getElementById('configPath');");
-            sb.AppendLine(@"const intentManifestEl = document.getElementById('intentManifest');");
-            sb.AppendLine(@"const gameManifestEl = document.getElementById('gameManifest');");
-            sb.AppendLine(@"const openaiKeyEl = document.getElementById('openaiKey');");
-            sb.AppendLine(@"const openaiModelEl = document.getElementById('openaiModel');");
-            sb.AppendLine(@"const openaiBaseUrlEl = document.getElementById('openaiBaseUrl');");
-            sb.AppendLine(@"const openaiPromptEl = document.getElementById('openaiPrompt');");
-            sb.AppendLine(@"const launchTriggersEl = document.getElementById('launchTriggers');");
-            sb.AppendLine(@"const exitKeywordsEl = document.getElementById('exitKeywords');");
-            sb.AppendLine(@"function setText(el, v){ if(el){ el.value = String(v || ''); } }");
-            sb.AppendLine(@"function getText(el){ return el ? String(el.value || '').trim() : ''; }");
-            sb.AppendLine(@"async function reloadConfig(){");
-            sb.AppendLine(@"  statusEl.textContent = 'Loading...';");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch('/api/runtime/config');");
-            sb.AppendLine(@"    const data = await resp.json();");
-            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status)); }");
-            sb.AppendLine(@"    setText(intentManifestEl, data.intent_manifest_path);");
-            sb.AppendLine(@"    setText(gameManifestEl, data.game_manifest_path);");
-            sb.AppendLine(@"    setText(openaiKeyEl, data.openai_api_key);");
-            sb.AppendLine(@"    setText(openaiModelEl, data.openai_transcribe_model);");
-            sb.AppendLine(@"    setText(openaiBaseUrlEl, data.openai_base_url);");
-            sb.AppendLine(@"    setText(openaiPromptEl, data.openai_transcribe_prompt);");
-            sb.AppendLine(@"    setText(launchTriggersEl, data.launch_triggers);");
-            sb.AppendLine(@"    setText(exitKeywordsEl, data.exit_keywords);");
-            sb.AppendLine(@"    if(configPathEl){ configPathEl.textContent = 'Config: ' + String(data.path || ''); }");
-            sb.AppendLine(@"    statusEl.textContent = 'Loaded.';");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function saveConfig(){");
-            sb.AppendLine(@"  statusEl.textContent = 'Saving...';");
-            sb.AppendLine(@"  const payload = {");
-            sb.AppendLine(@"    intent_manifest_path: getText(intentManifestEl),");
-            sb.AppendLine(@"    game_manifest_path: getText(gameManifestEl),");
-            sb.AppendLine(@"    openai_api_key: getText(openaiKeyEl),");
-            sb.AppendLine(@"    openai_transcribe_model: getText(openaiModelEl),");
-            sb.AppendLine(@"    openai_base_url: getText(openaiBaseUrlEl),");
-            sb.AppendLine(@"    openai_transcribe_prompt: getText(openaiPromptEl),");
-            sb.AppendLine(@"    launch_triggers: getText(launchTriggersEl),");
-            sb.AppendLine(@"    exit_keywords: getText(exitKeywordsEl)");
-            sb.AppendLine(@"  };");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch('/api/runtime/config', {");
-            sb.AppendLine(@"      method:'POST',");
-            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
-            sb.AppendLine(@"      body: JSON.stringify(payload)");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    const data = await resp.json();");
-            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status)); }");
-            sb.AppendLine(@"    statusEl.textContent = data.message || 'Saved. Restart local services to apply.';");
-            sb.AppendLine(@"    await reloadConfig();");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"reloadConfig();");
-            sb.AppendLine(@"</script>");
-            sb.AppendLine(@"</body>");
-            sb.AppendLine(@"</html>");
-            return sb.ToString();
+            return LoadPanelTemplateOrFallback("runtime.html");
         }
 
         private static string BuildSetupWizardHtml()
         {
-            var sb = new StringBuilder(12288);
-            sb.AppendLine(@"<!DOCTYPE html>");
-            sb.AppendLine(@"<html lang=""en"">");
-            sb.AppendLine(@"<head>");
-            sb.AppendLine(@"<meta charset=""utf-8"">");
-            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
-            sb.AppendLine(@"<title>First-Run Wizard</title>");
-            sb.AppendLine(@"<style>");
-            sb.AppendLine(@"body{margin:0;padding:1rem 1.1rem;background:#0f1117;color:#f5f7ff;font-family:'Segoe UI',sans-serif;}");
-            sb.AppendLine(@"h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}");
-            sb.AppendLine(@"h2{margin:.1rem 0 .6rem 0;font-size:1rem;letter-spacing:.03em;text-transform:uppercase;opacity:.9;}");
-            sb.AppendLine(@"a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}");
-            sb.AppendLine(@"small{opacity:.75;}");
-            sb.AppendLine(@".card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:.9rem;margin-top:.7rem;}");
-            sb.AppendLine(@".grid{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;}");
-            sb.AppendLine(@".field{display:flex;flex-direction:column;gap:.3rem;}");
-            sb.AppendLine(@"label{font-size:.85rem;opacity:.9;}");
-            sb.AppendLine(@"input,select{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#f5f7ff;padding:.5rem .58rem;}");
-            sb.AppendLine(@"input[type=checkbox]{width:auto;}");
-            sb.AppendLine(@".toggle{display:flex;align-items:center;gap:.5rem;margin-top:.2rem;}");
-            sb.AppendLine(@".toolbar{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin-top:.8rem;}");
-            sb.AppendLine(@"button{cursor:pointer;border:none;border-radius:8px;padding:.55rem .9rem;background:#3b82f6;color:#fff;font-weight:600;}");
-            sb.AppendLine(@"button.secondary{background:#334155;}");
-            sb.AppendLine(@"#status{margin-top:.75rem;opacity:.92;white-space:pre-wrap;}");
-            sb.AppendLine(@"@media(max-width:900px){.grid{grid-template-columns:1fr;}}");
-            sb.AppendLine(@"</style>");
-            sb.AppendLine(@"</head>");
-            sb.AppendLine(@"<body>");
-            sb.AppendLine(@"<h1>First-Run Wizard</h1>");
-            sb.AppendLine(@"<p><a href=""/index.html"">Back to User Panel</a></p>");
-            sb.AppendLine(@"<div class=""card"">");
-            sb.AppendLine(@"<h2>Step 0: Prerequisites (Piper + Ollama)</h2>");
-            sb.AppendLine(@"<div class=""grid"">");
-            sb.AppendLine(@"<div class=""field""><label>Piper Status</label><input id=""piperStatus"" readonly></div>");
-            sb.AppendLine(@"<div class=""field""><label>Piper Model Path</label><input id=""piperModelPath"" readonly></div>");
-            sb.AppendLine(@"<div class=""field""><label>Ollama Status</label><input id=""ollamaStatus"" readonly></div>");
-            sb.AppendLine(@"<div class=""field""><label>Ollama Model</label><input id=""ollamaModel"" placeholder=""gemma3:4b""></div>");
-            sb.AppendLine(@"<div class=""field""><label>Model Downloaded</label><input id=""ollamaModelReady"" readonly></div>");
-            sb.AppendLine(@"<div class=""field""><label>Ollama Hint</label><input id=""ollamaHint"" readonly></div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""toolbar"">");
-            sb.AppendLine(@"<button class=""secondary"" onclick=""refreshPrereq()"">Refresh Prerequisites</button>");
-            sb.AppendLine(@"<button class=""secondary"" onclick=""installOllama()"">Install Ollama (winget)</button>");
-            sb.AppendLine(@"<button class=""secondary"" onclick=""pullOllamaModel()"">Pull Ollama Model</button>");
-            sb.AppendLine(@"<button class=""secondary"" onclick=""openOllamaDownload()"">Open Ollama Download</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<small>Piper is bundled when packaging includes runtime/piper. Ollama is guided-install and model pull is separate.</small>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""card"">");
-            sb.AppendLine(@"<h2>Step 1: ASR Mode and Listening</h2>");
-            sb.AppendLine(@"<div class=""grid"">");
-            sb.AppendLine(@"<div class=""field""><label>ASR Mode</label><select id=""asrMode""><option value=""offline"">offline</option><option value=""api"">api (OpenAI)</option></select></div>");
-            sb.AppendLine(@"<div class=""field""><label>Agent Listening</label><div class=""toggle""><input id=""listeningOn"" type=""checkbox""><span>Enable microphone listening</span></div></div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""card"">");
-            sb.AppendLine(@"<h2>Step 2: OpenAI</h2>");
-            sb.AppendLine(@"<div class=""grid"">");
-            sb.AppendLine(@"<div class=""field""><label>OpenAI API Key</label><input id=""openaiKey"" type=""password"" placeholder=""sk-...""></div>");
-            sb.AppendLine(@"<div class=""field""><label>Transcribe Model</label><input id=""openaiModel"" placeholder=""gpt-4o-mini-transcribe""></div>");
-            sb.AppendLine(@"<div class=""field""><label>OpenAI Base URL (Optional)</label><input id=""openaiBaseUrl"" placeholder=""https://api.openai.com/v1""></div>");
-            sb.AppendLine(@"<div class=""field""><label>ASR Prompt</label><input id=""openaiPrompt"" placeholder=""Optional. Leave empty to avoid prompt bias/hallucination.""></div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""card"">");
-            sb.AppendLine(@"<h2>Step 3: Intent Rules and Manifest</h2>");
-            sb.AppendLine(@"<div class=""grid"">");
-            sb.AppendLine(@"<div class=""field""><label>Launch Triggers (comma separated)</label><input id=""launchTriggers"" placeholder=""open, start, launch, play, begin, load""></div>");
-            sb.AppendLine(@"<div class=""field""><label>Exit Keywords (comma separated)</label><input id=""exitKeywords"" placeholder=""back home, go home, quit, exit, stop, close game""></div>");
-            sb.AppendLine(@"<div class=""field""><label>Intent Manifest Path (Optional)</label><input id=""intentManifest"" placeholder=""Usually keep default""></div>");
-            sb.AppendLine(@"<div class=""field""><label>Game Manifest Path (Optional)</label><input id=""gameManifest"" placeholder=""Usually same as intent manifest""></div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<small>Advanced game rows (name/keywords/executable path) are in <a href=""/games.html"">Game Config</a>.</small>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""card"">");
-            sb.AppendLine(@"<h2>Step 4: Save</h2>");
-            sb.AppendLine(@"<div class=""toolbar"">");
-            sb.AppendLine(@"<button onclick=""saveAll()"">Save Wizard Config</button>");
-            sb.AppendLine(@"<button class=""secondary"" onclick=""reloadAll()"">Reload</button>");
-            sb.AppendLine(@"<button class=""secondary"" onclick=""location.href='/games.html'"">Open Game Config</button>");
-            sb.AppendLine(@"<button class=""secondary"" onclick=""location.href='/runtime.html'"">Open Runtime Config</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div id=""status"">Ready.</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<script>");
-            sb.AppendLine(@"const statusEl = document.getElementById('status');");
-            sb.AppendLine(@"const asrModeEl = document.getElementById('asrMode');");
-            sb.AppendLine(@"const listeningEl = document.getElementById('listeningOn');");
-            sb.AppendLine(@"const openaiKeyEl = document.getElementById('openaiKey');");
-            sb.AppendLine(@"const openaiModelEl = document.getElementById('openaiModel');");
-            sb.AppendLine(@"const openaiBaseUrlEl = document.getElementById('openaiBaseUrl');");
-            sb.AppendLine(@"const openaiPromptEl = document.getElementById('openaiPrompt');");
-            sb.AppendLine(@"const launchTriggersEl = document.getElementById('launchTriggers');");
-            sb.AppendLine(@"const exitKeywordsEl = document.getElementById('exitKeywords');");
-            sb.AppendLine(@"const intentManifestEl = document.getElementById('intentManifest');");
-            sb.AppendLine(@"const gameManifestEl = document.getElementById('gameManifest');");
-            sb.AppendLine(@"const piperStatusEl = document.getElementById('piperStatus');");
-            sb.AppendLine(@"const piperModelPathEl = document.getElementById('piperModelPath');");
-            sb.AppendLine(@"const ollamaStatusEl = document.getElementById('ollamaStatus');");
-            sb.AppendLine(@"const ollamaModelEl = document.getElementById('ollamaModel');");
-            sb.AppendLine(@"const ollamaModelReadyEl = document.getElementById('ollamaModelReady');");
-            sb.AppendLine(@"const ollamaHintEl = document.getElementById('ollamaHint');");
-            sb.AppendLine(@"function setText(el, v){ if(el){ el.value = String(v || ''); } }");
-            sb.AppendLine(@"function getText(el){ return el ? String(el.value || '').trim() : ''; }");
-            sb.AppendLine(@"async function fetchJson(url, opts){");
-            sb.AppendLine(@"  const resp = await fetch(url, opts);");
-            sb.AppendLine(@"  const data = await resp.json();");
-            sb.AppendLine(@"  if(!resp.ok || data.status !== 'ok'){");
-            sb.AppendLine(@"    throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  return data;");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function refreshPrereq(){");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const data = await fetchJson('/api/runtime/prereq');");
-            sb.AppendLine(@"    setText(piperStatusEl, data.piper_ready ? 'ready' : 'missing executable/model');");
-            sb.AppendLine(@"    setText(piperModelPathEl, data.piper_model_path || '');");
-            sb.AppendLine(@"    if(!getText(ollamaModelEl)){ setText(ollamaModelEl, data.ollama_model || 'gemma3:4b'); }");
-            sb.AppendLine(@"    const ollamaState = data.ollama_running ? 'running' : (data.ollama_installed ? 'installed (not running)' : 'not installed');");
-            sb.AppendLine(@"    setText(ollamaStatusEl, ollamaState);");
-            sb.AppendLine(@"    setText(ollamaModelReadyEl, data.ollama_model_available ? 'yes' : 'no');");
-            sb.AppendLine(@"    const hint = data.ollama_error ? String(data.ollama_error) : (data.needs_ollama_setup ? 'install Ollama and pull model' : 'ready');");
-            sb.AppendLine(@"    setText(ollamaHintEl, hint);");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    setText(ollamaStatusEl, 'error');");
-            sb.AppendLine(@"    setText(ollamaHintEl, String(err));");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function openOllamaDownload(){");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const data = await fetchJson('/api/runtime/ollama', {");
-            sb.AppendLine(@"      method:'POST',");
-            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
-            sb.AppendLine(@"      body: JSON.stringify({ action:'open_download' })");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    statusEl.textContent = data.message || 'opened download page';");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function installOllama(){");
-            sb.AppendLine(@"  statusEl.textContent = 'Starting Ollama install...';");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const data = await fetchJson('/api/runtime/ollama', {");
-            sb.AppendLine(@"      method:'POST',");
-            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
-            sb.AppendLine(@"      body: JSON.stringify({ action:'install' })");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    statusEl.textContent = data.message || 'install started';");
-            sb.AppendLine(@"    await refreshPrereq();");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function pullOllamaModel(){");
-            sb.AppendLine(@"  const model = getText(ollamaModelEl) || 'gemma3:4b';");
-            sb.AppendLine(@"  statusEl.textContent = 'Starting model pull: ' + model + ' ...';");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const data = await fetchJson('/api/runtime/ollama', {");
-            sb.AppendLine(@"      method:'POST',");
-            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
-            sb.AppendLine(@"      body: JSON.stringify({ action:'pull_model', model })");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    statusEl.textContent = data.message || ('model pull started: ' + model);");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function reloadAll(){");
-            sb.AppendLine(@"  statusEl.textContent = 'Loading...';");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const [asrData, runtimeData, prereqData] = await Promise.all([");
-            sb.AppendLine(@"      fetchJson('/api/asr'),");
-            sb.AppendLine(@"      fetchJson('/api/runtime/config'),");
-            sb.AppendLine(@"      fetchJson('/api/runtime/prereq')");
-            sb.AppendLine(@"    ]);");
-            sb.AppendLine(@"    setText(asrModeEl, asrData.mode || 'offline');");
-            sb.AppendLine(@"    if(listeningEl){ listeningEl.checked = !!asrData.listening; }");
-            sb.AppendLine(@"    setText(openaiKeyEl, runtimeData.openai_api_key);");
-            sb.AppendLine(@"    setText(openaiModelEl, runtimeData.openai_transcribe_model);");
-            sb.AppendLine(@"    setText(openaiBaseUrlEl, runtimeData.openai_base_url);");
-            sb.AppendLine(@"    setText(openaiPromptEl, runtimeData.openai_transcribe_prompt);");
-            sb.AppendLine(@"    setText(ollamaModelEl, runtimeData.ollama_model || prereqData.ollama_model || 'gemma3:4b');");
-            sb.AppendLine(@"    setText(launchTriggersEl, runtimeData.launch_triggers);");
-            sb.AppendLine(@"    setText(exitKeywordsEl, runtimeData.exit_keywords);");
-            sb.AppendLine(@"    setText(intentManifestEl, runtimeData.intent_manifest_path);");
-            sb.AppendLine(@"    setText(gameManifestEl, runtimeData.game_manifest_path);");
-            sb.AppendLine(@"    setText(piperStatusEl, prereqData.piper_ready ? 'ready' : 'missing executable/model');");
-            sb.AppendLine(@"    setText(piperModelPathEl, prereqData.piper_model_path || '');");
-            sb.AppendLine(@"    const ollamaState = prereqData.ollama_running ? 'running' : (prereqData.ollama_installed ? 'installed (not running)' : 'not installed');");
-            sb.AppendLine(@"    setText(ollamaStatusEl, ollamaState);");
-            sb.AppendLine(@"    setText(ollamaModelReadyEl, prereqData.ollama_model_available ? 'yes' : 'no');");
-            sb.AppendLine(@"    const hint = prereqData.ollama_error ? String(prereqData.ollama_error) : (prereqData.needs_ollama_setup ? 'install Ollama and pull model' : 'ready');");
-            sb.AppendLine(@"    setText(ollamaHintEl, hint);");
-            sb.AppendLine(@"    statusEl.textContent = 'Loaded.';");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function saveAll(){");
-            sb.AppendLine(@"  statusEl.textContent = 'Saving...';");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    await fetchJson('/api/runtime/config', {");
-            sb.AppendLine(@"      method:'POST',");
-            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
-            sb.AppendLine(@"      body: JSON.stringify({");
-            sb.AppendLine(@"        openai_api_key: getText(openaiKeyEl),");
-            sb.AppendLine(@"        openai_transcribe_model: getText(openaiModelEl),");
-            sb.AppendLine(@"        openai_base_url: getText(openaiBaseUrlEl),");
-            sb.AppendLine(@"        openai_transcribe_prompt: getText(openaiPromptEl),");
-            sb.AppendLine(@"        ollama_model: getText(ollamaModelEl),");
-            sb.AppendLine(@"        launch_triggers: getText(launchTriggersEl),");
-            sb.AppendLine(@"        exit_keywords: getText(exitKeywordsEl),");
-            sb.AppendLine(@"        intent_manifest_path: getText(intentManifestEl),");
-            sb.AppendLine(@"        game_manifest_path: getText(gameManifestEl)");
-            sb.AppendLine(@"      })");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    await fetchJson('/api/asr', {");
-            sb.AppendLine(@"      method:'POST',");
-            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
-            sb.AppendLine(@"      body: JSON.stringify({ action:'set_mode', mode:getText(asrModeEl) || 'offline' })");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    await fetchJson('/api/asr', {");
-            sb.AppendLine(@"      method:'POST',");
-            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
-            sb.AppendLine(@"      body: JSON.stringify({ action:'set_listening', listening:!!(listeningEl && listeningEl.checked) })");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    statusEl.textContent = 'Saved. Restart local services if executable/runtime paths changed.';");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"reloadAll();");
-            sb.AppendLine(@"</script>");
-            sb.AppendLine(@"</body>");
-            sb.AppendLine(@"</html>");
-            return sb.ToString();
+            return LoadPanelTemplateOrFallback("setup.html");
         }
-
 
         private static string BuildPanelHtml()
         {
-            var sb = new StringBuilder(8192);
-            sb.AppendLine(@"<!DOCTYPE html>");
-            sb.AppendLine(@"<html lang=""en"">");
-            sb.AppendLine(@"<head>");
-            sb.AppendLine(@"<meta charset=""utf-8"">");
-            sb.AppendLine(@"<title>Robot User Test Panel</title>");
-            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
-            sb.AppendLine(@"<style>");
-            sb.AppendLine(@"body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 1.5rem; background: #0f1117; color: #f4f4f4; line-height: 1.45; }");
-            sb.AppendLine(@"h1 { font-size: 1.6rem; margin-top: 0; }");
-            sb.AppendLine(@"section { margin-bottom: 1.75rem; padding: 1rem; border-radius: 12px; background: rgba(255,255,255,0.05); }");
-            sb.AppendLine(@"section h2 { margin-top: 0; font-size: 1.05rem; letter-spacing: 0.02em; text-transform: uppercase; opacity: 0.8; }");
-            sb.AppendLine(@"button { cursor: pointer; border: none; border-radius: 8px; padding: 0.65rem 1rem; margin: 0.35rem 0.35rem 0 0; background: #7c5dfa; color: #fff; font-size: 0.95rem; font-weight: 600; box-shadow: 0 4px 20px rgba(0,0,0,0.25); transition: transform 0.1s ease, box-shadow 0.1s ease; }");
-            sb.AppendLine(@"button:hover { transform: translateY(-1px); box-shadow: 0 6px 25px rgba(0,0,0,0.35); }");
-            sb.AppendLine(@"button:active { transform: translateY(0); box-shadow: 0 2px 12px rgba(0,0,0,0.25); }");
-            sb.AppendLine(@".controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.65rem; }");
-            sb.AppendLine(@"label { margin-right: 0.25rem; font-size: 0.85rem; opacity: 0.85; }");
-            sb.AppendLine(@"input[type=number], input[type=text], select { min-width: 4rem; padding: 0.4rem 0.6rem; border-radius: 6px; border: none; background: rgba(255,255,255,0.08); color: #f4f4f4; }");
-            sb.AppendLine(@"input[type=color] { width: 3rem; height: 2rem; border: none; border-radius: 6px; padding: 0; background: transparent; }");
-            sb.AppendLine(@"textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0.4rem; border-radius: 8px; border: none; background: rgba(255,255,255,0.08); color: #f4f4f4; font-size: 0.95rem; resize: vertical; }");
-            sb.AppendLine(@"#status { margin-top: 1rem; font-size: 0.95rem; opacity: 0.9; }");
-            sb.AppendLine(@".transcript-card { margin-bottom: 1.75rem; padding: 1.25rem; border-radius: 16px; background: linear-gradient(135deg, rgba(124,93,250,0.25), rgba(15,17,23,0.95)); border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 24px 60px rgba(0,0,0,0.45); }");
-            sb.AppendLine(@".transcript-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }");
-            sb.AppendLine(@".transcript-header h2 { margin: 0; font-size: 1.2rem; }");
-            sb.AppendLine(@".transcript-subtitle { font-size: 0.9rem; opacity: 0.8; margin-top: 0.25rem; }");
-            sb.AppendLine(@".ghost-btn { background: transparent; border: 1px solid rgba(255,255,255,0.35); color: #f4f4f4; padding: 0.45rem 1rem; border-radius: 999px; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; box-shadow: none; }");
-            sb.AppendLine(@".ghost-btn:hover { border-color: rgba(255,255,255,0.7); }");
-            sb.AppendLine(@".log-list { max-height: 360px; overflow-y: auto; margin-top: 1rem; padding-right: 0.25rem; }");
-            sb.AppendLine(@".log-entry { display: flex; gap: 0.75rem; padding: 0.65rem 0; border-bottom: 1px solid rgba(255,255,255,0.07); }");
-            sb.AppendLine(@".log-entry:last-child { border-bottom: none; }");
-            sb.AppendLine(@".log-icon { width: 42px; height: 42px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; font-weight: 600; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }");
-            sb.AppendLine(@".log-body { flex: 1; }");
-            sb.AppendLine(@".log-meta { font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.7; display: flex; gap: 0.35rem; align-items: center; }");
-            sb.AppendLine(@".log-speaker { font-weight: 600; letter-spacing: 0.08em; }");
-            sb.AppendLine(@".log-message { margin-top: 0.2rem; font-size: 0.95rem; color: #f8fafc; }");
-            sb.AppendLine(@".log-empty { padding: 1.2rem 0; font-size: 0.9rem; opacity: 0.6; text-align: center; }");
-            sb.AppendLine(@"</style>");
-            sb.AppendLine(@"</head>");
-            sb.AppendLine(@"<body>");
-            sb.AppendLine(@"<h1>Robot User Test Panel</h1>");
-            sb.AppendLine(@"<p>Connect to the same Wi-Fi network as the host running Unity and open this page from any browser.</p>");
-            sb.AppendLine(@"<p><a href=""/sdk.html"" style=""color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;"">Open SDK Visualizer</a></p>");
-            sb.AppendLine(@"<p><a href=""/telemetry.html"" style=""color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;"">Open Exercise Dashboard</a></p>");
-            sb.AppendLine(@"<p><a href=""/games.html"" style=""color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;"">Open Game Config</a></p>");
-            sb.AppendLine(@"<p><a href=""/runtime.html"" style=""color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;"">Open Runtime Config</a></p>");
-            sb.AppendLine(@"<p><a href=""/setup.html"" style=""color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;"">Open First-Run Wizard</a></p>");
-            sb.AppendLine(@"<div class=""transcript-card"">");
-            sb.AppendLine(@"<div class=""transcript-header"">");
-            sb.AppendLine(@"<div>");
-            sb.AppendLine(@"<h2>Live Transcript</h2>");
-            sb.AppendLine(@"<p class=""transcript-subtitle"">Monitor patient speech, wizard overrides, and agent coaching responses.</p>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<button class=""ghost-btn"" onclick=""refreshLog()"">Refresh</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div id=""transcriptLog"" class=""log-list""></div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<section>");
-            sb.AppendLine(@"<h2>LLM System Prompt</h2>");
-            sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:stretch;"">");
-            sb.AppendLine(@"<textarea id=""llmPromptText"" placeholder=""Edit runtime system prompt for /respond...""></textarea>");
-            sb.AppendLine(@"<div class=""controls"" style=""width:100%;"">");
-            sb.AppendLine(@"<button onclick=""loadLlmPrompt()"">Load Prompt</button>");
-            sb.AppendLine(@"<button onclick=""saveLlmPrompt()"">Save Prompt</button>");
-            sb.AppendLine(@"<button onclick=""resetLlmPrompt()"">Reset Prompt</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<small style=""opacity:0.75"">Applied in real time by python_voice_service /respond/config.</small>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</section>");
-            sb.AppendLine(@"<section>");
-            sb.AppendLine(@"<h2>Expressions</h2>");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<label for=""faceSeconds"">Duration (s)</label>");
-            sb.AppendLine(@"<input id=""faceSeconds"" type=""number"" min=""0"" step=""0.5"" value=""3"">");
-            sb.AppendLine(@"<label for=""faceSelect"">Preset</label>");
-            sb.AppendLine(@"<select id=""faceSelect"">");
-            sb.AppendLine(@"  <option value="""">-- Select --</option>");
-            sb.AppendLine(@"  <option value=""neutral"">neutral</option>");
-            sb.AppendLine(@"  <option value=""happy"">happy</option>");
-            sb.AppendLine(@"  <option value=""excited"">excited</option>");
-            sb.AppendLine(@"  <option value=""sad"">sad</option>");
-            sb.AppendLine(@"  <option value=""verysad"">verySad</option>");
-            sb.AppendLine(@"  <option value=""confused"">confused</option>");
-            sb.AppendLine(@"  <option value=""concerned"">concerned</option>");
-            sb.AppendLine(@"  <option value=""upset"">upset</option>");
-            sb.AppendLine(@"  <option disabled>──────────</option>");
-            sb.AppendLine(@"  <option value=""ANeutral"">ANeutral</option>");
-            sb.AppendLine(@"  <option value=""AHappy"">AHappy</option>");
-            sb.AppendLine(@"  <option value=""AConcerned"">AConcerned</option>");
-            sb.AppendLine(@"  <option value=""AConfused"">AConfused</option>");
-            sb.AppendLine(@"  <option value=""AUpset"">AUpset</option>");
-            sb.AppendLine(@"  <option value=""BNeutral"">BNeutral</option>");
-            sb.AppendLine(@"  <option value=""BHappy"">BHappy</option>");
-            sb.AppendLine(@"  <option value=""BConcerned"">BConcerned</option>");
-            sb.AppendLine(@"  <option value=""BConfused"">BConfused</option>");
-            sb.AppendLine(@"  <option value=""BUpset"">BUpset</option>");
-            sb.AppendLine(@"  <option value=""CNeutral"">CNeutral</option>");
-            sb.AppendLine(@"  <option value=""CHappy"">CHappy</option>");
-            sb.AppendLine(@"  <option value=""CConcerned"">CConcerned</option>");
-            sb.AppendLine(@"  <option value=""CConfused"">CConfused</option>");
-            sb.AppendLine(@"  <option value=""CUpset"">CUpset</option>");
-            sb.AppendLine(@"  <option value=""DNeutral"">DNeutral</option>");
-            sb.AppendLine(@"  <option value=""DHappy"">DHappy</option>");
-            sb.AppendLine(@"  <option value=""DConcerned"">DConcerned</option>");
-            sb.AppendLine(@"  <option value=""DConfused"">DConfused</option>");
-            sb.AppendLine(@"  <option value=""DUpset"">DUpset</option>");
-            sb.AppendLine(@"</select>");
-            sb.AppendLine(@"<input id=""faceCustom"" type=""text"" placeholder=""custom preset name"">");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<button onclick=""facePreset('excited')"">Excited</button>");
-            sb.AppendLine(@"<button onclick=""facePreset('happy')"">Happy</button>");
-            sb.AppendLine(@"<button onclick=""facePreset('neutral')"">Neutral</button>");
-            sb.AppendLine(@"<button onclick=""facePreset('sad')"">Sad</button>");
-            sb.AppendLine(@"<button onclick=""facePreset('verySad')"">Very Sad</button>");
-            sb.AppendLine(@"<button onclick=""faceSelected()"">Send Selected</button>");
-            sb.AppendLine(@"<button onclick=""customFace()"">Send Custom</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</section>");
-            sb.AppendLine(@"<section>");
-            sb.AppendLine(@"<h2>Camera</h2>");
-            sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:flex-start"">");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<button onclick=""startCameraPreview()"">Start Preview</button>");
-            sb.AppendLine(@"<button onclick=""stopCameraPreview()"">Stop Preview</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<img id=""cameraView"" src=""/camera.jpg"" alt=""camera"" style=""max-width:100%;width:640px;height:auto;border-radius:12px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 12px 36px rgba(0,0,0,0.35)""/>");
-            sb.AppendLine(@"<small style=""opacity:0.7"">Preview polling runs only when this page has focus or is fullscreen.</small>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</section>");
-            sb.AppendLine(@"<section>");
-            sb.AppendLine(@"<h2>Camera Vision (LLM)</h2>");
-            sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:stretch;"">");
-            sb.AppendLine(@"<input id=""visionModel"" type=""text"" placeholder=""Vision model (e.g. gemma3:4b)"" value=""gemma3:4b"">");
-            sb.AppendLine(@"<textarea id=""visionPrompt"" placeholder=""Ask the model what it sees in the current camera frame..."">Describe what you see and call out anything important for the current exercise.</textarea>");
-            sb.AppendLine(@"<div class=""controls"" style=""width:100%;"">");
-            sb.AppendLine(@"<button onclick=""describeCameraNow()"">Describe Current Frame</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<pre id=""visionResult"" style=""min-height:88px;margin-top:0.4rem;padding:0.65rem 0.75rem;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.25);white-space:pre-wrap;"">Result will appear here.</pre>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</section>");
-            sb.AppendLine(@"<section>");
-            sb.AppendLine(@"<h2>LED Lighting</h2>");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<input id=""ledColor"" type=""color"" value=""#00bfff"">");
-            sb.AppendLine(@"<label for=""ledBrightness"">Brightness</label>");
-            sb.AppendLine(@"<input id=""ledBrightness"" type=""number"" min=""0.1"" max=""1"" step=""0.1"" value=""0.8"">");
-            sb.AppendLine(@"<label for=""ledPeriod"">Period</label>");
-            sb.AppendLine(@"<input id=""ledPeriod"" type=""number"" min=""0.5"" step=""0.1"" value=""2"">");
-            sb.AppendLine(@"<label for=""ledDuration"">Duration</label>");
-            sb.AppendLine(@"<input id=""ledDuration"" type=""number"" min=""0"" step=""0.1"" value=""0"">");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<button onclick=""ledBreathe()"">Breathe</button>");
-            sb.AppendLine(@"<button onclick=""ledSolid()"">Solid</button>");
-            sb.AppendLine(@"<button onclick=""ledRandom()"">Random</button>");
-            sb.AppendLine(@"<button onclick=""send('/api/led',{mode:'off'})"">Off</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</section>");
-            sb.AppendLine(@"<section>");
-            sb.AppendLine(@"<h2>Flower Servo</h2>");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'open'})"">Open</button>");
-            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'close'})"">Close</button>");
-            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'open_hold'})"">Hold Open</button>");
-            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'close_hold'})"">Hold Close</button>");
-            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'center'})"">Center</button>");
-            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'stop'})"">Stop</button>");
-            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'open_slow'})"">Slow Open</button>");
-            sb.AppendLine(@"<button onclick=""send('/api/flower',{action:'close_slow'})"">Slow Close</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</section>");
-            sb.AppendLine(@"<section>");
-            sb.AppendLine(@"<h2>Voice &amp; TTS</h2>");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<label for=""voiceSelect"">Voice</label>");
-            sb.AppendLine(@"<select id=""voiceSelect"" onchange=""setVoice(this.value)""></select>");
-            sb.AppendLine(@"<label for=""ttsModelSelect"">TTS Model</label>");
-            sb.AppendLine(@"<select id=""ttsModelSelect"" onchange=""setTtsModel(this.value)""></select>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:stretch;"">");
-            sb.AppendLine(@"<textarea id=""speakText"" placeholder=""Type the phrase you want the robot to say""></textarea>");
-            sb.AppendLine(@"<div class=""controls"" style=""width:100%;"">");
-            sb.AppendLine(@"<label for=""voiceSpeed"">Speed</label>");
-            sb.AppendLine(@"<input id=""voiceSpeed"" type=""number"" min=""0.5"" max=""2"" step=""0.1"" value=""1"">");
-            sb.AppendLine(@"<label for=""voiceVolume"">Volume</label>");
-            sb.AppendLine(@"<input id=""voiceVolume"" type=""number"" min=""0.2"" max=""1.5"" step=""0.1"" value=""1"">");
-            sb.AppendLine(@"<button onclick=""speakNow()"">Speak</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</section>");
-
-            sb.AppendLine(@"<section>");
-            sb.AppendLine(@"<h2>Speech Recognition</h2>");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<label for=""asrModeSelect"">ASR Mode</label>");
-            sb.AppendLine(@"<select id=""asrModeSelect""></select>");
-            sb.AppendLine(@"<button onclick=""applyAsrMode()"">Apply Mode</button>");
-            sb.AppendLine(@"<button onclick=""refreshAsrStatus()"">Refresh Status</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<button onclick=""startAgentListening()"">Start Listening</button>");
-            sb.AppendLine(@"<button onclick=""pauseAgentListening()"">Pause Listening</button>");
-            sb.AppendLine(@"<span id=""asrState"" style=""font-size:0.9rem;opacity:0.85;"">Loading ASR status...</span>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</section>");
-
-            sb.AppendLine(@"<section>");
-            sb.AppendLine(@"<h2>Qwen TTS (Speaker + Emotion)</h2>");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<label for=""qwenSpeakerSelect"">Speaker</label>");
-            sb.AppendLine(@"<select id=""qwenSpeakerSelect""></select>");
-            sb.AppendLine(@"<label for=""qwenInstruct"">Emotion / Style</label>");
-            sb.AppendLine(@"<input id=""qwenInstruct"" type=""text"" value=""friendly"" placeholder=""fixed by server"">");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""controls"" style=""flex-direction:column;align-items:stretch;"">");
-            sb.AppendLine(@"<textarea id=""qwenSpeakText"" placeholder=""Text to synthesize with Qwen TTS""></textarea>");
-            sb.AppendLine(@"<div class=""controls"" style=""width:100%;"">");
-            sb.AppendLine(@"<button onclick=""qwenSpeakNow()"">Speak (Qwen)</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</section>");
-            sb.AppendLine(@"<section>");
-            sb.AppendLine(@"<h2>Game Control</h2>");
-            sb.AppendLine(@"<div class=""controls"">");
-            sb.AppendLine(@"<input id=""gameName"" type=""text"" placeholder=""Game ID (e.g. cornhole)"">");
-            sb.AppendLine(@"<button onclick=""launchGame()"">Launch</button>");
-            sb.AppendLine(@"<button onclick=""exitGame()"">Exit</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</section>");
-            sb.AppendLine(@"<div id=""status"">Ready.</div>");
-            sb.AppendLine(@"<script>");
-            sb.AppendLine(@"const statusEl = document.getElementById('status');");
-            sb.AppendLine(@"const voiceSelect = document.getElementById('voiceSelect');");
-            sb.AppendLine(@"const modelSelect = document.getElementById('ttsModelSelect');");
-            sb.AppendLine(@"const qwenSpeakerSelect = document.getElementById('qwenSpeakerSelect');");
-            sb.AppendLine(@"const asrModeSelect = document.getElementById('asrModeSelect');");
-            sb.AppendLine(@"const asrStateEl = document.getElementById('asrState');");
-            sb.AppendLine(@"const llmPromptEl = document.getElementById('llmPromptText');");
-            sb.AppendLine(@"const logContainer = document.getElementById('transcriptLog');");
-            sb.AppendLine(@"const cameraView = document.getElementById('cameraView');");
-            sb.AppendLine(@"const logRoleStyles = {");
-            sb.AppendLine(@"  user:{icon:'🧍',bg:'rgba(59,130,246,0.18)',color:'#60a5fa'},");
-            sb.AppendLine(@"  coach:{icon:'🤖',bg:'rgba(251,146,60,0.18)',color:'#fb923c'},");
-            sb.AppendLine(@"  wizard:{icon:'🪄',bg:'rgba(168,85,247,0.18)',color:'#c084fc'},");
-            sb.AppendLine(@"  system:{icon:'ℹ️',bg:'rgba(156,163,175,0.2)',color:'#d1d5db'}");
-            sb.AppendLine(@"};");
-            sb.AppendLine(@"function speakerFromRole(role){");
-            sb.AppendLine(@"  switch(role){");
-            sb.AppendLine(@"    case 'coach': return 'RACHEL';");
-            sb.AppendLine(@"    case 'wizard': return 'Wizard Override';");
-            sb.AppendLine(@"    case 'system': return 'System';");
-            sb.AppendLine(@"    default: return 'User';");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function escapeHtml(str){");
-            sb.AppendLine(@"  if(!str) return '';");
-            sb.AppendLine(@"  return String(str)");
-            sb.AppendLine(@"    .replace(/&/g,""&amp;"")");
-            sb.AppendLine(@"    .replace(/</g,""&lt;"")");
-            sb.AppendLine(@"    .replace(/>/g,""&gt;"")");
-            sb.AppendLine(@"    .replace(/""/g,""&quot;"")");
-            sb.AppendLine(@"    .replace(/'/g,""&#39;"");");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function formatLogTime(value){");
-            sb.AppendLine(@"  if(!value) return '';");
-            sb.AppendLine(@"  const date = new Date(value);");
-            sb.AppendLine(@"  if(isNaN(date.getTime())) return '';");
-            sb.AppendLine(@"  return date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function renderLog(entries){");
-            sb.AppendLine(@"  if(!logContainer) return;");
-            sb.AppendLine(@"  if(!Array.isArray(entries) || !entries.length){");
-            sb.AppendLine("    logContainer.innerHTML = '<div class=\"log-empty\">Conversations will appear here once the agent speaks.</div>';");
-            sb.AppendLine(@"    return;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  const nearBottom = (logContainer.scrollTop + logContainer.clientHeight) >= (logContainer.scrollHeight - 20);");
-            sb.AppendLine(@"  const html = entries.map(entry => {");
-            sb.AppendLine(@"    let role = typeof entry.role === 'string' ? entry.role.toLowerCase() : 'user';");
-            sb.AppendLine(@"    const src = typeof entry.source === 'string' ? entry.source.toLowerCase() : '';"); 
-            sb.AppendLine(@"    // 如果来源是对话服务，强制按 coach 展示，避免角色字符串异常被当成 user");
-            sb.AppendLine(@"    if (src.includes('dialog_service') || src === 'dialog' || src.includes('dialog')) { role = 'coach'; }");
-            sb.AppendLine(@"    // 面板触发（tester_panel）或显式标为 wizard 的，按 wizard 展示");
-            sb.AppendLine(@"    if (src.includes('tester_panel') || role === 'wizard') { role = 'wizard'; }");
-            sb.AppendLine(@"    const style = logRoleStyles[role] || logRoleStyles.user;");
-            sb.AppendLine(@"    const speaker = escapeHtml(entry.speaker || speakerFromRole(role));");
-            sb.AppendLine(@"    const text = escapeHtml(entry.message || '');");
-            sb.AppendLine(@"    const timestamp = formatLogTime(entry.timestamp);");
-            sb.AppendLine("    return `<div class=\"log-entry\"><div class=\"log-icon\" style=\"background:${style.bg};color:${style.color};\">${style.icon}</div><div class=\"log-body\"><div class=\"log-meta\"><span class=\"log-speaker\">${speaker}</span><span>•</span><span>${timestamp}</span></div><div class=\"log-message\">${text}</div></div></div>`;");
-            sb.AppendLine(@"  }).join('');");
-            sb.AppendLine(@"  logContainer.innerHTML = html;");
-            sb.AppendLine(@"  if(nearBottom){");
-            sb.AppendLine(@"    logContainer.scrollTop = logContainer.scrollHeight;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function refreshLog(){");
-            sb.AppendLine(@"  if(!logContainer) return;");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch('/api/logs');");
-            sb.AppendLine(@"    if(!resp.ok) return;");
-            sb.AppendLine(@"    const data = await resp.json();");
-            sb.AppendLine(@"    const entries = Array.isArray(data.entries) ? data.entries : [];");
-            sb.AppendLine(@"    renderLog(entries);");
-            sb.AppendLine(@"  } catch(err) {");
-            sb.AppendLine(@"    console.warn('log fetch failed', err);");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function send(endpoint, payload){");
-            sb.AppendLine(@"  statusEl.textContent = 'Sending ' + endpoint + ' ...';");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});");
-            sb.AppendLine(@"    const data = await resp.json();");
-            sb.AppendLine(@"    statusEl.textContent = data.status + ': ' + data.message;");
-            sb.AppendLine(@"    return data;");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"    return null;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function parseSeconds(){");
-            sb.AppendLine(@"  const seconds = parseFloat(document.getElementById('faceSeconds').value);");
-            sb.AppendLine(@"  return isNaN(seconds) ? 3 : seconds;");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function facePreset(name){");
-            sb.AppendLine(@"  send('/api/face',{mode:name,seconds:parseSeconds()});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function customFace(){");
-            sb.AppendLine(@"  const value = document.getElementById('faceCustom').value||'happy';");
-            sb.AppendLine(@"  send('/api/face',{mode:'custom',value:value,seconds:parseSeconds()});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function faceSelected(){");
-            sb.AppendLine(@"  const sel = document.getElementById('faceSelect');");
-            sb.AppendLine(@"  if(!sel) return;");
-            sb.AppendLine(@"  let value = (sel.value||'').trim();");
-            sb.AppendLine(@"  if(!value){ statusEl.textContent='error: select a preset'; return; }");
-            sb.AppendLine(@"  // 兼容：若用户列表里仍有空格，发送前去掉空格");
-            sb.AppendLine(@"  value = value.replace(/\s+/g,'');");
-            sb.AppendLine(@"  send('/api/face',{mode:value,seconds:parseSeconds()});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function ledBreathe(){");
-            sb.AppendLine(@"  const color = document.getElementById('ledColor').value;");
-            sb.AppendLine(@"  const brightness = parseFloat(document.getElementById('ledBrightness').value)||0.8;");
-            sb.AppendLine(@"  const period = parseFloat(document.getElementById('ledPeriod').value)||2;");
-            sb.AppendLine(@"  const duration = parseFloat(document.getElementById('ledDuration').value)||0;");
-            sb.AppendLine(@"  send('/api/led',{mode:'breathe',color:color,brightness:brightness,period:period,duration:duration});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function ledSolid(){");
-            sb.AppendLine(@"  const color = document.getElementById('ledColor').value;");
-            sb.AppendLine(@"  const brightness = parseFloat(document.getElementById('ledBrightness').value)||0.8;");
-            sb.AppendLine(@"  const duration = parseFloat(document.getElementById('ledDuration').value)||0;");
-            sb.AppendLine(@"  send('/api/led',{mode:'solid',color:color,brightness:brightness,duration:duration});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function ledRandom(){");
-            sb.AppendLine(@"  const duration = parseFloat(document.getElementById('ledDuration').value)||0;");
-            sb.AppendLine(@"  send('/api/led',{mode:'random',duration:duration});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function setVoice(value){");
-            sb.AppendLine(@"  if(!value) return;");
-            sb.AppendLine(@"  send('/api/voice',{action:'set',voice:value});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function setTtsModel(value){");
-            sb.AppendLine(@"  if(!value) return;");
-            sb.AppendLine(@"  send('/api/voice',{action:'set_model',model:value});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function speakNow(){");
-            sb.AppendLine(@"  const text = document.getElementById('speakText').value;");
-            sb.AppendLine(@"  if(!text.trim()){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: enter text to speak';");
-            sb.AppendLine(@"    return;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  const speed = parseFloat(document.getElementById('voiceSpeed').value)||1;");
-            sb.AppendLine(@"  const volume = parseFloat(document.getElementById('voiceVolume').value)||1;");
-            sb.AppendLine(@"  const model = modelSelect ? modelSelect.value : '';");
-            sb.AppendLine(@"  send('/api/speak',{text:text,voice:voiceSelect.value,model:model,speed:speed,volume:volume});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function qwenSpeakNow(){");
-            sb.AppendLine(@"  const text = document.getElementById('qwenSpeakText').value;");
-            sb.AppendLine(@"  if(!text.trim()){ statusEl.textContent = 'error: enter text to speak'; return; }");
-            sb.AppendLine(@"  const speaker = qwenSpeakerSelect ? qwenSpeakerSelect.value : '';");
-            sb.AppendLine(@"  const instruct = (document.getElementById('qwenInstruct').value||'').trim();");
-            sb.AppendLine(@"  send('/api/qwen/speak',{text:text,speaker:speaker,instruct:instruct});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function describeCameraNow(){");
-            sb.AppendLine(@"  const promptEl = document.getElementById('visionPrompt');");
-            sb.AppendLine(@"  const modelEl = document.getElementById('visionModel');");
-            sb.AppendLine(@"  const resultEl = document.getElementById('visionResult');");
-            sb.AppendLine(@"  if(resultEl){ resultEl.textContent = 'Preparing latest camera frame...'; }");
-            sb.AppendLine(@"  if(statusEl){ statusEl.textContent = 'vision: preparing request...'; }");
-            sb.AppendLine(@"  if(!cameraPolling){");
-            sb.AppendLine(@"    cameraAutoStart = true;");
-            sb.AppendLine(@"    startPolling();");
-            sb.AppendLine(@"    pullCameraFrame();");
-            sb.AppendLine(@"    await new Promise(resolve => setTimeout(resolve, 280));");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  const prompt = promptEl ? String(promptEl.value || '').trim() : '';");
-            sb.AppendLine(@"  const model = modelEl ? String(modelEl.value || '').trim() : '';");
-            sb.AppendLine(@"  const payload = { prompt: prompt };");
-            sb.AppendLine(@"  if(model){ payload.model = model; }");
-            sb.AppendLine(@"  const controller = new AbortController();");
-            sb.AppendLine(@"  const timeoutId = setTimeout(() => controller.abort(), 300000);");
-            sb.AppendLine(@"  if(statusEl){ statusEl.textContent = 'vision: requesting /api/vision/describe ...'; }");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch('/api/vision/describe', {");
-            sb.AppendLine(@"      method:'POST',");
-            sb.AppendLine(@"      headers:{'Content-Type':'application/json'},");
-            sb.AppendLine(@"      body: JSON.stringify(payload),");
-            sb.AppendLine(@"      signal: controller.signal");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    const raw = await resp.text();");
-            sb.AppendLine(@"    let data = null;");
-            sb.AppendLine(@"    try { data = JSON.parse(raw); } catch(err) { data = null; }");
-            sb.AppendLine(@"    if(!resp.ok){");
-            sb.AppendLine(@"      const msg = data && data.message ? data.message : (raw || ('HTTP ' + resp.status));");
-            sb.AppendLine(@"      if(resultEl){ resultEl.textContent = 'Error: ' + msg; }");
-            sb.AppendLine(@"      if(statusEl){ statusEl.textContent = 'vision error: ' + msg; }");
-            sb.AppendLine(@"      return;");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    const desc = data && data.description ? String(data.description) : (raw || 'No description returned.');");
-            sb.AppendLine(@"    if(resultEl){ resultEl.textContent = desc; }");
-            sb.AppendLine(@"    if(statusEl){ statusEl.textContent = 'vision: done'; }");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    const msg = (err && err.name === 'AbortError') ? 'vision request timed out' : ('vision request failed: ' + err);");
-            sb.AppendLine(@"    if(resultEl){ resultEl.textContent = 'Error: ' + msg; }");
-            sb.AppendLine(@"    if(statusEl){ statusEl.textContent = msg; }");
-            sb.AppendLine(@"  } finally {");
-            sb.AppendLine(@"    clearTimeout(timeoutId);");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function loadLlmPrompt(){");
-            sb.AppendLine(@"  if(!llmPromptEl) return;");
-            sb.AppendLine(@"  statusEl.textContent = 'Loading /api/llm/prompt ...';");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch('/api/llm/prompt');");
-            sb.AppendLine(@"    const data = await resp.json();");
-            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){");
-            sb.AppendLine(@"      const msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);");
-            sb.AppendLine(@"      statusEl.textContent = 'error: ' + msg;");
-            sb.AppendLine(@"      return;");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    const promptText = (typeof data.prompt === 'string') ? data.prompt : ((typeof data.system_prompt === 'string') ? data.system_prompt : '');");
-            sb.AppendLine(@"    llmPromptEl.value = promptText;");
-            sb.AppendLine(@"    const source = data.runtime_override_active ? 'runtime' : (data.source || 'env_or_default');");
-            sb.AppendLine(@"    statusEl.textContent = 'ok: llm prompt loaded (' + source + ')';");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'error: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function saveLlmPrompt(){");
-            sb.AppendLine(@"  if(!llmPromptEl) return;");
-            sb.AppendLine(@"  const prompt = (llmPromptEl.value || '').trim();");
-            sb.AppendLine(@"  if(!prompt){ statusEl.textContent = 'error: prompt required'; return; }");
-            sb.AppendLine(@"  await send('/api/llm/prompt',{prompt:prompt});");
-            sb.AppendLine(@"  await loadLlmPrompt();");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function resetLlmPrompt(){");
-            sb.AppendLine(@"  await send('/api/llm/prompt',{reset:true});");
-            sb.AppendLine(@"  await loadLlmPrompt();");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function launchGame(){");
-            sb.AppendLine(@"  const name = document.getElementById('gameName').value||'';");
-            sb.AppendLine(@"  send('/api/game',{action:'launch',name:name});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function exitGame(){");
-            sb.AppendLine(@"  send('/api/game',{action:'exit'});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function renderAsrStatus(data){");
-            sb.AppendLine(@"  if(!data) return;");
-            sb.AppendLine(@"  const mode = (typeof data.mode === 'string' && data.mode) ? data.mode : 'offline';");
-            sb.AppendLine(@"  const listening = !!data.listening;");
-            sb.AppendLine(@"  const apiReady = !!data.openai_configured;");
-            sb.AppendLine(@"  if(asrStateEl){");
-            sb.AppendLine(@"    const suffix = (mode === 'api' && !apiReady) ? ' | OPENAI_API_KEY missing' : '';");
-            sb.AppendLine(@"    asrStateEl.textContent = `Mode: ${mode} | Listening: ${listening ? 'ON' : 'PAUSED'}${suffix}`;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  const modes = Array.isArray(data.available_modes) ? data.available_modes : ['offline','api'];");
-            sb.AppendLine(@"  if(asrModeSelect){");
-            sb.AppendLine(@"    asrModeSelect.innerHTML = modes.map(v => `<option value=""${v}"">${v}</option>`).join('');");
-            sb.AppendLine(@"    if(modes.includes(mode)){ asrModeSelect.value = mode; }");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function refreshAsrStatus(){");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch('/api/asr');");
-            sb.AppendLine(@"    const data = await resp.json();");
-            sb.AppendLine(@"    if(!resp.ok || data.status !== 'ok'){");
-            sb.AppendLine(@"      const msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);");
-            sb.AppendLine(@"      if(asrStateEl){ asrStateEl.textContent = 'ASR error: ' + msg; }");
-            sb.AppendLine(@"      return;");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    renderAsrStatus(data);");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    if(asrStateEl){ asrStateEl.textContent = 'ASR error: ' + err; }");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function applyAsrMode(){");
-            sb.AppendLine(@"  const mode = asrModeSelect ? String(asrModeSelect.value || '').trim() : '';");
-            sb.AppendLine(@"  if(!mode){ statusEl.textContent = 'error: select ASR mode'; return; }");
-            sb.AppendLine(@"  const data = await send('/api/asr',{action:'set_mode',mode:mode});");
-            sb.AppendLine(@"  if(data && data.status === 'ok'){");
-            sb.AppendLine(@"    renderAsrStatus(data);");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function startAgentListening(){");
-            sb.AppendLine(@"  const data = await send('/api/asr',{action:'start_listening'});");
-            sb.AppendLine(@"  if(data && data.status === 'ok'){ renderAsrStatus(data); }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function pauseAgentListening(){");
-            sb.AppendLine(@"  const data = await send('/api/asr',{action:'pause_listening'});");
-            sb.AppendLine(@"  if(data && data.status === 'ok'){ renderAsrStatus(data); }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function loadVoiceOptions(){");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch('/api/voice/options');");
-            sb.AppendLine(@"    if(!resp.ok){ return; }");
-            sb.AppendLine(@"    const data = await resp.json();");
-            sb.AppendLine(@"    const voices = Array.isArray(data.voices) ? data.voices : [];");
-            sb.AppendLine(@"    voiceSelect.innerHTML = voices.map(v => `<option value=""${v}"">${v}</option>`).join('');");
-            sb.AppendLine(@"    const current = typeof data.current === 'string' ? data.current : '';");
-            sb.AppendLine(@"    if(current && voices.includes(current)){");
-            sb.AppendLine(@"      voiceSelect.value = current;");
-            sb.AppendLine(@"    } else if(voices.length){");
-            sb.AppendLine(@"      voiceSelect.value = voices[0];");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    const models = Array.isArray(data.models) ? data.models : [];");
-            sb.AppendLine(@"    if(modelSelect){");
-            sb.AppendLine(@"      modelSelect.innerHTML = models.map(v => `<option value=""${v}"">${v}</option>`).join('');");
-            sb.AppendLine(@"      const modelCurrent = typeof data.modelCurrent === 'string' ? data.modelCurrent : '';");
-            sb.AppendLine(@"      if(modelCurrent && models.includes(modelCurrent)){");
-            sb.AppendLine(@"        modelSelect.value = modelCurrent;");
-            sb.AppendLine(@"      } else if(models.length){");
-            sb.AppendLine(@"        modelSelect.value = models[0];");
-            sb.AppendLine(@"      }");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"  } catch(err) {");
-            sb.AppendLine(@"    console.warn('voice options failed', err);");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function loadQwenOptions(){");
-            sb.AppendLine(@"  if(!qwenSpeakerSelect) return;");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const resp = await fetch('/api/qwen/options');");
-            sb.AppendLine(@"    if(!resp.ok){ return; }");
-            sb.AppendLine(@"    const data = await resp.json();");
-            sb.AppendLine(@"    const speakers = Array.isArray(data.speakers) ? data.speakers : [];");
-            sb.AppendLine(@"    qwenSpeakerSelect.innerHTML = speakers.map(v => `<option value=""${v}"">${v}</option>`).join('');");
-            sb.AppendLine(@"    const current = typeof data.current === 'string' ? data.current : '';");
-            sb.AppendLine(@"    if(current && speakers.includes(current)){ qwenSpeakerSelect.value = current; }");
-            sb.AppendLine(@"    else if(speakers.length){ qwenSpeakerSelect.value = speakers[0]; }");
-            sb.AppendLine(@"  } catch(err) { console.warn('qwen options failed', err); }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"if(logContainer){ renderLog([]); }");
-            sb.AppendLine(@"refreshLog();");
-            sb.AppendLine(@"setInterval(refreshLog, 4000);");
-            sb.AppendLine(@"loadVoiceOptions();");
-            sb.AppendLine(@"loadQwenOptions();");
-            sb.AppendLine(@"refreshAsrStatus();");
-            sb.AppendLine(@"setInterval(refreshAsrStatus, 5000);");
-            sb.AppendLine(@"loadLlmPrompt();");
-            sb.AppendLine(@"let cameraPolling = false;");
-            sb.AppendLine(@"let cameraSeq = 0;");
-            sb.AppendLine(@"let cameraLastLoadAt = 0;");
-            sb.AppendLine(@"let cameraLastSetAt = 0;");
-            sb.AppendLine(@"let cameraRequestInFlight = false;");
-            sb.AppendLine(@"let cameraRequestStartedAt = 0;");
-            sb.AppendLine(@"let cameraPullTimer = null;");
-            sb.AppendLine(@"let cameraWatchdogTimer = null;");
-            sb.AppendLine(@"let cameraHeartbeatTimer = null;");
-            sb.AppendLine(@"let cameraAutoStart = false;");
-            sb.AppendLine(@"function hasClientFocusOrFullscreen(){");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    if(document.fullscreenElement){ return true; }");
-            sb.AppendLine(@"    if(typeof document.hidden === 'boolean' && !document.hidden){ return true; }");
-            sb.AppendLine(@"    return !!(document.hasFocus && document.hasFocus());");
-            sb.AppendLine(@"  } catch(_){");
-            sb.AppendLine(@"    return true;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function cameraHeartbeat(){");
-            sb.AppendLine(@"  if(!hasClientFocusOrFullscreen()) return;");
-            sb.AppendLine(@"  fetch('/api/camera/ping',{method:'POST',cache:'no-store'}).catch(()=>{});");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function pullCameraFrame(){");
-            sb.AppendLine(@"  if(!cameraView) return;");
-            sb.AppendLine(@"  if(!hasClientFocusOrFullscreen()) return;");
-            sb.AppendLine(@"  const now = Date.now();");
-            sb.AppendLine(@"  if(cameraRequestInFlight && (now - cameraRequestStartedAt) < 1800){ return; }");
-            sb.AppendLine(@"  cameraSeq++;");
-            sb.AppendLine(@"  cameraLastSetAt = now;");
-            sb.AppendLine(@"  cameraRequestInFlight = true;");
-            sb.AppendLine(@"  cameraRequestStartedAt = now;");
-            sb.AppendLine(@"  cameraView.src = '/camera.jpg?t=' + cameraLastSetAt + '&n=' + cameraSeq;");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function cameraWatchdog(){");
-            sb.AppendLine(@"  if(!cameraView) return;");
-            sb.AppendLine(@"  if(!hasClientFocusOrFullscreen()) return;");
-            sb.AppendLine(@"  const now = Date.now();");
-            sb.AppendLine(@"  if(cameraRequestInFlight && (now - cameraRequestStartedAt) > 2500){");
-            sb.AppendLine(@"    cameraRequestInFlight = false;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  if(cameraLastSetAt > 0 && (now - cameraLastSetAt) > 2200 && (now - cameraLastLoadAt) > 2200){");
-            sb.AppendLine(@"    pullCameraFrame();");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function startPolling(){");
-            sb.AppendLine(@"  if(cameraPolling) return;");
-            sb.AppendLine(@"  if(!hasClientFocusOrFullscreen()) return;");
-            sb.AppendLine(@"  cameraPolling = true;");
-            sb.AppendLine(@"  cameraView.onload = () => { cameraLastLoadAt = Date.now(); cameraRequestInFlight = false; };");
-            sb.AppendLine(@"  cameraView.onerror = () => { cameraRequestInFlight = false; setTimeout(pullCameraFrame, 250); };");
-            sb.AppendLine(@"  cameraHeartbeat();");
-            sb.AppendLine(@"  pullCameraFrame();");
-            sb.AppendLine(@"  cameraPullTimer = setInterval(pullCameraFrame, 1000);");
-            sb.AppendLine(@"  cameraWatchdogTimer = setInterval(cameraWatchdog, 1000);");
-            sb.AppendLine(@"  cameraHeartbeatTimer = setInterval(cameraHeartbeat, 1000);");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function stopPolling(){");
-            sb.AppendLine(@"  cameraPolling = false;");
-            sb.AppendLine(@"  cameraRequestInFlight = false;");
-            sb.AppendLine(@"  if(cameraPullTimer){ clearInterval(cameraPullTimer); cameraPullTimer = null; }");
-            sb.AppendLine(@"  if(cameraWatchdogTimer){ clearInterval(cameraWatchdogTimer); cameraWatchdogTimer = null; }");
-            sb.AppendLine(@"  if(cameraHeartbeatTimer){ clearInterval(cameraHeartbeatTimer); cameraHeartbeatTimer = null; }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function startCameraPreview(){");
-            sb.AppendLine(@"  cameraAutoStart = true;");
-            sb.AppendLine(@"  startPolling();");
-            sb.AppendLine(@"  pullCameraFrame();");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function stopCameraPreview(){");
-            sb.AppendLine(@"  cameraAutoStart = false;");
-            sb.AppendLine(@"  stopPolling();");
-            sb.AppendLine(@"  if(cameraView){ cameraView.removeAttribute('src'); }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"document.addEventListener('visibilitychange', () => {");
-            sb.AppendLine(@"  if(document.hidden && !document.fullscreenElement){");
-            sb.AppendLine(@"    stopPolling();");
-            sb.AppendLine(@"    return;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  if(cameraAutoStart){");
-            sb.AppendLine(@"    startPolling();");
-            sb.AppendLine(@"    setTimeout(pullCameraFrame, 30);");
-            sb.AppendLine(@"    setTimeout(pullCameraFrame, 200);");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"});");
-            sb.AppendLine(@"window.addEventListener('focus', () => { if(cameraAutoStart){ startPolling(); setTimeout(pullCameraFrame, 30); } });");
-            sb.AppendLine(@"window.addEventListener('blur', () => {");
-            sb.AppendLine(@"  setTimeout(() => {");
-            sb.AppendLine(@"    if(document.hidden && !document.fullscreenElement){ stopPolling(); }");
-            sb.AppendLine(@"  }, 120);");
-            sb.AppendLine(@"});");
-            sb.AppendLine(@"document.addEventListener('fullscreenchange', () => {");
-            sb.AppendLine(@"  if(cameraAutoStart && hasClientFocusOrFullscreen()){");
-            sb.AppendLine(@"    startPolling();");
-            sb.AppendLine(@"    setTimeout(pullCameraFrame, 30);");
-            sb.AppendLine(@"  } else {");
-            sb.AppendLine(@"    stopPolling();");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"});");
-            sb.AppendLine(@"window.addEventListener('beforeunload', stopPolling);");
-            sb.AppendLine(@"function initCamera(){ if(!cameraView) return; if(cameraAutoStart && hasClientFocusOrFullscreen()){ startPolling(); } }");
-            sb.AppendLine(@"initCamera();");
-            sb.AppendLine(@"</script>");
-            sb.AppendLine(@"</body>");
-            sb.AppendLine(@"</html>");
-            return sb.ToString();
+            return LoadPanelTemplateOrFallback("panel.html");
         }
 
         private static string BuildSdkPanelHtml()
         {
-            var sb = new StringBuilder(4096);
-            sb.AppendLine(@"<!DOCTYPE html>");
-            sb.AppendLine(@"<html lang=""en"">");
-            sb.AppendLine(@"<head>");
-            sb.AppendLine(@"<meta charset=""utf-8"">");
-            sb.AppendLine(@"<title>Voice Agent SDK Visualizer</title>");
-            sb.AppendLine(@"<meta name=""viewport"" content=""width=device-width, initial-scale=1"">");
-            sb.AppendLine(@"<style>");
-            sb.AppendLine(@"body{font-family:'Segoe UI',sans-serif;margin:0;background:#0b1220;color:#e2e8f0;padding:1.25rem;}");
-            sb.AppendLine(@"h1{margin:.25rem 0 .5rem 0;font-size:1.35rem;} p{opacity:.9;}");
-            sb.AppendLine(@".wrap{display:grid;grid-template-columns:320px 1fr;gap:1rem;}");
-            sb.AppendLine(@".card{background:#111a2e;border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:1rem;}");
-            sb.AppendLine(@"label{display:block;font-size:.82rem;opacity:.85;margin:.35rem 0;}");
-            sb.AppendLine(@"select,input,textarea,button{width:100%;box-sizing:border-box;border-radius:8px;border:1px solid rgba(148,163,184,.35);background:#0f172a;color:#e2e8f0;padding:.6rem;}");
-            sb.AppendLine(@"textarea{min-height:240px;font-family:Consolas,monospace;font-size:.85rem;}");
-            sb.AppendLine(@"button{background:#2563eb;border:none;font-weight:700;cursor:pointer;margin-top:.6rem;}");
-            sb.AppendLine(@"button.secondary{background:#334155;}");
-            sb.AppendLine(@"pre{background:#020617;border:1px solid rgba(148,163,184,.25);padding:.75rem;border-radius:8px;overflow:auto;min-height:260px;}");
-            sb.AppendLine(@".mono{font-family:Consolas,monospace;font-size:.82rem;}");
-            sb.AppendLine(@".flow-grid{display:grid;grid-template-columns:280px 1fr 1fr;gap:1rem;margin-top:1rem;}");
-            sb.AppendLine(@".template-list{display:flex;flex-direction:column;gap:.5rem;max-height:360px;overflow:auto;padding-right:.2rem;}");
-            sb.AppendLine(@".template-item{border:1px dashed rgba(125,211,252,.45);border-radius:8px;padding:.55rem .6rem;background:rgba(15,23,42,.55);cursor:grab;font-size:.82rem;}");
-            sb.AppendLine(@".template-item.utility{border-color:rgba(251,191,36,.55);}");
-            sb.AppendLine(@".flow-canvas{min-height:380px;border:1px dashed rgba(148,163,184,.4);border-radius:12px;padding:.7rem;background:rgba(2,6,23,.45);display:flex;flex-direction:column;gap:.65rem;}");
-            sb.AppendLine(@".flow-empty{opacity:.75;border:1px dashed rgba(148,163,184,.35);border-radius:8px;padding:.8rem;text-align:center;}");
-            sb.AppendLine(@".flow-step{border:1px solid rgba(148,163,184,.35);border-radius:10px;padding:.6rem;background:#0f172a;}");
-            sb.AppendLine(@".flow-step.selected{border-color:#60a5fa;}");
-            sb.AppendLine(@".flow-step.running{border-color:#f59e0b;box-shadow:0 0 0 1px rgba(245,158,11,.35) inset;}");
-            sb.AppendLine(@".flow-step.ok{border-color:#10b981;}");
-            sb.AppendLine(@".flow-step.error{border-color:#ef4444;}");
-            sb.AppendLine(@".flow-head{display:flex;align-items:center;gap:.5rem;justify-content:space-between;margin-bottom:.4rem;}");
-            sb.AppendLine(@".flow-title{font-weight:700;font-size:.83rem;}");
-            sb.AppendLine(@".flow-body{display:flex;flex-direction:column;gap:.45rem;}");
-            sb.AppendLine(@".flow-row{display:flex;gap:.5rem;align-items:center;}");
-            sb.AppendLine(@".flow-row > *{margin-top:0;}");
-            sb.AppendLine(@".flow-small{font-size:.78rem;opacity:.82;}");
-            sb.AppendLine(@".flow-chip{display:inline-block;padding:.15rem .45rem;border-radius:999px;font-size:.72rem;border:1px solid rgba(148,163,184,.35);}");
-            sb.AppendLine(@".flow-chip.api{color:#93c5fd;border-color:rgba(147,197,253,.5);}");
-            sb.AppendLine(@".flow-chip.delay{color:#fcd34d;border-color:rgba(252,211,77,.55);}");
-            sb.AppendLine(@".flow-chip.cond{color:#86efac;border-color:rgba(134,239,172,.55);}");
-            sb.AppendLine(@".flow-chip.keyword{color:#f9a8d4;border-color:rgba(249,168,212,.55);}");
-            sb.AppendLine(@".flow-actions{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.3rem;}");
-            sb.AppendLine(@".flow-actions button{width:auto;padding:.45rem .65rem;font-size:.8rem;margin-top:0;}");
-            sb.AppendLine(@".flow-step button{width:auto;padding:.32rem .5rem;font-size:.76rem;margin-top:0;background:#1e293b;border:1px solid rgba(148,163,184,.35);}");
-            sb.AppendLine(@".flow-editor{border:1px solid rgba(148,163,184,.3);border-radius:10px;padding:.65rem;background:#0b1326;}");
-            sb.AppendLine(@".flow-editor textarea{min-height:130px;}");
-            sb.AppendLine(@".flow-inline{display:flex;gap:.5rem;align-items:center;}");
-            sb.AppendLine(@".flow-inline input[type=""checkbox""]{width:auto;}");
-            sb.AppendLine(@"@media(max-width:900px){.wrap{grid-template-columns:1fr;}}");
-            sb.AppendLine(@"@media(max-width:1200px){.flow-grid{grid-template-columns:1fr;}}");
-            sb.AppendLine(@"</style>");
-            sb.AppendLine(@"</head>");
-            sb.AppendLine(@"<body>");
-            sb.AppendLine(@"<h1>SDK Visualizer</h1>");
-            sb.AppendLine(@"<p>This page calls the same <span class=""mono"">/api/*</span> routes as <span class=""mono"">python_sdk/voice_agent_sdk/client.py</span>.</p>");
-            sb.AppendLine(@"<p><a href=""/index.html"" style=""color:#93c5fd;"">Back to User Panel</a></p>");
-            sb.AppendLine(@"<div class=""wrap"">");
-            sb.AppendLine(@"<div class=""card"">");
-            sb.AppendLine(@"<label for=""sdkMethod"">SDK Method</label>");
-            sb.AppendLine(@"<select id=""sdkMethod""></select>");
-            sb.AppendLine(@"<label for=""sdkEndpoint"">HTTP Endpoint</label>");
-            sb.AppendLine(@"<input id=""sdkEndpoint"" readonly>");
-            sb.AppendLine(@"<label for=""sdkPayload"">JSON Payload</label>");
-            sb.AppendLine(@"<textarea id=""sdkPayload""></textarea>");
-            sb.AppendLine(@"<button onclick=""invokeSdk()"">Invoke</button>");
-            sb.AppendLine(@"<button class=""secondary"" onclick=""resetPayload()"">Reset Payload</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""card"">");
-            sb.AppendLine(@"<div class=""mono"" id=""sdkStatus"">Ready.</div>");
-            sb.AppendLine(@"<h3>Response</h3>");
-            sb.AppendLine(@"<pre id=""sdkResp""></pre>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div class=""card"" style=""margin-top:1rem;"">");
-            sb.AppendLine(@"<h2 style=""margin:.1rem 0 .45rem 0;font-size:1.12rem;"">Flow Builder (Phase 1)</h2>");
-            sb.AppendLine(@"<p class=""flow-small"">Drag templates into canvas, edit step params, then run sequentially.</p>");
-            sb.AppendLine(@"<div class=""flow-grid"">");
-            sb.AppendLine(@"<div>");
-            sb.AppendLine(@"<h3 style=""margin:.2rem 0 .45rem 0;"">Templates</h3>");
-            sb.AppendLine(@"<div id=""flowTemplates"" class=""template-list""></div>");
-            sb.AppendLine(@"<div class=""flow-small"">Includes all SDK API methods plus utility Delay/Condition nodes.</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div>");
-            sb.AppendLine(@"<h3 style=""margin:.2rem 0 .45rem 0;"">Canvas</h3>");
-            sb.AppendLine(@"<div class=""flow-actions"">");
-            sb.AppendLine(@"<button id=""flowRunBtn"" type=""button"">Run Flow</button>");
-            sb.AppendLine(@"<button id=""flowStopBtn"" class=""secondary"" type=""button"">Stop</button>");
-            sb.AppendLine(@"<button id=""flowClearBtn"" class=""secondary"" type=""button"">Clear</button>");
-            sb.AppendLine(@"<button id=""flowExportBtn"" class=""secondary"" type=""button"">Export</button>");
-            sb.AppendLine(@"<button id=""flowImportBtn"" class=""secondary"" type=""button"">Import</button>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div id=""flowCanvas"" class=""flow-canvas""></div>");
-            sb.AppendLine(@"<label for=""flowJson"">Flow JSON</label>");
-            sb.AppendLine(@"<textarea id=""flowJson"" style=""min-height:135px;""></textarea>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<div>");
-            sb.AppendLine(@"<h3 style=""margin:.2rem 0 .45rem 0;"">Step Editor</h3>");
-            sb.AppendLine(@"<div id=""flowEditor"" class=""flow-empty"">Select a step to edit.</div>");
-            sb.AppendLine(@"<h3 style=""margin:.8rem 0 .45rem 0;"">Run Log</h3>");
-            sb.AppendLine(@"<pre id=""flowLog"" style=""min-height:210px;""></pre>");
-            sb.AppendLine(@"<div id=""flowStatus"" class=""mono"">Idle.</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"</div>");
-            sb.AppendLine(@"<script>");
-            sb.AppendLine(@"const sdkMap = {");
-            sb.AppendLine(@"  'speak(text,voice,model,speed,volume)': { endpoint:'/api/speak', payload:{ text:'Hello from SDK visualizer', voice:'en_US', model:'', speed:1.0, volume:1.0 } },");
-            sb.AppendLine(@"  'qwen_speak(text,speaker,instruct)': { endpoint:'/api/qwen/speak', payload:{ text:'Hello from Qwen', speaker:'Ryan', instruct:'friendly' } },");
-            sb.AppendLine(@"  'set_tts_options(voice,model)': { endpoint:'/api/voice', payload:{ action:'set', voice:'en_US' } },");
-            sb.AppendLine(@"  'set_tts_model(model)': { endpoint:'/api/voice', payload:{ action:'set_model', model:'' } },");
-            sb.AppendLine(@"  'get_llm_prompt()': { endpoint:'/api/llm/prompt', method:'GET', payload:{} },");
-            sb.AppendLine(@"  'set_llm_prompt(prompt)': { endpoint:'/api/llm/prompt', payload:{ prompt:'You are a concise coach. Keep replies under 2 sentences.' } },");
-            sb.AppendLine(@"  'reset_llm_prompt()': { endpoint:'/api/llm/prompt', payload:{ reset:true } },");
-            sb.AppendLine(@"  'describe_camera(prompt,model)': { endpoint:'/api/vision/describe', payload:{ prompt:'Describe what you see in the current camera frame.', model:'gemma3:4b' } },");
-            sb.AppendLine(@"  'launch_game(name)': { endpoint:'/api/game', payload:{ action:'launch', name:'cornhole' } },");
-            sb.AppendLine(@"  'exit_game()': { endpoint:'/api/game', payload:{ action:'exit' } },");
-            sb.AppendLine(@"  'face_preset(mode,seconds)': { endpoint:'/api/face', payload:{ mode:'happy', seconds:3 } },");
-            sb.AppendLine(@"  'flower_open()': { endpoint:'/api/flower', payload:{ action:'open' } },");
-            sb.AppendLine(@"  'led_breathe(color,brightness,period,duration)': { endpoint:'/api/led', payload:{ mode:'breathe', color:'#00BFFF', brightness:0.8, period:2, duration:2 } }");
-            sb.AppendLine(@"};");
-            sb.AppendLine(@"const methodEl = document.getElementById('sdkMethod');");
-            sb.AppendLine(@"const endpointEl = document.getElementById('sdkEndpoint');");
-            sb.AppendLine(@"const payloadEl = document.getElementById('sdkPayload');");
-            sb.AppendLine(@"const statusEl = document.getElementById('sdkStatus');");
-            sb.AppendLine(@"const respEl = document.getElementById('sdkResp');");
-            sb.AppendLine(@"const methods = Object.keys(sdkMap);");
-            sb.AppendLine(@"const flowTemplatesEl = document.getElementById('flowTemplates');");
-            sb.AppendLine(@"const flowCanvasEl = document.getElementById('flowCanvas');");
-            sb.AppendLine(@"const flowEditorEl = document.getElementById('flowEditor');");
-            sb.AppendLine(@"const flowLogEl = document.getElementById('flowLog');");
-            sb.AppendLine(@"const flowJsonEl = document.getElementById('flowJson');");
-            sb.AppendLine(@"const flowStatusEl = document.getElementById('flowStatus');");
-            sb.AppendLine(@"const flowRunBtn = document.getElementById('flowRunBtn');");
-            sb.AppendLine(@"const flowStopBtn = document.getElementById('flowStopBtn');");
-            sb.AppendLine(@"const flowClearBtn = document.getElementById('flowClearBtn');");
-            sb.AppendLine(@"const flowExportBtn = document.getElementById('flowExportBtn');");
-            sb.AppendLine(@"const flowImportBtn = document.getElementById('flowImportBtn');");
-            sb.AppendLine(@"let flowSteps = [];");
-            sb.AppendLine(@"let flowSelectedId = '';");
-            sb.AppendLine(@"let flowRunToken = 0;");
-            sb.AppendLine(@"let flowRunning = false;");
-            sb.AppendLine(@"let dragTemplateKey = '';");
-            sb.AppendLine(@"let dragStepId = '';");
-            sb.AppendLine(@"methodEl.innerHTML = methods.map(m => `<option value=""${m}"">${m}</option>`).join('');");
-            sb.AppendLine(@"function syncMethod(){");
-            sb.AppendLine(@"  const m = methodEl.value;");
-            sb.AppendLine(@"  const cfg = sdkMap[m];");
-            sb.AppendLine(@"  endpointEl.value = cfg.endpoint;");
-            sb.AppendLine(@"  payloadEl.value = JSON.stringify(cfg.payload, null, 2);");
-            sb.AppendLine(@"  respEl.textContent = '';");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function resetPayload(){ syncMethod(); }");
-            sb.AppendLine(@"function cloneValue(v){ return JSON.parse(JSON.stringify(v)); }");
-            sb.AppendLine(@"function makeStepId(){ return 'step_' + Math.random().toString(36).slice(2, 10); }");
-            sb.AppendLine(@"function escapeHtml(value){");
-            sb.AppendLine(@"  return String(value || '')");
-            sb.AppendLine(@"    .replace(/&/g, '&amp;')");
-            sb.AppendLine(@"    .replace(/</g, '&lt;')");
-            sb.AppendLine(@"    .replace(/>/g, '&gt;')");
-            sb.AppendLine(@"    .replace(/""/g, '&quot;')");
-            sb.AppendLine(@"    .replace(/'/g, '&#39;');");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function invokeSdk(){");
-            sb.AppendLine(@"  const cfg = sdkMap[methodEl.value] || { endpoint:endpointEl.value, payload:{} };");
-            sb.AppendLine(@"  const endpoint = endpointEl.value;");
-            sb.AppendLine(@"  const httpMethod = String(cfg.method || 'POST').toUpperCase();");
-            sb.AppendLine(@"  let payload = {};");
-            sb.AppendLine(@"  try { payload = JSON.parse(payloadEl.value || '{}'); }");
-            sb.AppendLine(@"  catch(err){ statusEl.textContent = 'Invalid JSON: ' + err; return; }");
-            sb.AppendLine(@"  statusEl.textContent = httpMethod + ' ' + endpoint + ' ...';");
-            sb.AppendLine(@"  try {");
-            sb.AppendLine(@"    const req = httpMethod === 'GET'");
-            sb.AppendLine(@"      ? { method:'GET' }");
-            sb.AppendLine(@"      : { method:httpMethod, headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) };");
-            sb.AppendLine(@"    const resp = await fetch(endpoint, req);");
-            sb.AppendLine(@"    const txt = await resp.text();");
-            sb.AppendLine(@"    statusEl.textContent = `HTTP ${resp.status} ${resp.statusText}`;");
-            sb.AppendLine(@"    try { respEl.textContent = JSON.stringify(JSON.parse(txt), null, 2); }");
-            sb.AppendLine(@"    catch { respEl.textContent = txt; }");
-            sb.AppendLine(@"  } catch(err){");
-            sb.AppendLine(@"    statusEl.textContent = 'Request failed: ' + err;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function callEndpoint(endpoint, httpMethod, payload){");
-            sb.AppendLine(@"  const method = String(httpMethod || 'POST').toUpperCase();");
-            sb.AppendLine(@"  const req = method === 'GET'");
-            sb.AppendLine(@"    ? { method:'GET' }");
-            sb.AppendLine(@"    : { method:method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload || {}) };");
-            sb.AppendLine(@"  const resp = await fetch(endpoint, req);");
-            sb.AppendLine(@"  const raw = await resp.text();");
-            sb.AppendLine(@"  let json = null;");
-            sb.AppendLine(@"  try { json = JSON.parse(raw); } catch (err) { }");
-            sb.AppendLine(@"  return { ok:resp.ok, status:resp.status, statusText:resp.statusText, raw:raw, json:json };");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function buildTemplateCatalog(){");
-            sb.AppendLine(@"  const apiTemplates = methods.map(m => ({ key:'api:' + m, label:m, kind:'api' }));");
-            sb.AppendLine(@"  apiTemplates.push({ key:'util:delay', label:'delay(ms)', kind:'delay' });");
-            sb.AppendLine(@"  apiTemplates.push({ key:'util:condition', label:'condition(expr)', kind:'condition' });");
-            sb.AppendLine(@"  apiTemplates.push({ key:'util:keyword_wait', label:'wait_keyword(keyword)', kind:'condition' });");
-            sb.AppendLine(@"  return apiTemplates;");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"const templateCatalog = buildTemplateCatalog();");
-            sb.AppendLine(@"function createStepFromTemplate(key){");
-            sb.AppendLine(@"  if(!key) return null;");
-            sb.AppendLine(@"  if(key.startsWith('api:')){");
-            sb.AppendLine(@"    const methodName = key.slice(4);");
-            sb.AppendLine(@"    const cfg = sdkMap[methodName];");
-            sb.AppendLine(@"    if(!cfg) return null;");
-            sb.AppendLine(@"    return {");
-            sb.AppendLine(@"      id: makeStepId(),");
-            sb.AppendLine(@"      type: 'api',");
-            sb.AppendLine(@"      name: methodName,");
-            sb.AppendLine(@"      endpoint: cfg.endpoint,");
-            sb.AppendLine(@"      method: String(cfg.method || 'POST').toUpperCase(),");
-            sb.AppendLine(@"      payload: cloneValue(cfg.payload || {}),");
-            sb.AppendLine(@"      continueOnError: false");
-            sb.AppendLine(@"    };");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  if(key === 'util:delay'){");
-            sb.AppendLine(@"    return { id: makeStepId(), type:'delay', name:'delay(ms)', delayMs:600 };");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  if(key === 'util:condition'){");
-            sb.AppendLine(@"    return { id: makeStepId(), type:'condition', name:'condition(expr)', expression:'ctx.lastStatus >= 200 && ctx.lastStatus < 300' };");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  if(key === 'util:keyword_wait'){");
-            sb.AppendLine(@"    return { id: makeStepId(), type:'keyword_wait', name:'wait_keyword', keyword:'thanks', timeoutMs:12000, pollMs:350, source:'user', caseSensitive:false, onlyNew:true };");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  return null;");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function exportFlowData(){");
-            sb.AppendLine(@"  return flowSteps.map(step => {");
-            sb.AppendLine(@"    if(step.type === 'api'){");
-            sb.AppendLine(@"      return { type:'api', name:step.name || '', endpoint:step.endpoint || '', method:step.method || 'POST', payload:cloneValue(step.payload || {}), continueOnError:!!step.continueOnError };");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    if(step.type === 'delay'){");
-            sb.AppendLine(@"      return { type:'delay', name:step.name || 'delay(ms)', delayMs:Math.max(0, Number(step.delayMs) || 0) };");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    if(step.type === 'condition'){");
-            sb.AppendLine(@"      return { type:'condition', name:step.name || 'condition(expr)', expression:String(step.expression || '').trim() };");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    if(step.type === 'keyword_wait'){");
-            sb.AppendLine(@"      return { type:'keyword_wait', name:step.name || 'wait_keyword', keyword:String(step.keyword || ''), timeoutMs:Math.max(100, Number(step.timeoutMs) || 12000), pollMs:Math.max(100, Number(step.pollMs) || 350), source:String(step.source || 'user'), caseSensitive:!!step.caseSensitive, onlyNew:step.onlyNew !== false };");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    return { type:'unknown' };");
-            sb.AppendLine(@"  });");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function syncFlowJson(){ flowJsonEl.value = JSON.stringify(exportFlowData(), null, 2); }");
-            sb.AppendLine(@"function appendFlowLog(line){");
-            sb.AppendLine(@"  const ts = new Date().toLocaleTimeString();");
-            sb.AppendLine(@"  const nextLine = `[${ts}] ${line}`;");
-            sb.AppendLine(@"  if(!flowLogEl.textContent){ flowLogEl.textContent = nextLine; }");
-            sb.AppendLine(@"  else { flowLogEl.textContent += '\n' + nextLine; }");
-            sb.AppendLine(@"  flowLogEl.scrollTop = flowLogEl.scrollHeight;");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function moveStepBefore(stepId, targetId){");
-            sb.AppendLine(@"  const srcIndex = flowSteps.findIndex(s => s.id === stepId);");
-            sb.AppendLine(@"  const targetIndex = flowSteps.findIndex(s => s.id === targetId);");
-            sb.AppendLine(@"  if(srcIndex < 0 || targetIndex < 0 || srcIndex === targetIndex) return;");
-            sb.AppendLine(@"  const src = flowSteps[srcIndex];");
-            sb.AppendLine(@"  flowSteps.splice(srcIndex, 1);");
-            sb.AppendLine(@"  const nextTargetIndex = flowSteps.findIndex(s => s.id === targetId);");
-            sb.AppendLine(@"  flowSteps.splice(nextTargetIndex, 0, src);");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function moveStepToEnd(stepId){");
-            sb.AppendLine(@"  const idx = flowSteps.findIndex(s => s.id === stepId);");
-            sb.AppendLine(@"  if(idx < 0) return;");
-            sb.AppendLine(@"  const src = flowSteps[idx];");
-            sb.AppendLine(@"  flowSteps.splice(idx, 1);");
-            sb.AppendLine(@"  flowSteps.push(src);");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function keywordMatch(text, keyword, caseSensitive){");
-            sb.AppendLine(@"  const src = String(text || '');");
-            sb.AppendLine(@"  const kw = String(keyword || '').trim();");
-            sb.AppendLine(@"  if(!kw) return false;");
-            sb.AppendLine(@"  if(caseSensitive) return src.includes(kw);");
-            sb.AppendLine(@"  return src.toLowerCase().includes(kw.toLowerCase());");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function fetchLatestLogEntry(sourceMode){");
-            sb.AppendLine(@"  const resp = await fetch('/api/logs');");
-            sb.AppendLine(@"  if(!resp.ok) return null;");
-            sb.AppendLine(@"  const data = await resp.json();");
-            sb.AppendLine(@"  const entries = Array.isArray(data.entries) ? data.entries : [];");
-            sb.AppendLine(@"  const mode = String(sourceMode || 'user').toLowerCase();");
-            sb.AppendLine(@"  for(let i = entries.length - 1; i >= 0; i--){");
-            sb.AppendLine(@"    const e = entries[i] || {};");
-            sb.AppendLine(@"    const role = String(e.role || '').toLowerCase();");
-            sb.AppendLine(@"    const source = String(e.source || '').toLowerCase();");
-            sb.AppendLine(@"    const message = String(e.message || e.text || '').trim();");
-            sb.AppendLine(@"    if(!message) continue;");
-            sb.AppendLine(@"    if(mode === 'user'){");
-            sb.AppendLine(@"      const isUserLike = role === 'user' || source.includes('whisper') || source.includes('voice');");
-            sb.AppendLine(@"      if(!isUserLike) continue;");
-            sb.AppendLine(@"    } else if(mode === 'coach'){");
-            sb.AppendLine(@"      const isCoachLike = role === 'coach' || source.includes('dialog');");
-            sb.AppendLine(@"      if(!isCoachLike) continue;");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    const ts = String(e.timestamp || '');");
-            sb.AppendLine(@"    return { text:message, role:role, source:source, timestamp:ts, key:ts + '|' + message };");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  return null;");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function renderTemplates(){");
-            sb.AppendLine(@"  flowTemplatesEl.innerHTML = templateCatalog.map(t => `<div class=""template-item ${t.kind === 'api' ? '' : 'utility'}"" draggable=""true"" data-template=""${t.key}"">${escapeHtml(t.label)}</div>`).join('');");
-            sb.AppendLine(@"  flowTemplatesEl.querySelectorAll('.template-item').forEach(el => {");
-            sb.AppendLine(@"    el.addEventListener('dragstart', ev => {");
-            sb.AppendLine(@"      dragTemplateKey = ev.currentTarget.getAttribute('data-template') || '';");
-            sb.AppendLine(@"      dragStepId = '';");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"  });");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function renderFlowCanvas(){");
-            sb.AppendLine(@"  if(!flowSteps.length){");
-            sb.AppendLine(@"    flowCanvasEl.innerHTML = '<div class=""flow-empty"">Drop templates here to build a flow.</div>';");
-            sb.AppendLine(@"    syncFlowJson();");
-            sb.AppendLine(@"    renderStepEditor();");
-            sb.AppendLine(@"    return;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  flowCanvasEl.innerHTML = flowSteps.map((step, index) => {");
-            sb.AppendLine(@"    const cls = ['flow-step'];");
-            sb.AppendLine(@"    if(step.id === flowSelectedId) cls.push('selected');");
-            sb.AppendLine(@"    if(step._state === 'ok') cls.push('ok');");
-            sb.AppendLine(@"    if(step._state === 'error') cls.push('error');");
-            sb.AppendLine(@"    if(step._state === 'running') cls.push('running');");
-            sb.AppendLine(@"    const chipClass = step.type === 'api' ? 'api' : (step.type === 'delay' ? 'delay' : (step.type === 'keyword_wait' ? 'keyword' : 'cond'));");
-            sb.AppendLine(@"    const title = step.type === 'api' ? step.name : (step.name || step.type);");
-            sb.AppendLine(@"    const summary = step.type === 'api' ? (step.endpoint || '') : (step.type === 'condition' ? (step.expression || '') : (step.type === 'keyword_wait' ? (`keyword=""${step.keyword || ''}"" timeout=${Number(step.timeoutMs || 12000)}ms`) : (String(step.delayMs || 0) + ' ms')));");
-            sb.AppendLine(@"    return `<div class=""${cls.join(' ')}"" draggable=""true"" data-step-id=""${step.id}""><div class=""flow-head""><div><span class=""flow-chip ${chipClass}"">${step.type}</span> <span class=""flow-title"">${index + 1}. ${escapeHtml(title)}</span></div><div class=""flow-actions""><button type=""button"" data-action=""select"" data-id=""${step.id}"">Edit</button><button type=""button"" data-action=""up"" data-id=""${step.id}"">Up</button><button type=""button"" data-action=""down"" data-id=""${step.id}"">Down</button><button type=""button"" data-action=""delete"" data-id=""${step.id}"">Delete</button></div></div><div class=""flow-small"">${escapeHtml(summary)}</div></div>`;");
-            sb.AppendLine(@"  }).join('');");
-            sb.AppendLine(@"  flowCanvasEl.querySelectorAll('.flow-step').forEach(el => {");
-            sb.AppendLine(@"    el.addEventListener('dragstart', ev => {");
-            sb.AppendLine(@"      dragStepId = ev.currentTarget.getAttribute('data-step-id') || '';");
-            sb.AppendLine(@"      dragTemplateKey = '';");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    el.addEventListener('dragover', ev => ev.preventDefault());");
-            sb.AppendLine(@"    el.addEventListener('drop', ev => {");
-            sb.AppendLine(@"      ev.preventDefault();");
-            sb.AppendLine(@"      ev.stopPropagation();");
-            sb.AppendLine(@"      const targetId = ev.currentTarget.getAttribute('data-step-id');");
-            sb.AppendLine(@"      if(dragTemplateKey){");
-            sb.AppendLine(@"        const step = createStepFromTemplate(dragTemplateKey);");
-            sb.AppendLine(@"        if(step){");
-            sb.AppendLine(@"          const idx = flowSteps.findIndex(s => s.id === targetId);");
-            sb.AppendLine(@"          const insertAt = idx < 0 ? flowSteps.length : idx;");
-            sb.AppendLine(@"          flowSteps.splice(insertAt, 0, step);");
-            sb.AppendLine(@"          flowSelectedId = step.id;");
-            sb.AppendLine(@"          renderFlowCanvas();");
-            sb.AppendLine(@"        }");
-            sb.AppendLine(@"      } else if(dragStepId && dragStepId !== targetId){");
-            sb.AppendLine(@"        moveStepBefore(dragStepId, targetId);");
-            sb.AppendLine(@"        renderFlowCanvas();");
-            sb.AppendLine(@"      }");
-            sb.AppendLine(@"      dragTemplateKey = '';");
-            sb.AppendLine(@"      dragStepId = '';");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"  });");
-            sb.AppendLine(@"  syncFlowJson();");
-            sb.AppendLine(@"  renderStepEditor();");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function renderStepEditor(){");
-            sb.AppendLine(@"  const step = flowSteps.find(s => s.id === flowSelectedId);");
-            sb.AppendLine(@"  if(!step){");
-            sb.AppendLine(@"    flowEditorEl.innerHTML = '<div class=""flow-empty"">Select a step to edit.</div>';");
-            sb.AppendLine(@"    return;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  if(step.type === 'api'){");
-            sb.AppendLine(@"    flowEditorEl.innerHTML = `<div class=""flow-editor""><div class=""flow-small"">Type: API</div><label>Step Name</label><input id=""editName"" value=""${escapeHtml(step.name || '')}""><label>Endpoint</label><input id=""editEndpoint"" value=""${escapeHtml(step.endpoint || '')}""><label>HTTP Method</label><select id=""editMethod""><option value=""POST"">POST</option><option value=""GET"">GET</option></select><div class=""flow-inline""><input type=""checkbox"" id=""editContinue""><label for=""editContinue"" style=""margin:0;"">Continue on error</label></div><label>Payload JSON</label><textarea id=""editPayload""></textarea><div id=""editMsg"" class=""flow-small mono""></div></div>`;");
-            sb.AppendLine(@"    const nameEl = document.getElementById('editName');");
-            sb.AppendLine(@"    const endpointEditEl = document.getElementById('editEndpoint');");
-            sb.AppendLine(@"    const methodEditEl = document.getElementById('editMethod');");
-            sb.AppendLine(@"    const continueEl = document.getElementById('editContinue');");
-            sb.AppendLine(@"    const payloadEditEl = document.getElementById('editPayload');");
-            sb.AppendLine(@"    const msgEl = document.getElementById('editMsg');");
-            sb.AppendLine(@"    methodEditEl.value = String(step.method || 'POST').toUpperCase();");
-            sb.AppendLine(@"    continueEl.checked = !!step.continueOnError;");
-            sb.AppendLine(@"    payloadEditEl.value = JSON.stringify(step.payload || {}, null, 2);");
-            sb.AppendLine(@"    nameEl.addEventListener('input', () => { step.name = nameEl.value; renderFlowCanvas(); });");
-            sb.AppendLine(@"    endpointEditEl.addEventListener('input', () => { step.endpoint = endpointEditEl.value; syncFlowJson(); renderFlowCanvas(); });");
-            sb.AppendLine(@"    methodEditEl.addEventListener('change', () => { step.method = methodEditEl.value; syncFlowJson(); renderFlowCanvas(); });");
-            sb.AppendLine(@"    continueEl.addEventListener('change', () => { step.continueOnError = continueEl.checked; syncFlowJson(); });");
-            sb.AppendLine(@"    payloadEditEl.addEventListener('change', () => {");
-            sb.AppendLine(@"      try {");
-            sb.AppendLine(@"        step.payload = JSON.parse(payloadEditEl.value || '{}');");
-            sb.AppendLine(@"        msgEl.textContent = 'Payload JSON valid.';");
-            sb.AppendLine(@"        syncFlowJson();");
-            sb.AppendLine(@"      } catch(err){");
-            sb.AppendLine(@"        msgEl.textContent = 'Invalid JSON: ' + err;");
-            sb.AppendLine(@"      }");
-            sb.AppendLine(@"    });");
-            sb.AppendLine(@"    return;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  if(step.type === 'delay'){");
-            sb.AppendLine(@"    flowEditorEl.innerHTML = `<div class=""flow-editor""><div class=""flow-small"">Type: Delay</div><label>Step Name</label><input id=""editDelayName"" value=""${escapeHtml(step.name || 'delay(ms)')}""><label>Delay (ms)</label><input id=""editDelayMs"" type=""number"" min=""0"" step=""10"" value=""${Number(step.delayMs || 0)}""></div>`;");
-            sb.AppendLine(@"    const delayNameEl = document.getElementById('editDelayName');");
-            sb.AppendLine(@"    const delayMsEl = document.getElementById('editDelayMs');");
-            sb.AppendLine(@"    delayNameEl.addEventListener('input', () => { step.name = delayNameEl.value; renderFlowCanvas(); });");
-            sb.AppendLine(@"    delayMsEl.addEventListener('input', () => { step.delayMs = Math.max(0, Number(delayMsEl.value) || 0); syncFlowJson(); renderFlowCanvas(); });");
-            sb.AppendLine(@"    return;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  if(step.type === 'keyword_wait'){");
-            sb.AppendLine(@"    flowEditorEl.innerHTML = `<div class=""flow-editor""><div class=""flow-small"">Type: Wait Keyword</div><label>Step Name</label><input id=""editKeywordName"" value=""${escapeHtml(step.name || 'wait_keyword')}""><label>Keyword</label><input id=""editKeywordValue"" value=""${escapeHtml(step.keyword || '')}""><label>Source</label><select id=""editKeywordSource""><option value=""user"">User Speech</option><option value=""coach"">Coach Reply</option><option value=""any"">Any Message</option></select><label>Timeout (ms)</label><input id=""editKeywordTimeout"" type=""number"" min=""100"" step=""100"" value=""${Number(step.timeoutMs || 12000)}""><label>Poll Interval (ms)</label><input id=""editKeywordPoll"" type=""number"" min=""100"" step=""50"" value=""${Number(step.pollMs || 350)}""><div class=""flow-inline""><input type=""checkbox"" id=""editKeywordCase""><label for=""editKeywordCase"" style=""margin:0;"">Case sensitive</label></div><div class=""flow-inline""><input type=""checkbox"" id=""editKeywordOnlyNew""><label for=""editKeywordOnlyNew"" style=""margin:0;"">Only match new recognized text</label></div></div>`;");
-            sb.AppendLine(@"    const nameEl = document.getElementById('editKeywordName');");
-            sb.AppendLine(@"    const valueEl = document.getElementById('editKeywordValue');");
-            sb.AppendLine(@"    const sourceEl = document.getElementById('editKeywordSource');");
-            sb.AppendLine(@"    const timeoutEl = document.getElementById('editKeywordTimeout');");
-            sb.AppendLine(@"    const pollEl = document.getElementById('editKeywordPoll');");
-            sb.AppendLine(@"    const caseEl = document.getElementById('editKeywordCase');");
-            sb.AppendLine(@"    const onlyNewEl = document.getElementById('editKeywordOnlyNew');");
-            sb.AppendLine(@"    sourceEl.value = String(step.source || 'user').toLowerCase();");
-            sb.AppendLine(@"    caseEl.checked = !!step.caseSensitive;");
-            sb.AppendLine(@"    onlyNewEl.checked = step.onlyNew !== false;");
-            sb.AppendLine(@"    nameEl.addEventListener('input', () => { step.name = nameEl.value; renderFlowCanvas(); });");
-            sb.AppendLine(@"    valueEl.addEventListener('input', () => { step.keyword = valueEl.value; syncFlowJson(); renderFlowCanvas(); });");
-            sb.AppendLine(@"    sourceEl.addEventListener('change', () => { step.source = sourceEl.value; syncFlowJson(); renderFlowCanvas(); });");
-            sb.AppendLine(@"    timeoutEl.addEventListener('input', () => { step.timeoutMs = Math.max(100, Number(timeoutEl.value) || 12000); syncFlowJson(); renderFlowCanvas(); });");
-            sb.AppendLine(@"    pollEl.addEventListener('input', () => { step.pollMs = Math.max(100, Number(pollEl.value) || 350); syncFlowJson(); renderFlowCanvas(); });");
-            sb.AppendLine(@"    caseEl.addEventListener('change', () => { step.caseSensitive = caseEl.checked; syncFlowJson(); });");
-            sb.AppendLine(@"    onlyNewEl.addEventListener('change', () => { step.onlyNew = onlyNewEl.checked; syncFlowJson(); });");
-            sb.AppendLine(@"    return;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  flowEditorEl.innerHTML = `<div class=""flow-editor""><div class=""flow-small"">Type: Condition</div><label>Step Name</label><input id=""editCondName"" value=""${escapeHtml(step.name || 'condition(expr)')}""><label>Expression (JS)</label><textarea id=""editConditionExpr"">${escapeHtml(step.expression || '')}</textarea><div class=""flow-small"">Use <span class=""mono"">ctx.lastStatus</span>, <span class=""mono"">ctx.lastJson</span>, <span class=""mono"">ctx.lastRaw</span>, <span class=""mono"">ctx.lastRecognized</span>.</div></div>`;");
-            sb.AppendLine(@"  const condNameEl = document.getElementById('editCondName');");
-            sb.AppendLine(@"  const condExprEl = document.getElementById('editConditionExpr');");
-            sb.AppendLine(@"  condNameEl.addEventListener('input', () => { step.name = condNameEl.value; renderFlowCanvas(); });");
-            sb.AppendLine(@"  condExprEl.addEventListener('change', () => { step.expression = condExprEl.value; syncFlowJson(); renderFlowCanvas(); });");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function evaluateCondition(expr, ctx){");
-            sb.AppendLine(@"  const source = String(expr || '').trim();");
-            sb.AppendLine(@"  if(!source){ return true; }");
-            sb.AppendLine(@"  const body = source.includes('return') ? source : `return (${source});`;");
-            sb.AppendLine(@"  const fn = new Function('ctx', body);");
-            sb.AppendLine(@"  return !!fn(ctx);");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"async function runFlow(){");
-            sb.AppendLine(@"  if(flowRunning){ flowStatusEl.textContent = 'Flow already running.'; return; }");
-            sb.AppendLine(@"  if(!flowSteps.length){ flowStatusEl.textContent = 'No steps in flow.'; return; }");
-            sb.AppendLine(@"  flowRunning = true;");
-            sb.AppendLine(@"  flowRunToken += 1;");
-            sb.AppendLine(@"  const token = flowRunToken;");
-            sb.AppendLine(@"  flowStatusEl.textContent = 'Running...';");
-            sb.AppendLine(@"  appendFlowLog('Flow started with ' + flowSteps.length + ' steps.');");
-            sb.AppendLine(@"  flowSteps.forEach(s => { s._state = ''; });");
-            sb.AppendLine(@"  const ctx = { lastStatus:0, lastJson:null, lastRaw:'', lastRecognized:'', lastRecognizedEntry:null };");
-            sb.AppendLine(@"  for(let i = 0; i < flowSteps.length; i++){");
-            sb.AppendLine(@"    if(token !== flowRunToken){");
-            sb.AppendLine(@"      flowStatusEl.textContent = 'Stopped.';");
-            sb.AppendLine(@"      appendFlowLog('Flow stopped.');");
-            sb.AppendLine(@"      flowRunning = false;");
-            sb.AppendLine(@"      renderFlowCanvas();");
-            sb.AppendLine(@"      return;");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    const step = flowSteps[i];");
-            sb.AppendLine(@"    step._state = 'running';");
-            sb.AppendLine(@"    flowSelectedId = step.id;");
-            sb.AppendLine(@"    renderFlowCanvas();");
-            sb.AppendLine(@"    try {");
-            sb.AppendLine(@"      if(step.type === 'api'){");
-            sb.AppendLine(@"        const result = await callEndpoint(step.endpoint, step.method, step.payload);");
-            sb.AppendLine(@"        ctx.lastStatus = result.status;");
-            sb.AppendLine(@"        ctx.lastJson = result.json;");
-            sb.AppendLine(@"        ctx.lastRaw = result.raw;");
-            sb.AppendLine(@"        if(result.ok){");
-            sb.AppendLine(@"          step._state = 'ok';");
-            sb.AppendLine(@"          appendFlowLog(`Step ${i + 1} OK: ${step.method} ${step.endpoint} -> HTTP ${result.status}`);");
-            sb.AppendLine(@"        } else if(step.continueOnError){");
-            sb.AppendLine(@"          step._state = 'error';");
-            sb.AppendLine(@"          appendFlowLog(`Step ${i + 1} HTTP ${result.status} but continueOnError=true.`);");
-            sb.AppendLine(@"        } else {");
-            sb.AppendLine(@"          throw new Error(`HTTP ${result.status} ${result.statusText}`);");
-            sb.AppendLine(@"        }");
-            sb.AppendLine(@"      } else if(step.type === 'delay'){");
-            sb.AppendLine(@"        const ms = Math.max(0, Number(step.delayMs) || 0);");
-            sb.AppendLine(@"        await new Promise(resolve => setTimeout(resolve, ms));");
-            sb.AppendLine(@"        if(token !== flowRunToken){ throw new Error('Stopped'); }");
-            sb.AppendLine(@"        step._state = 'ok';");
-            sb.AppendLine(@"        appendFlowLog(`Step ${i + 1} OK: delay ${ms}ms`);");
-            sb.AppendLine(@"      } else if(step.type === 'keyword_wait'){");
-            sb.AppendLine(@"        const keyword = String(step.keyword || '').trim();");
-            sb.AppendLine(@"        const timeoutMs = Math.max(100, Number(step.timeoutMs) || 12000);");
-            sb.AppendLine(@"        const pollMs = Math.max(100, Number(step.pollMs) || 350);");
-            sb.AppendLine(@"        const source = String(step.source || 'user').toLowerCase();");
-            sb.AppendLine(@"        const caseSensitive = !!step.caseSensitive;");
-            sb.AppendLine(@"        const onlyNew = step.onlyNew !== false;");
-            sb.AppendLine(@"        if(!keyword){ throw new Error('keyword required'); }");
-            sb.AppendLine(@"        let baselineKey = '';");
-            sb.AppendLine(@"        try {");
-            sb.AppendLine(@"          const baseline = await fetchLatestLogEntry(source);");
-            sb.AppendLine(@"          baselineKey = baseline ? baseline.key : '';");
-            sb.AppendLine(@"        } catch(err) { }");
-            sb.AppendLine(@"        const waitStart = Date.now();");
-            sb.AppendLine(@"        let matched = null;");
-            sb.AppendLine(@"        appendFlowLog(`Step ${i + 1} waiting keyword: ${keyword}`);");
-            sb.AppendLine(@"        while((Date.now() - waitStart) <= timeoutMs){");
-            sb.AppendLine(@"          if(token !== flowRunToken){ throw new Error('Stopped'); }");
-            sb.AppendLine(@"          try {");
-            sb.AppendLine(@"            const latest = await fetchLatestLogEntry(source);");
-            sb.AppendLine(@"            if(latest){");
-            sb.AppendLine(@"              const isFresh = !onlyNew || latest.key !== baselineKey;");
-            sb.AppendLine(@"              if(isFresh && keywordMatch(latest.text, keyword, caseSensitive)){");
-            sb.AppendLine(@"                matched = latest;");
-            sb.AppendLine(@"                break;");
-            sb.AppendLine(@"              }");
-            sb.AppendLine(@"            }");
-            sb.AppendLine(@"          } catch(err) { }");
-            sb.AppendLine(@"          await new Promise(resolve => setTimeout(resolve, pollMs));");
-            sb.AppendLine(@"        }");
-            sb.AppendLine(@"        if(!matched){ throw new Error(`Keyword not detected within ${timeoutMs}ms: ${keyword}`); }");
-            sb.AppendLine(@"        ctx.lastRecognized = matched.text;");
-            sb.AppendLine(@"        ctx.lastRecognizedEntry = matched;");
-            sb.AppendLine(@"        step._state = 'ok';");
-            sb.AppendLine(@"        appendFlowLog(`Step ${i + 1} OK: keyword matched -> ${matched.text}`);");
-            sb.AppendLine(@"      } else if(step.type === 'condition'){");
-            sb.AppendLine(@"        const pass = evaluateCondition(step.expression, ctx);");
-            sb.AppendLine(@"        if(!pass){ throw new Error('Condition returned false'); }");
-            sb.AppendLine(@"        step._state = 'ok';");
-            sb.AppendLine(@"        appendFlowLog(`Step ${i + 1} OK: condition true`);");
-            sb.AppendLine(@"      } else {");
-            sb.AppendLine(@"        throw new Error('Unknown step type: ' + step.type);");
-            sb.AppendLine(@"      }");
-            sb.AppendLine(@"    } catch(err){");
-            sb.AppendLine(@"      if(String(err) === 'Error: Stopped'){");
-            sb.AppendLine(@"        flowStatusEl.textContent = 'Stopped.';");
-            sb.AppendLine(@"        flowRunning = false;");
-            sb.AppendLine(@"        renderFlowCanvas();");
-            sb.AppendLine(@"        return;");
-            sb.AppendLine(@"      }");
-            sb.AppendLine(@"      if(step.type === 'api' && step.continueOnError){");
-            sb.AppendLine(@"        step._state = 'error';");
-            sb.AppendLine(@"        appendFlowLog(`Step ${i + 1} error ignored: ${err}`);");
-            sb.AppendLine(@"      } else {");
-            sb.AppendLine(@"        step._state = 'error';");
-            sb.AppendLine(@"        flowStatusEl.textContent = `Failed at step ${i + 1}: ${err}`;");
-            sb.AppendLine(@"        appendFlowLog(`Flow failed at step ${i + 1}: ${err}`);");
-            sb.AppendLine(@"        flowRunning = false;");
-            sb.AppendLine(@"        renderFlowCanvas();");
-            sb.AppendLine(@"        return;");
-            sb.AppendLine(@"      }");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    renderFlowCanvas();");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  flowStatusEl.textContent = 'Completed.';");
-            sb.AppendLine(@"  appendFlowLog('Flow completed.');");
-            sb.AppendLine(@"  flowRunning = false;");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function stopFlow(){");
-            sb.AppendLine(@"  if(!flowRunning){ flowStatusEl.textContent = 'Flow is not running.'; return; }");
-            sb.AppendLine(@"  flowRunToken += 1;");
-            sb.AppendLine(@"  flowRunning = false;");
-            sb.AppendLine(@"  flowStatusEl.textContent = 'Stop requested...';");
-            sb.AppendLine(@"  appendFlowLog('Stop requested.');");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function clearFlow(){");
-            sb.AppendLine(@"  if(flowRunning){ flowStatusEl.textContent = 'Stop flow first.'; return; }");
-            sb.AppendLine(@"  flowSteps = [];");
-            sb.AppendLine(@"  flowSelectedId = '';");
-            sb.AppendLine(@"  flowLogEl.textContent = '';");
-            sb.AppendLine(@"  flowStatusEl.textContent = 'Flow cleared.';");
-            sb.AppendLine(@"  renderFlowCanvas();");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function exportFlow(){");
-            sb.AppendLine(@"  syncFlowJson();");
-            sb.AppendLine(@"  flowStatusEl.textContent = 'Flow exported to JSON box.';");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"function importFlow(){");
-            sb.AppendLine(@"  if(flowRunning){ flowStatusEl.textContent = 'Stop flow first.'; return; }");
-            sb.AppendLine(@"  let data;");
-            sb.AppendLine(@"  try { data = JSON.parse(flowJsonEl.value || '[]'); }");
-            sb.AppendLine(@"  catch(err){ flowStatusEl.textContent = 'Import failed: invalid JSON'; return; }");
-            sb.AppendLine(@"  if(!Array.isArray(data)){ flowStatusEl.textContent = 'Import failed: JSON root must be array'; return; }");
-            sb.AppendLine(@"  const nextSteps = [];");
-            sb.AppendLine(@"  for(let i = 0; i < data.length; i++){");
-            sb.AppendLine(@"    const raw = data[i] || {};");
-            sb.AppendLine(@"    if(raw.type === 'api'){");
-            sb.AppendLine(@"      nextSteps.push({");
-            sb.AppendLine(@"        id: makeStepId(),");
-            sb.AppendLine(@"        type: 'api',");
-            sb.AppendLine(@"        name: String(raw.name || 'api'),");
-            sb.AppendLine(@"        endpoint: String(raw.endpoint || ''),");
-            sb.AppendLine(@"        method: String(raw.method || 'POST').toUpperCase(),");
-            sb.AppendLine(@"        payload: (raw.payload && typeof raw.payload === 'object') ? raw.payload : {},");
-            sb.AppendLine(@"        continueOnError: !!raw.continueOnError");
-            sb.AppendLine(@"      });");
-            sb.AppendLine(@"      continue;");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    if(raw.type === 'delay'){");
-            sb.AppendLine(@"      nextSteps.push({ id: makeStepId(), type:'delay', name:String(raw.name || 'delay(ms)'), delayMs:Math.max(0, Number(raw.delayMs) || 0) });");
-            sb.AppendLine(@"      continue;");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    if(raw.type === 'condition'){");
-            sb.AppendLine(@"      nextSteps.push({ id: makeStepId(), type:'condition', name:String(raw.name || 'condition(expr)'), expression:String(raw.expression || '') });");
-            sb.AppendLine(@"      continue;");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    if(raw.type === 'keyword_wait'){");
-            sb.AppendLine(@"      nextSteps.push({");
-            sb.AppendLine(@"        id: makeStepId(),");
-            sb.AppendLine(@"        type:'keyword_wait',");
-            sb.AppendLine(@"        name:String(raw.name || 'wait_keyword'),");
-            sb.AppendLine(@"        keyword:String(raw.keyword || ''),");
-            sb.AppendLine(@"        timeoutMs:Math.max(100, Number(raw.timeoutMs) || 12000),");
-            sb.AppendLine(@"        pollMs:Math.max(100, Number(raw.pollMs) || 350),");
-            sb.AppendLine(@"        source:String(raw.source || 'user').toLowerCase(),");
-            sb.AppendLine(@"        caseSensitive:!!raw.caseSensitive,");
-            sb.AppendLine(@"        onlyNew:raw.onlyNew !== false");
-            sb.AppendLine(@"      });");
-            sb.AppendLine(@"      continue;");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"    flowStatusEl.textContent = `Import warning: skipped unknown type at index ${i}`;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  flowSteps = nextSteps;");
-            sb.AppendLine(@"  flowSelectedId = flowSteps.length ? flowSteps[0].id : '';");
-            sb.AppendLine(@"  flowStatusEl.textContent = `Imported ${flowSteps.length} steps.`;");
-            sb.AppendLine(@"  renderFlowCanvas();");
-            sb.AppendLine(@"}");
-            sb.AppendLine(@"flowCanvasEl.addEventListener('dragover', ev => ev.preventDefault());");
-            sb.AppendLine(@"flowCanvasEl.addEventListener('drop', ev => {");
-            sb.AppendLine(@"  ev.preventDefault();");
-            sb.AppendLine(@"  if(dragTemplateKey){");
-            sb.AppendLine(@"    const step = createStepFromTemplate(dragTemplateKey);");
-            sb.AppendLine(@"    if(step){");
-            sb.AppendLine(@"      flowSteps.push(step);");
-            sb.AppendLine(@"      flowSelectedId = step.id;");
-            sb.AppendLine(@"      renderFlowCanvas();");
-            sb.AppendLine(@"    }");
-            sb.AppendLine(@"  } else if(dragStepId){");
-            sb.AppendLine(@"    moveStepToEnd(dragStepId);");
-            sb.AppendLine(@"    renderFlowCanvas();");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  dragTemplateKey = '';");
-            sb.AppendLine(@"  dragStepId = '';");
-            sb.AppendLine(@"});");
-            sb.AppendLine(@"flowCanvasEl.addEventListener('click', ev => {");
-            sb.AppendLine(@"  const btn = ev.target.closest('button[data-action]');");
-            sb.AppendLine(@"  if(!btn) return;");
-            sb.AppendLine(@"  const action = btn.getAttribute('data-action');");
-            sb.AppendLine(@"  const id = btn.getAttribute('data-id');");
-            sb.AppendLine(@"  if(!id) return;");
-            sb.AppendLine(@"  const idx = flowSteps.findIndex(s => s.id === id);");
-            sb.AppendLine(@"  if(idx < 0) return;");
-            sb.AppendLine(@"  if(action === 'select'){");
-            sb.AppendLine(@"    flowSelectedId = id;");
-            sb.AppendLine(@"    renderFlowCanvas();");
-            sb.AppendLine(@"    return;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  if(action === 'delete'){");
-            sb.AppendLine(@"    flowSteps.splice(idx, 1);");
-            sb.AppendLine(@"    if(flowSelectedId === id){ flowSelectedId = flowSteps.length ? flowSteps[Math.max(0, idx - 1)].id : ''; }");
-            sb.AppendLine(@"    renderFlowCanvas();");
-            sb.AppendLine(@"    return;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  if(action === 'up' && idx > 0){");
-            sb.AppendLine(@"    const tmp = flowSteps[idx - 1];");
-            sb.AppendLine(@"    flowSteps[idx - 1] = flowSteps[idx];");
-            sb.AppendLine(@"    flowSteps[idx] = tmp;");
-            sb.AppendLine(@"    renderFlowCanvas();");
-            sb.AppendLine(@"    return;");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"  if(action === 'down' && idx < flowSteps.length - 1){");
-            sb.AppendLine(@"    const tmp = flowSteps[idx + 1];");
-            sb.AppendLine(@"    flowSteps[idx + 1] = flowSteps[idx];");
-            sb.AppendLine(@"    flowSteps[idx] = tmp;");
-            sb.AppendLine(@"    renderFlowCanvas();");
-            sb.AppendLine(@"  }");
-            sb.AppendLine(@"});");
-            sb.AppendLine(@"flowRunBtn.addEventListener('click', runFlow);");
-            sb.AppendLine(@"flowStopBtn.addEventListener('click', stopFlow);");
-            sb.AppendLine(@"flowClearBtn.addEventListener('click', clearFlow);");
-            sb.AppendLine(@"flowExportBtn.addEventListener('click', exportFlow);");
-            sb.AppendLine(@"flowImportBtn.addEventListener('click', importFlow);");
-            sb.AppendLine(@"methodEl.addEventListener('change', syncMethod);");
-            sb.AppendLine(@"syncMethod();");
-            sb.AppendLine(@"renderTemplates();");
-            sb.AppendLine(@"renderFlowCanvas();");
-            sb.AppendLine(@"</script>");
-            sb.AppendLine(@"</body>");
-            sb.AppendLine(@"</html>");
-            return sb.ToString();
+            return LoadPanelTemplateOrFallback("sdk.html");
         }
 
+        private static string LoadPanelTemplateOrFallback(string fileName)
+        {
+            var html = LoadPanelTemplate(fileName);
+            if (!string.IsNullOrEmpty(html))
+            {
+                return html;
+            }
+
+            return BuildMissingTemplateHtml(fileName);
+        }
+
+        private static string LoadPanelTemplate(string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                var root = Path.Combine(Application.streamingAssetsPath, "panel");
+                var fullPath = Path.Combine(root, fileName);
+                if (!File.Exists(fullPath))
+                {
+                    return string.Empty;
+                }
+
+                return File.ReadAllText(fullPath, Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[UserTestPanel] Failed to load panel template '{fileName}': {ex.Message}");
+                return string.Empty;
+            }
+        }
+
+        private static string BuildMissingTemplateHtml(string fileName)
+        {
+            var safeName = string.IsNullOrWhiteSpace(fileName) ? "unknown" : EscapeJson(fileName.Trim());
+            return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Template Missing</title></head><body>"
+                + "<h2>UserTestPanel template missing</h2>"
+                + "<p>Missing file: " + safeName + "</p>"
+                + "<p>Expected under Assets/StreamingAssets/panel/</p>"
+                + "</body></html>";
+        }
         private static void AddCorsHeaders(HttpListenerResponse response)
         {
             response.Headers["Access-Control-Allow-Origin"] = "*";
@@ -6297,7 +4494,7 @@ namespace RobotVoice
                     return;
                 }
 
-                // 优先尝试 OBS 虚拟摄像头，其次任何名称包含 "virtual" 的设备
+                // Prefer OBS/virtual camera first; fall back to the first available device.
                 var dev = availableSources.FirstOrDefault(d =>
                     (!string.IsNullOrEmpty(d.name) &&
                      (d.name.IndexOf("obs", StringComparison.OrdinalIgnoreCase) >= 0 ||

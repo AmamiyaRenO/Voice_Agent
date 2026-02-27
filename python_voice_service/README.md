@@ -3,9 +3,9 @@
 This folder contains a lightweight FastAPI application that wraps the
 [Faster-Whisper](https://github.com/guillaumekln/faster-whisper) model
 so Unity can offload speech recognition to Python. The REST endpoint
-returns Vosk-compatible JSON payloads, allowing the existing
-`VoiceGameLauncher` logic to keep publishing intents to the message hub
-without any changes. A companion `/respond` endpoint can forward the
+returns speech JSON payloads (including legacy compatibility fields),
+allowing the existing `VoiceGameLauncher` logic to keep publishing
+intents to the message hub without any changes. A companion `/respond` endpoint can forward the
 transcribed text to a local [Ollama](https://ollama.com/) instance that
 runs Meta's Llama 3.1 model, enabling short spoken replies from the
 coach voice agent.
