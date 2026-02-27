@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import re
+
+_WHITESPACE_RE = re.compile(r"\s+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?])\s+")
+_TRAILING_CONNECTOR_RE = re.compile(
+    r"(?:\b(?:and|or|but|to|of|with|for|in|on|at|through|about|into|from)\b[\s,;:]*)+$",
+    re.IGNORECASE,
+)
+_LEADING_STAGE_CUE_RE = re.compile(
+    r"^\s*(?:\([^)]{1,180}\)|\[[^\]]{1,180}\]|\*[^*]{1,180}\*)[\s,;:!\.\-]*"
+)
+_WRAPPED_STAGE_RE = re.compile(r"^\s*(?:\([^)]{1,260}\)|\[[^\]]{1,260}\]|\*[^*]{1,260}\*)\s*$")
+_STAGE_HINT_RE = re.compile(
+    r"\b("
+    r"chuckle|chuckles|laugh|laughs|sigh|sighs|whisper|whispers|"
+    r"tone|voice|rasp|raspy|smile|smiles|grin|grins|giggle|giggles|"
+    r"narrat|stage|emotion|mood|sarcastic|dramatic|warmly|softly"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def compress_reply_for_latency(text: str, max_sentences: int, max_chars: int) -> str:
+    normalized = _WHITESPACE_RE.sub(" ", (text or "").strip())
+    if not normalized:
+        return ""
+
+    compact = normalized
+    if max_sentences > 0:
+        parts = [p.strip() for p in _SENTENCE_SPLIT_RE.split(compact) if p and p.strip()]
+        if parts:
+            compact = " ".join(parts[:max_sentences]).strip()
+
+    if max_chars > 0 and len(compact) > max_chars:
+        search_start = max(16, max_chars - 20)
+        split = -1
+        punctuation = ".!?;: "
+        for i in range(max_chars, search_start - 1, -1):
+            if compact[i] in punctuation:
+                split = i + 1
+                break
+        if split <= 0:
+            split = max_chars
+        compact = compact[:split].strip()
+
+    return compact
+
+
+def trim_trailing_connectors(text: str) -> str:
+    if not text:
+        return ""
+    trimmed = _TRAILING_CONNECTOR_RE.sub("", text).strip()
+    return trimmed if trimmed else text.strip()
+
+
+def compress_reply_by_words(text: str, max_words: int) -> str:
+    if max_words <= 0:
+        return (text or "").strip()
+    words = [w for w in (text or "").strip().split(" ") if w]
+    if len(words) <= max_words:
+        return (text or "").strip()
+    return " ".join(words[:max_words]).strip()
+
+
+def _strip_leading_stage_cues(text: str) -> str:
+    current = (text or "").strip()
+    while current:
+        match = _LEADING_STAGE_CUE_RE.match(current)
+        if not match:
+            break
+        cue = match.group(0) or ""
+        if not _STAGE_HINT_RE.search(cue):
+            break
+        next_value = current[match.end() :].lstrip()
+        if next_value == current:
+            break
+        current = next_value
+    return current
+
+
+def sanitize_tts_text(text: str) -> str:
+    current = (text or "").strip()
+    if not current:
+        return ""
+
+    current = _strip_leading_stage_cues(current)
+    if not current:
+        return ""
+
+    # Drop pure stage-direction outputs such as "(A low chuckle, ...)".
+    if _WRAPPED_STAGE_RE.match(current) and _STAGE_HINT_RE.search(current):
+        return ""
+
+    return current.strip()

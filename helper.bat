@@ -35,6 +35,21 @@ if exist "C:\Program Files\mosquitto\mosquitto.exe" (
   set "VOICE_AGENT_MOSQUITTO_EXE=C:\Program Files\mosquitto\mosquitto.exe"
 )
 
+set "ASR_VENV_PY=%CD%\python_voice_service\.venv_asr\Scripts\python.exe"
+if exist "%ASR_VENV_PY%" (
+  set "VOICE_AGENT_ASR_PYTHON=%ASR_VENV_PY%"
+  set "VOICE_AGENT_VOICE_CMD=%ASR_VENV_PY% -m uvicorn main:app --host 0.0.0.0 --port 8000"
+  set "VOICE_AGENT_VOICE_CWD=%CD%\python_voice_service"
+)
+
+set "TTS_VENV_PY=%CD%\python_voice_service\.venv_tts\Scripts\python.exe"
+if exist "%TTS_VENV_PY%" (
+  set "VOICE_AGENT_TTS_PYTHON=%TTS_VENV_PY%"
+  set "VOICE_AGENT_PIPER_HTTP_CMD=%TTS_VENV_PY% -m uvicorn piper_http:app --host 0.0.0.0 --port 5005"
+  set "VOICE_AGENT_QWEN_HTTP_CMD=%TTS_VENV_PY% -m uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5006"
+  set "VOICE_AGENT_PIPER_HTTP_CWD=%CD%\python_voice_service"
+)
+
 where py >nul 2>nul
 if %errorlevel%==0 (
   start "" py -3 scripts\start_local_services.py

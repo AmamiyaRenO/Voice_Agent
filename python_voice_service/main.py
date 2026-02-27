@@ -37,6 +37,21 @@ try:  # Optional dependency when using OpenAI API transcription.
 except Exception:  # pragma: no cover - openai is optional at runtime.
     AsyncOpenAI = None
 
+try:  # Optional dependency when using Moonshine offline transcription.
+    from moonshine_voice import (
+        Transcriber as MoonshineTranscriber,
+        get_model_for_language as moonshine_get_model_for_language,
+    )
+    from moonshine_voice.moonshine_api import (
+        ModelArch as MoonshineModelArch,
+        model_arch_to_string as moonshine_model_arch_to_string,
+    )
+except Exception:  # pragma: no cover - moonshine is optional at runtime.
+    MoonshineTranscriber = None
+    moonshine_get_model_for_language = None
+    MoonshineModelArch = None
+    moonshine_model_arch_to_string = None
+
 APP_TITLE = "Coach Voice Agent - Python Voice Service"
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
@@ -55,14 +70,57 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 DEFAULT_HTTP_TIMEOUT = httpx.Timeout(30.0)
-TRANSCRIBE_MODE_OFFLINE = "offline"
 TRANSCRIBE_MODE_API = "api"
-TRANSCRIBE_MODE_DEFAULT = (
-    os.getenv("TRANSCRIBE_MODE", TRANSCRIBE_MODE_OFFLINE).strip().lower() or TRANSCRIBE_MODE_OFFLINE
+TRANSCRIBE_MODE_WHISPER_LARGE_V3 = "whisper-large-v3"
+TRANSCRIBE_MODE_MOONSHINE_SMALL = "moonshine-small"
+TRANSCRIBE_MODE_MOONSHINE_MEDIUM = "moonshine-medium"
+TRANSCRIBE_AVAILABLE_MODES = [TRANSCRIBE_MODE_WHISPER_LARGE_V3]
+if MoonshineTranscriber is not None:
+    TRANSCRIBE_AVAILABLE_MODES.extend([TRANSCRIBE_MODE_MOONSHINE_SMALL, TRANSCRIBE_MODE_MOONSHINE_MEDIUM])
+TRANSCRIBE_AVAILABLE_MODES.append(TRANSCRIBE_MODE_API)
+
+
+def _normalize_transcribe_mode_bootstrap(mode: Optional[str]) -> Optional[str]:
+    normalized = (mode or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized in {
+        TRANSCRIBE_MODE_WHISPER_LARGE_V3,
+        "offline",
+        "local",
+        "whisper",
+        "faster-whisper",
+        "large-v3",
+    }:
+        return TRANSCRIBE_MODE_WHISPER_LARGE_V3
+    if normalized in {TRANSCRIBE_MODE_API, "openai", "online"}:
+        return TRANSCRIBE_MODE_API
+    if normalized in {
+        TRANSCRIBE_MODE_MOONSHINE_SMALL,
+        "moonshine-small-streaming",
+        "moonshine_small",
+        "small",
+    }:
+        return TRANSCRIBE_MODE_MOONSHINE_SMALL
+    if normalized in {
+        TRANSCRIBE_MODE_MOONSHINE_MEDIUM,
+        "moonshine-medium-streaming",
+        "moonshine_medium",
+        "moonshine",
+        "moonshine-voice",
+        "medium",
+    }:
+        return TRANSCRIBE_MODE_MOONSHINE_MEDIUM
+    return None
+
+
+TRANSCRIBE_MODE_REQUESTED_RAW = (
+    os.getenv("TRANSCRIBE_MODE", TRANSCRIBE_MODE_WHISPER_LARGE_V3).strip().lower() or TRANSCRIBE_MODE_WHISPER_LARGE_V3
 )
-if TRANSCRIBE_MODE_DEFAULT not in {TRANSCRIBE_MODE_OFFLINE, TRANSCRIBE_MODE_API}:
-    TRANSCRIBE_MODE_DEFAULT = TRANSCRIBE_MODE_OFFLINE
-TRANSCRIBE_AVAILABLE_MODES = [TRANSCRIBE_MODE_OFFLINE, TRANSCRIBE_MODE_API]
+TRANSCRIBE_MODE_REQUESTED = _normalize_transcribe_mode_bootstrap(TRANSCRIBE_MODE_REQUESTED_RAW)
+TRANSCRIBE_MODE_DEFAULT = TRANSCRIBE_MODE_REQUESTED or TRANSCRIBE_MODE_WHISPER_LARGE_V3
+if TRANSCRIBE_MODE_DEFAULT not in TRANSCRIBE_AVAILABLE_MODES:
+    TRANSCRIBE_MODE_DEFAULT = TRANSCRIBE_MODE_WHISPER_LARGE_V3
 
 
 def _openai_transcribe_model() -> str:
@@ -93,6 +151,67 @@ def _openai_api_key() -> str:
 
 def _openai_configured() -> bool:
     return bool(_openai_api_key()) and AsyncOpenAI is not None
+
+
+def _moonshine_configured() -> bool:
+    return (
+        MoonshineTranscriber is not None
+        and moonshine_get_model_for_language is not None
+        and MoonshineModelArch is not None
+    )
+
+
+def _moonshine_model_arch_from_value(raw: Optional[str]) -> Optional["MoonshineModelArch"]:
+    if MoonshineModelArch is None:
+        return None
+
+    value = (raw or "").strip().lower()
+    if not value:
+        return None
+
+    by_name = {
+        "tiny": MoonshineModelArch.TINY,
+        "base": MoonshineModelArch.BASE,
+        "tiny-streaming": MoonshineModelArch.TINY_STREAMING,
+        "base-streaming": MoonshineModelArch.BASE_STREAMING,
+        "small-streaming": MoonshineModelArch.SMALL_STREAMING,
+        "medium-streaming": MoonshineModelArch.MEDIUM_STREAMING,
+    }
+    if value in by_name:
+        return by_name[value]
+
+    try:
+        numeric = int(value)
+        return MoonshineModelArch(numeric)
+    except Exception:
+        return None
+
+
+def _moonshine_model_arch_name(value: object) -> str:
+    if moonshine_model_arch_to_string is not None:
+        try:
+            return str(moonshine_model_arch_to_string(value))
+        except Exception:
+            pass
+    return str(value)
+
+
+def _moonshine_install_hint() -> str:
+    return (
+        "Moonshine modes require dependency 'moonshine-voice'. "
+        "Install with: pip install moonshine-voice==0.0.49"
+    )
+
+
+def _is_moonshine_mode(mode: Optional[str]) -> bool:
+    return mode in {TRANSCRIBE_MODE_MOONSHINE_SMALL, TRANSCRIBE_MODE_MOONSHINE_MEDIUM}
+
+
+def _moonshine_profile_for_mode(mode: str) -> str:
+    if mode == TRANSCRIBE_MODE_MOONSHINE_SMALL:
+        return "small"
+    return "medium"
+
 
 def _resolve_whisper_model_path(raw: str) -> str:
     """Resolve WHISPER_MODEL_PATH for faster-whisper.
@@ -209,6 +328,14 @@ def _environment(key: str, default: str) -> str:
 logger.setLevel(
     getattr(logging, _environment("VOICE_SERVICE_LOG_LEVEL", "INFO").upper(), logging.INFO)
 )
+
+if TRANSCRIBE_MODE_REQUESTED is None or TRANSCRIBE_MODE_DEFAULT != TRANSCRIBE_MODE_REQUESTED:
+    logger.warning(
+        "Unsupported TRANSCRIBE_MODE=%r; using %r (available=%s).",
+        TRANSCRIBE_MODE_REQUESTED_RAW,
+        TRANSCRIBE_MODE_DEFAULT,
+        ",".join(TRANSCRIBE_AVAILABLE_MODES),
+    )
 
 
 def _environment_float(key: str, default: float) -> float:
@@ -609,9 +736,106 @@ def _load_model() -> WhisperModel:
         return model
 
 
+@lru_cache(maxsize=2)
+def _load_moonshine_transcriber(profile: str) -> tuple["MoonshineTranscriber", str, object]:
+    if not _moonshine_configured():
+        raise RuntimeError(_moonshine_install_hint())
+
+    profile_key = (profile or "").strip().lower()
+    if profile_key not in {"small", "medium"}:
+        raise RuntimeError(f"Unsupported moonshine profile: {profile}")
+
+    model_path_raw = (
+        os.getenv(f"MOONSHINE_{profile_key.upper()}_MODEL_PATH", "")
+        or os.getenv("MOONSHINE_MODEL_PATH", "")
+        or ""
+    ).strip()
+    language = (os.getenv("MOONSHINE_LANGUAGE", "en") or "en").strip().lower() or "en"
+    model_arch_raw = (
+        os.getenv(f"MOONSHINE_{profile_key.upper()}_MODEL_ARCH", "")
+        or os.getenv("MOONSHINE_MODEL_ARCH", "")
+        or ""
+    )
+    model_arch = _moonshine_model_arch_from_value(model_arch_raw)
+    default_arch = (
+        MoonshineModelArch.SMALL_STREAMING
+        if profile_key == "small"
+        else MoonshineModelArch.MEDIUM_STREAMING
+    )
+
+    try:
+        if model_path_raw:
+            resolved_model_path = model_path_raw
+            resolved_model_arch = model_arch or default_arch
+        else:
+            resolved_model_path, resolved_model_arch = moonshine_get_model_for_language(
+                wanted_language=language,
+                wanted_model_arch=(model_arch or default_arch),
+            )
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to resolve/load Moonshine model. "
+            "Set MOONSHINE_<PROFILE>_MODEL_PATH (or MOONSHINE_MODEL_PATH) to an existing model folder "
+            "or verify internet access "
+            "for automatic model download."
+        ) from exc
+
+    try:
+        identify_speakers = (
+            (os.getenv("MOONSHINE_IDENTIFY_SPEAKERS", "1") or "1").strip().lower()
+            in {"1", "true", "t", "yes", "y", "on"}
+        )
+        options: Optional[Dict[str, object]] = None
+        if identify_speakers:
+            options = {"identify_speakers": "true"}
+        try:
+            transcriber = MoonshineTranscriber(
+                model_path=resolved_model_path,
+                model_arch=resolved_model_arch,
+                options=options,
+            )
+        except Exception:
+            # Compatibility fallback for older moonshine builds / options parsing.
+            transcriber = MoonshineTranscriber(
+                model_path=resolved_model_path,
+                model_arch=resolved_model_arch,
+            )
+            if identify_speakers:
+                logger.warning(
+                    "Moonshine transcriber initialized without identify_speakers option. "
+                    "Speaker IDs may be unavailable on this build."
+                )
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to initialize Moonshine transcriber. "
+            "Verify MOONSHINE_MODEL_PATH and MOONSHINE_MODEL_ARCH."
+        ) from exc
+
+    try:
+        logger.info(
+            "Loaded Moonshine model profile=%s path=%s arch=%s language=%s",
+            profile_key,
+            resolved_model_path,
+            _moonshine_model_arch_name(resolved_model_arch),
+            language,
+        )
+    except Exception:
+        pass
+
+    return transcriber, resolved_model_path, resolved_model_arch
+
+
 class RespondRequest(BaseModel):
     text: str = Field(..., min_length=1, description="User transcript to send to the coach agent")
     system: Optional[str] = Field(default=None, description="Optional system prompt override for the LLM.")
+    memory_context: Optional[str] = Field(
+        default=None,
+        description="Optional short per-user memory summary injected into the prompt.",
+    )
+    user_id: Optional[str] = Field(
+        default=None,
+        description="Optional stable user identifier for logging/debugging.",
+    )
 
 
 class RespondResponse(BaseModel):
@@ -633,7 +857,10 @@ class RespondConfigResponse(BaseModel):
 
 
 class TranscribeConfigRequest(BaseModel):
-    mode: Optional[str] = Field(default=None, description="ASR mode: offline or api.")
+    mode: Optional[str] = Field(
+        default=None,
+        description="ASR mode: whisper-large-v3, moonshine-small, moonshine-medium, or api.",
+    )
     reset: bool = Field(default=False, description="Clear runtime override and use env/default mode.")
 
 
@@ -691,16 +918,7 @@ _RUNTIME_TRANSCRIBE_MODE_LOCK = asyncio.Lock()
 
 
 def _normalize_transcribe_mode(mode: Optional[str]) -> Optional[str]:
-    if mode is None:
-        return None
-    normalized = mode.strip().lower()
-    if not normalized:
-        return None
-    if normalized in {TRANSCRIBE_MODE_OFFLINE, "local", "whisper", "faster-whisper"}:
-        return TRANSCRIBE_MODE_OFFLINE
-    if normalized in {TRANSCRIBE_MODE_API, "openai", "online"}:
-        return TRANSCRIBE_MODE_API
-    return None
+    return _normalize_transcribe_mode_bootstrap(mode)
 
 
 async def _set_runtime_transcribe_mode(mode: Optional[str]) -> None:
@@ -779,13 +997,31 @@ def _piper_http_base_url() -> str:
     return _environment("PIPER_HTTP_URL", "http://127.0.0.1:5005").rstrip("/")
 
 
-async def _generate_coach_reply(user_text: str, system_override: Optional[str] = None) -> str:
+async def _generate_coach_reply(
+    user_text: str,
+    system_override: Optional[str] = None,
+    memory_context: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> str:
     keep_alive = _environment("OLLAMA_KEEP_ALIVE", "30m")
     effective_system_prompt, _, _ = await _get_effective_ollama_system_prompt()
+    prompt_parts: List[str] = []
+    context_text = (memory_context or "").strip()
+    if context_text:
+        if len(context_text) > 600:
+            context_text = context_text[:600].rstrip()
+        prompt_parts.append(
+            "User memory context (may be partial, use only when relevant):\n"
+            f"{context_text}"
+        )
+    if user_id:
+        prompt_parts.append(f"Active user id: {str(user_id).strip()}.")
+    prompt_parts.append(f"User: {user_text}\nCoach:")
+
     payload = {
         "model": _ollama_model(),
         "system": (system_override or "").strip() or effective_system_prompt,
-        "prompt": f"User: {user_text}\nCoach:",
+        "prompt": "\n\n".join(prompt_parts),
         "stream": False,
         "options": {
             "temperature": _environment_float("OLLAMA_TEMPERATURE", 0.6),
@@ -822,11 +1058,13 @@ async def _generate_coach_reply(user_text: str, system_override: Optional[str] =
 
 @app.on_event("startup")
 async def _startup_event() -> None:
-    # Trigger model loading during startup so the first offline request does not pay the cost.
-    if TRANSCRIBE_MODE_DEFAULT == TRANSCRIBE_MODE_OFFLINE:
+    # Trigger model loading during startup so the first ASR request does not pay the cost.
+    if TRANSCRIBE_MODE_DEFAULT == TRANSCRIBE_MODE_WHISPER_LARGE_V3:
         _load_model()
+    elif _is_moonshine_mode(TRANSCRIBE_MODE_DEFAULT):
+        _load_moonshine_transcriber(_moonshine_profile_for_mode(TRANSCRIBE_MODE_DEFAULT))
     else:
-        logger.info("ASR startup mode is '%s'; skipping offline model preload.", TRANSCRIBE_MODE_DEFAULT)
+        logger.info("ASR startup mode is '%s'; skipping local model preload.", TRANSCRIBE_MODE_DEFAULT)
     # Warm the shared HTTP client so the first request can reuse an existing connection.
     _AsyncHttpClient.get()
 
@@ -835,6 +1073,7 @@ async def _startup_event() -> None:
 async def _shutdown_event() -> None:
     await _AsyncHttpClient.aclose()
     await _AsyncOpenAIClient.aclose()
+    _load_moonshine_transcriber.cache_clear()
 
 
 @app.get("/healthz")
@@ -871,11 +1110,19 @@ async def set_transcribe_config(payload: TranscribeConfigRequest) -> TranscribeC
 
     normalized = _normalize_transcribe_mode(payload.mode)
     if normalized is None:
-        raise HTTPException(status_code=400, detail="mode must be one of: offline, api")
+        raise HTTPException(
+            status_code=400,
+            detail="mode must be one of: whisper-large-v3, moonshine-small, moonshine-medium, api",
+        )
     if normalized == TRANSCRIBE_MODE_API and not _openai_configured():
         raise HTTPException(
             status_code=400,
             detail="OpenAI ASR requires installed openai SDK and OPENAI_API_KEY.",
+        )
+    if _is_moonshine_mode(normalized) and not _moonshine_configured():
+        raise HTTPException(
+            status_code=400,
+            detail=_moonshine_install_hint(),
         )
 
     await _set_runtime_transcribe_mode(normalized)
@@ -1478,6 +1725,107 @@ def _run_transcription(
     return list(segments_generator), info
 
 
+def _run_moonshine_transcription(
+    transcriber: "MoonshineTranscriber",
+    audio: np.ndarray,
+    sample_rate: int,
+) -> tuple[str, List[dict], dict]:
+    # Moonshine's Python API accepts float samples in [-1, 1].
+    transcript = transcriber.transcribe_without_streaming(audio.tolist(), sample_rate=sample_rate)
+
+    words: List[dict] = []
+    line_texts: List[str] = []
+    speaker_durations: Dict[Tuple[int, int], float] = {}
+    for line in getattr(transcript, "lines", []) or []:
+        text_raw = str(getattr(line, "text", "") or "").strip()
+        if not text_raw:
+            continue
+
+        text = _canonicalize_asr_text(text_raw)
+        if text:
+            line_texts.append(text)
+
+        line_words = [token.strip() for token in text.split() if token.strip()]
+        if not line_words:
+            continue
+
+        try:
+            line_start = max(0.0, float(getattr(line, "start_time", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            line_start = 0.0
+        try:
+            line_duration = max(0.0, float(getattr(line, "duration", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            line_duration = 0.0
+        has_speaker_id = bool(getattr(line, "has_speaker_id", False))
+        speaker_index_value = 0
+        speaker_id_value = 0
+        if has_speaker_id:
+            try:
+                speaker_index_value = max(0, int(getattr(line, "speaker_index", 0) or 0))
+            except (TypeError, ValueError):
+                speaker_index_value = 0
+            try:
+                speaker_id_value = max(0, int(getattr(line, "speaker_id", 0) or 0))
+            except (TypeError, ValueError):
+                speaker_id_value = 0
+            key = (speaker_index_value, speaker_id_value)
+            speaker_durations[key] = speaker_durations.get(key, 0.0) + max(0.01, line_duration)
+
+        if line_duration <= 0.0:
+            for token in line_words:
+                words.append(
+                    {
+                        "word": token,
+                        "start": line_start,
+                        "end": line_start,
+                        "confidence": None,
+                        "speaker_index": speaker_index_value if has_speaker_id else None,
+                        "speaker_id": speaker_id_value if has_speaker_id else None,
+                    }
+                )
+            continue
+
+        step = line_duration / max(1, len(line_words))
+        for index, token in enumerate(line_words):
+            start = line_start + (step * index)
+            end = line_start + (step * (index + 1))
+            words.append(
+                {
+                    "word": token,
+                    "start": max(0.0, start),
+                    "end": max(0.0, end),
+                    "confidence": None,
+                    "speaker_index": speaker_index_value if has_speaker_id else None,
+                    "speaker_id": speaker_id_value if has_speaker_id else None,
+                }
+            )
+
+    text = _canonicalize_asr_text(" ".join(line_texts).strip())
+    if not text and words:
+        text = _canonicalize_asr_text(" ".join(word["word"] for word in words if word.get("word")).strip())
+
+    speakers = [
+        {
+            "speaker_index": int(speaker_index),
+            "speaker_id": int(speaker_id),
+            "duration": round(float(duration), 4),
+        }
+        for (speaker_index, speaker_id), duration in sorted(
+            speaker_durations.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+    ]
+    primary = speakers[0] if speakers else None
+    speaker_meta = {
+        "speaker_index": primary.get("speaker_index") if primary else None,
+        "speaker_id": primary.get("speaker_id") if primary else None,
+        "speakers": speakers,
+    }
+    return text, words, speaker_meta
+
+
 def _to_plain_dict(value: object) -> dict:
     if value is None:
         return {}
@@ -1597,7 +1945,10 @@ async def transcribe(
     vad_fallback_retry: bool = Query(True, description="If VAD removes everything and text is empty, retry once with VAD disabled."),
     session_id: Optional[str] = Query(None, description="Client/session id for streaming context and overlap."),
     hotwords: Optional[str] = Query(None, description="Optional per-request hotwords (comma/space separated)."),
-    mode: Optional[str] = Query(None, description="Optional per-request ASR mode: offline or api."),
+    mode: Optional[str] = Query(
+        None,
+        description="Optional per-request ASR mode: whisper-large-v3, moonshine-small, moonshine-medium, or api.",
+    ),
 ) -> JSONResponse:
     start_time = time.perf_counter()
     now = time.time()
@@ -1631,7 +1982,10 @@ async def transcribe(
 
     selected_mode = _normalize_transcribe_mode(mode)
     if mode is not None and selected_mode is None:
-        raise HTTPException(status_code=400, detail="mode must be one of: offline, api")
+        raise HTTPException(
+            status_code=400,
+            detail="mode must be one of: whisper-large-v3, moonshine-small, moonshine-medium, api",
+        )
     effective_mode = selected_mode
     if effective_mode is None:
         effective_mode, _ = await _get_effective_transcribe_mode()
@@ -1678,6 +2032,61 @@ async def transcribe(
             now=now,
             audio=audio,
             full_text=str(response.get("text", "") or ""),
+        )
+        return JSONResponse(response)
+
+    if _is_moonshine_mode(effective_mode):
+        if not _moonshine_configured():
+            raise HTTPException(status_code=503, detail=_moonshine_install_hint())
+
+        try:
+            moonshine_transcriber, _, _ = _load_moonshine_transcriber(
+                _moonshine_profile_for_mode(effective_mode)
+            )
+            full_text, words, speaker_meta = await asyncio.to_thread(
+                _run_moonshine_transcription,
+                moonshine_transcriber,
+                audio,
+                DEFAULT_SAMPLE_RATE,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Moonshine transcription failed")
+            raise HTTPException(status_code=502, detail=f"Moonshine transcription failed: {exc}") from exc
+
+        full_text, words = _maybe_enforce_english_only(
+            text=full_text,
+            words=words,
+            language=normalized_language,
+        )
+
+        response = {
+            "text": full_text,
+            "result": _build_legacy_word_result(words),
+            "language": normalized_language,
+            "duration": _duration_seconds(audio, DEFAULT_SAMPLE_RATE),
+            "language_probability": None,
+            "translation": False,
+            "rms": rms,
+            "max_amplitude": max_amplitude,
+            "speech_fraction": speech_fraction,
+            "provider": "moonshine",
+            "mode": effective_mode,
+            "processing_seconds": round(time.perf_counter() - start_time, 4),
+        }
+        if speaker_meta.get("speaker_index") is not None:
+            response["speaker_index"] = int(speaker_meta["speaker_index"])
+        if speaker_meta.get("speaker_id") is not None:
+            response["speaker_id"] = int(speaker_meta["speaker_id"])
+        speakers_payload = speaker_meta.get("speakers")
+        if isinstance(speakers_payload, list) and speakers_payload:
+            response["speakers"] = speakers_payload
+        _update_transcribe_session_state(
+            state=state,
+            now=now,
+            audio=audio,
+            full_text=full_text,
         )
         return JSONResponse(response)
 
@@ -1930,7 +2339,7 @@ async def transcribe(
         "max_amplitude": max_amplitude,
         "speech_fraction": speech_fraction,
         "provider": "faster-whisper",
-        "mode": TRANSCRIBE_MODE_OFFLINE,
+        "mode": TRANSCRIBE_MODE_WHISPER_LARGE_V3,
     }
 
     if avg_logprob is not None:
@@ -1990,7 +2399,12 @@ async def respond(payload: RespondRequest) -> RespondResponse:
         raise HTTPException(status_code=400, detail="Empty text payload")
 
     try:
-        reply = await _generate_coach_reply(user_text, system_override=(payload.system or None))
+        reply = await _generate_coach_reply(
+            user_text,
+            system_override=(payload.system or None),
+            memory_context=(payload.memory_context or None),
+            user_id=(payload.user_id or None),
+        )
     except OllamaError as exc:
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         await _record_respond_metric(

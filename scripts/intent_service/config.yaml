@@ -17,6 +17,7 @@ rules:
   fuzzy_threshold: 70   # 0-100，分数越高越严格
   dedupe_window_sec: 1.2
   use_llm_classifier: false
+  use_moonshine_intent_recognizer: false
   llm_classifier_url: "http://127.0.0.1:8000/respond"
   llm_timeout_sec: 0.9
   llm_min_confidence: 0.72

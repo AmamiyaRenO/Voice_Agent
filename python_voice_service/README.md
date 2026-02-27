@@ -48,7 +48,7 @@ pip install -r requirements.txt
    export WHISPER_RECENT_WINDOW_PAD_MS=100
    export WHISPER_CONDITION_ON_PREVIOUS_TEXT=false
    # Optional: ASR mode switch
-   export TRANSCRIBE_MODE=offline  # offline | api
+   export TRANSCRIBE_MODE=whisper-large-v3  # whisper-large-v3 | moonshine-small | moonshine-medium | api
    # Optional: when TRANSCRIBE_MODE=api (OpenAI STT)
    export OPENAI_API_KEY="sk-..."
    export OPENAI_TRANSCRIBE_MODEL="gpt-4o-mini-transcribe"
@@ -57,6 +57,10 @@ pip install -r requirements.txt
    # API language control (defaults already enforce English)
    export ASR_API_LANGUAGE="en"
    export ASR_API_FORCE_LANGUAGE="1"
+   # Optional: Moonshine model selection (advanced)
+   export MOONSHINE_LANGUAGE="en"
+   export MOONSHINE_SMALL_MODEL_PATH=""    # optional override for moonshine-small
+   export MOONSHINE_MEDIUM_MODEL_PATH=""   # optional override for moonshine-medium
    ```
 
    On Windows PowerShell replace `export` with `$env:VAR = "value"`.
@@ -100,7 +104,7 @@ PCM samples, posts them to `/transcribe` and reuses the JSON response to
 update the intent pipeline. No scene changes are required to keep
 publishing to the MQTT message hub.
 
-### Runtime ASR mode switch (offline vs OpenAI API)
+### Runtime ASR mode switch (Whisper vs OpenAI API vs Moonshine)
 
 You can switch ASR mode without restarting the service:
 
@@ -113,10 +117,20 @@ curl -X POST "http://127.0.0.1:8000/transcribe/config" \
      -H "Content-Type: application/json" \
      -d '{"mode":"api"}'
 
-# Switch back to local offline Faster-Whisper
+# Switch to Whisper large-v3 mode
 curl -X POST "http://127.0.0.1:8000/transcribe/config" \
      -H "Content-Type: application/json" \
-     -d '{"mode":"offline"}'
+     -d '{"mode":"whisper-large-v3"}'
+
+# Switch to Moonshine small
+curl -X POST "http://127.0.0.1:8000/transcribe/config" \
+     -H "Content-Type: application/json" \
+     -d '{"mode":"moonshine-small"}'
+
+# Switch to Moonshine medium
+curl -X POST "http://127.0.0.1:8000/transcribe/config" \
+     -H "Content-Type: application/json" \
+     -d '{"mode":"moonshine-medium"}'
 ```
 
 ### OpenAI prompt behavior (important)
@@ -287,4 +301,16 @@ $env:VOICE_AGENT_PIPER_HTTP_CMD="$ttsPy -m uvicorn qwen_tts_http:app --host 0.0.
 
 ```powershell
 python python_voice_service/bench_tts_http.py --url "http://127.0.0.1:5005/speak" --runs 3
+```
+
+Quick microphone ASR test (records from your default input device and sends to `/transcribe`):
+
+```powershell
+python python_voice_service/bench_asr_mic.py --mode moonshine-medium --seconds 4 --runs 3
+```
+
+List audio devices:
+
+```powershell
+python python_voice_service/bench_asr_mic.py --list-devices
 ```

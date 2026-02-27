@@ -66,8 +66,8 @@ def _service_specs() -> Dict[str, ServiceSpec]:
             entry=SCRIPTS_DIR / "packaging" / "entrypoints" / "voice_service_entry.py",
             python_paths=[VOICE_DIR],
             hidden_imports=_uvicorn_hidden_imports(),
-            collect_all=["faster_whisper", "ctranslate2", "tokenizers", "av"],
-            required_modules=["uvicorn", "fastapi", "numpy", "httpx", "faster_whisper"],
+            collect_all=["faster_whisper", "ctranslate2", "tokenizers", "av", "moonshine_voice"],
+            required_modules=["uvicorn", "fastapi", "numpy", "httpx", "faster_whisper", "moonshine_voice"],
         ),
         ServiceSpec(
             name="piper_http",
@@ -99,7 +99,15 @@ def _service_specs() -> Dict[str, ServiceSpec]:
             name="dialog_service",
             entry=SCRIPTS_DIR / "dialog_service" / "main.py",
             python_paths=[SCRIPTS_DIR],
-            required_modules=["paho.mqtt.client", "httpx"],
+            collect_all=["onnxruntime", "tokenizers", "huggingface_hub"],
+            required_modules=[
+                "paho.mqtt.client",
+                "httpx",
+                "numpy",
+                "onnxruntime",
+                "tokenizers",
+                "huggingface_hub",
+            ],
         ),
         ServiceSpec(
             name="telemetry_service",

@@ -184,6 +184,15 @@ namespace RobotVoice
             {
                 payload.Append(",\"max_amplitude\":").Append(metadata.MaxAmplitude.ToString(CultureInfo.InvariantCulture));
             }
+            if (metadata.HasSpeakerTag)
+            {
+                payload.Append(",\"speaker_index\":").Append(Mathf.Max(0, metadata.SpeakerIndex));
+            }
+            if (metadata.SpeakerId > 0UL)
+            {
+                payload.Append(",\"speaker_id\":")
+                    .Append(metadata.SpeakerId.ToString(CultureInfo.InvariantCulture));
+            }
             payload.Append('}');
 
             if (logDebugMessages && publisher.DisablePublishing)

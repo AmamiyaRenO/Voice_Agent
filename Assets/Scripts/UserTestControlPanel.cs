@@ -2037,6 +2037,10 @@ namespace RobotVoice
             {
                 SetOrRemoveString(intentObj, "use_llm_classifier", boolValue ? "true" : "false");
             }
+            if (TryReadOptionalBool(requestObj, "use_moonshine_intent_recognizer", out boolValue))
+            {
+                SetOrRemoveString(intentObj, "use_moonshine_intent_recognizer", boolValue ? "true" : "false");
+            }
 
             // Clean up legacy flat keys when intent rules are stored in nested intent object.
             root.Remove("launch_triggers");
@@ -2100,6 +2104,10 @@ namespace RobotVoice
                 exitKeywords = GetDefaultExitKeywords();
             }
             var useLlmIntentClassifier = ReadOptionalBool(intentObj, "use_llm_classifier", false);
+            var useMoonshineIntentRecognizer = ReadOptionalBool(
+                intentObj,
+                "use_moonshine_intent_recognizer",
+                false);
 
             var openaiApiKey = (openaiObj["api_key"]?.Value ?? string.Empty).Trim();
             var payload = new JSONObject();
@@ -2141,6 +2149,7 @@ namespace RobotVoice
             payload["launch_triggers"] = string.Join(", ", launchTriggers);
             payload["exit_keywords"] = string.Join(", ", exitKeywords);
             payload["use_llm_intent_classifier"] = useLlmIntentClassifier;
+            payload["use_moonshine_intent_recognizer"] = useMoonshineIntentRecognizer;
             payload["effective_game_manifest_path"] = ResolveGameManifestPath();
             await WriteRawJsonAsync(response, 200, payload.ToString()).ConfigureAwait(false);
         }
@@ -3455,7 +3464,12 @@ namespace RobotVoice
                     var normalizedMode = NormalizeAsrMode(modeRaw);
                     if (string.IsNullOrWhiteSpace(normalizedMode))
                     {
-                        await WriteJsonAsync(context.Response, 400, "error", "mode must be offline or api").ConfigureAwait(false);
+                        await WriteJsonAsync(
+                            context.Response,
+                            400,
+                            "error",
+                            "mode must be whisper-large-v3, moonshine-small, moonshine-medium, or api"
+                        ).ConfigureAwait(false);
                         return;
                     }
 
@@ -3533,7 +3547,7 @@ namespace RobotVoice
             var modes = config.Config.available_modes;
             if (modes == null || modes.Length == 0)
             {
-                modes = new[] { "offline", "api" };
+                modes = new[] { "whisper-large-v3", "moonshine-small", "moonshine-medium", "api" };
             }
 
             var payload = new StringBuilder(256);
@@ -3572,10 +3586,22 @@ namespace RobotVoice
             var normalized = (mode ?? string.Empty).Trim().ToLowerInvariant();
             switch (normalized)
             {
+                case "whisper-large-v3":
                 case "offline":
                 case "local":
                 case "whisper":
-                    return "offline";
+                case "faster-whisper":
+                case "large-v3":
+                    return "whisper-large-v3";
+                case "moonshine-small":
+                case "moonshine_small":
+                case "small":
+                    return "moonshine-small";
+                case "moonshine-medium":
+                case "moonshine_medium":
+                case "moonshine":
+                case "medium":
+                    return "moonshine-medium";
                 case "api":
                 case "openai":
                 case "online":
@@ -3637,8 +3663,8 @@ namespace RobotVoice
         {
             var empty = new AsrConfigResponse
             {
-                mode = "offline",
-                available_modes = new[] { "offline", "api" },
+                mode = "whisper-large-v3",
+                available_modes = new[] { "whisper-large-v3", "moonshine-small", "moonshine-medium", "api" },
                 openai_model = string.Empty
             };
 
@@ -3655,16 +3681,16 @@ namespace RobotVoice
                 var parsed = JsonUtility.FromJson<AsrConfigResponse>(body);
                 if (string.IsNullOrWhiteSpace(parsed.mode))
                 {
-                    parsed.mode = "offline";
+                    parsed.mode = "whisper-large-v3";
                 }
                 if (parsed.available_modes == null || parsed.available_modes.Length == 0)
                 {
-                    parsed.available_modes = new[] { "offline", "api" };
+                    parsed.available_modes = new[] { "whisper-large-v3", "moonshine-small", "moonshine-medium", "api" };
                 }
                 parsed.mode = NormalizeAsrMode(parsed.mode);
                 if (string.IsNullOrWhiteSpace(parsed.mode))
                 {
-                    parsed.mode = "offline";
+                    parsed.mode = "whisper-large-v3";
                 }
                 return (true, 200, parsed, string.Empty);
             }

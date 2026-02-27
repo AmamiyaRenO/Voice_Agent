@@ -92,6 +92,8 @@ __pycache__/
 
 # Local machine override config (keep default/sample tracked)
 /scripts/local_services.user.json
+/scripts/dialog_service/user_memory.json
+/scripts/dialog_service/user_memory.json.tmp
 
 # NuGet for Unity generated assets
 /[Aa]ssets/NuGetEditor/

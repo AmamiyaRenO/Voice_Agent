@@ -274,9 +274,9 @@ function renderLog(entries){
   const html = entries.map(entry => {
     let role = typeof entry.role === 'string' ? entry.role.toLowerCase() : 'user';
     const src = typeof entry.source === 'string' ? entry.source.toLowerCase() : '';
-    // 如果来源是对话服务，强制�?coach 展示，避免角色字符串异常被当�?user
+    // Force dialog_service messages to render as coach role.
     if (src.includes('dialog_service') || src === 'dialog' || src.includes('dialog')) { role = 'coach'; }
-    // 面板触发（tester_panel）或显式标为 wizard 的，�?wizard 展示
+    // tester_panel and explicit wizard role render as wizard.
     if (src.includes('tester_panel') || role === 'wizard') { role = 'wizard'; }
     const style = logRoleStyles[role] || logRoleStyles.user;
     const speaker = escapeHtml(entry.speaker || speakerFromRole(role));
@@ -471,14 +471,14 @@ function exitGame(){
 }
 function renderAsrStatus(data){
   if(!data) return;
-  const mode = (typeof data.mode === 'string' && data.mode) ? data.mode : 'offline';
+  const mode = (typeof data.mode === 'string' && data.mode) ? data.mode : 'whisper-large-v3';
   const listening = !!data.listening;
   const apiReady = !!data.openai_configured;
   if(asrStateEl){
     const suffix = (mode === 'api' && !apiReady) ? ' | OPENAI_API_KEY missing' : '';
     asrStateEl.textContent = `Mode: ${mode} | Listening: ${listening ? 'ON' : 'PAUSED'}${suffix}`;
   }
-  const modes = Array.isArray(data.available_modes) ? data.available_modes : ['offline','api'];
+  const modes = Array.isArray(data.available_modes) ? data.available_modes : ['whisper-large-v3','moonshine-small','moonshine-medium','api'];
   if(asrModeSelect){
     asrModeSelect.innerHTML = modes.map(v => `<option value="${v}">${v}</option>`).join('');
     if(modes.includes(mode)){ asrModeSelect.value = mode; }

@@ -208,6 +208,9 @@ namespace RobotVoice
             public float MaxAmplitude;
             public float Rms;
             public string Text;
+            public bool HasSpeakerTag;
+            public int SpeakerIndex;
+            public ulong SpeakerId;
         }
 
         private sealed class KeywordPhrase

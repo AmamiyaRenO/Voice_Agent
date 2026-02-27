@@ -106,7 +106,12 @@ namespace RobotVoice
                 var textForBackend = string.IsNullOrWhiteSpace(processed) ? rawRecognised : processed;
                 if (!string.IsNullOrWhiteSpace(textForBackend))
                 {
-                    ConversationLog.AddEntry(ConversationRole.User, textForBackend);
+                    ConversationLog.AddEntry(
+                        ConversationRole.User,
+                        textForBackend,
+                        BuildUserSpeakerLabel(metadata),
+                        BuildUserMetadataText(metadata),
+                        "asr");
                     PublishVoiceText(textForBackend, metadata);
                 }
                 return;
@@ -132,7 +137,12 @@ namespace RobotVoice
                     // 鑻ユ病鏈夎В鏋愬嚭娓告垙鍚嶏紝涔熻褰曚竴涓嬬敤鎴锋寚浠ゆ枃鏈紝閬垮厤鈥渙pen鈥濈瓑鏈璁板綍
                     if (string.IsNullOrWhiteSpace(resolved) && !string.IsNullOrWhiteSpace(rawRecognised))
                     {
-                        ConversationLog.AddEntry(ConversationRole.User, rawRecognised, "no_game_resolved");
+                        ConversationLog.AddEntry(
+                            ConversationRole.User,
+                            rawRecognised,
+                            BuildUserSpeakerLabel(metadata),
+                            BuildUserMetadataText(metadata, "no_game_resolved"),
+                            "asr");
                     }
                     PublishLaunch(resolved, rawRecognised);
                     return;
@@ -142,7 +152,12 @@ namespace RobotVoice
             var textForCoach = string.IsNullOrWhiteSpace(processed) ? rawRecognised : processed;
             if (!string.IsNullOrWhiteSpace(textForCoach))
             {
-                ConversationLog.AddEntry(ConversationRole.User, textForCoach);
+                ConversationLog.AddEntry(
+                    ConversationRole.User,
+                    textForCoach,
+                    BuildUserSpeakerLabel(metadata),
+                    BuildUserMetadataText(metadata),
+                    "asr");
                 PublishVoiceText(textForCoach, metadata);
             }
         }
@@ -198,6 +213,9 @@ namespace RobotVoice
                 MaxAmplitude = 0f,
                 Rms = 0f,
                 Text = string.Empty,
+                HasSpeakerTag = false,
+                SpeakerIndex = 0,
+                SpeakerId = 0UL,
             };
 
             if (string.IsNullOrWhiteSpace(message))
@@ -253,6 +271,68 @@ namespace RobotVoice
                         metadata.MaxAmplitude = Mathf.Clamp01(amplitudeNode.AsFloat);
                     }
                 }
+
+                if (obj.HasKey("speaker_index"))
+                {
+                    var speakerIndexNode = obj["speaker_index"];
+                    if (speakerIndexNode != null)
+                    {
+                        var parsed = 0;
+                        if (speakerIndexNode.IsNumber)
+                        {
+                            parsed = Mathf.Max(0, speakerIndexNode.AsInt);
+                            metadata.HasSpeakerTag = true;
+                            metadata.SpeakerIndex = parsed;
+                        }
+                        else
+                        {
+                            var raw = (speakerIndexNode.Value ?? string.Empty).Trim();
+                            if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed))
+                            {
+                                metadata.HasSpeakerTag = true;
+                                metadata.SpeakerIndex = Mathf.Max(0, parsed);
+                            }
+                        }
+                    }
+                }
+
+                if (obj.HasKey("speaker_id"))
+                {
+                    var speakerIdNode = obj["speaker_id"];
+                    if (speakerIdNode != null)
+                    {
+                        var raw = (speakerIdNode.Value ?? string.Empty).Trim();
+                        if (ulong.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedId))
+                        {
+                            metadata.SpeakerId = parsedId;
+                            metadata.HasSpeakerTag = metadata.HasSpeakerTag || parsedId > 0UL;
+                        }
+                    }
+                }
+
+                if (!metadata.HasSpeakerTag && obj.HasKey("speakers"))
+                {
+                    var speakersArray = obj["speakers"]?.AsArray;
+                    if (speakersArray != null && speakersArray.Count > 0)
+                    {
+                        var first = speakersArray[0]?.AsObject;
+                        if (first != null)
+                        {
+                            var indexRaw = (first["speaker_index"]?.Value ?? string.Empty).Trim();
+                            if (int.TryParse(indexRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedIndex))
+                            {
+                                metadata.SpeakerIndex = Mathf.Max(0, parsedIndex);
+                                metadata.HasSpeakerTag = true;
+                            }
+                            var idRaw = (first["speaker_id"]?.Value ?? string.Empty).Trim();
+                            if (ulong.TryParse(idRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedSpeakerId))
+                            {
+                                metadata.SpeakerId = parsedSpeakerId;
+                                metadata.HasSpeakerTag = metadata.HasSpeakerTag || parsedSpeakerId > 0UL;
+                            }
+                        }
+                    }
+                }
             }
             catch
             {
@@ -260,6 +340,35 @@ namespace RobotVoice
             }
 
             return metadata;
+        }
+
+        private static string BuildUserSpeakerLabel(RecognitionMetadata metadata)
+        {
+            if (!metadata.HasSpeakerTag)
+            {
+                return "User";
+            }
+
+            var displayIndex = Mathf.Max(0, metadata.SpeakerIndex) + 1;
+            return $"User P{displayIndex}";
+        }
+
+        private static string BuildUserMetadataText(RecognitionMetadata metadata, string note = null)
+        {
+            var fields = new List<string>(4);
+            if (metadata.HasSpeakerTag)
+            {
+                fields.Add($"speaker_index={Mathf.Max(0, metadata.SpeakerIndex)}");
+            }
+            if (metadata.SpeakerId > 0UL)
+            {
+                fields.Add($"speaker_id={metadata.SpeakerId.ToString(CultureInfo.InvariantCulture)}");
+            }
+            if (!string.IsNullOrWhiteSpace(note))
+            {
+                fields.Add(note.Trim());
+            }
+            return fields.Count == 0 ? string.Empty : string.Join(";", fields);
         }
 
         private string FilterTranscript(string message, out string rawRecognised)

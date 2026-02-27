@@ -47,7 +47,7 @@ button.secondary{background:#334155;}
 <div class="card">
 <h2>Step 1: ASR Mode and Listening</h2>
 <div class="grid">
-<div class="field"><label>ASR Mode</label><select id="asrMode"><option value="offline">offline</option><option value="api">api (OpenAI)</option></select></div>
+<div class="field"><label>ASR Mode</label><select id="asrMode"><option value="whisper-large-v3">whisper-large-v3</option><option value="moonshine-small">moonshine-small</option><option value="moonshine-medium">moonshine-medium</option><option value="api">api (OpenAI)</option></select></div>
 <div class="field"><label>Agent Listening</label><div class="toggle"><input id="listeningOn" type="checkbox"><span>Enable microphone listening</span></div></div>
 </div>
 </div>
@@ -66,6 +66,7 @@ button.secondary{background:#334155;}
 <div class="field"><label>Launch Triggers (comma separated)</label><input id="launchTriggers" placeholder="open, start, launch, play, begin, load"></div>
 <div class="field"><label>Exit Keywords (comma separated)</label><input id="exitKeywords" placeholder="back home, go home, quit, exit, stop, close game"></div>
 <div class="field"><label>LLM Intent Classifier</label><div class="toggle"><input id="llmIntentClassifier" type="checkbox"><span>Use LLM fallback for ambiguous command intent</span></div></div>
+<div class="field"><label>Moonshine Intent Recognizer</label><div class="toggle"><input id="moonshineIntentRecognizer" type="checkbox"><span>Use Moonshine embedding matcher for game-name intent mapping</span></div></div>
 <div class="field"><label>Intent Manifest Path (Optional)</label><input id="intentManifest" placeholder="Usually keep default"></div>
 <div class="field"><label>Game Manifest Path (Optional)</label><input id="gameManifest" placeholder="Usually same as intent manifest"></div>
 </div>
@@ -92,6 +93,7 @@ const openaiPromptEl = document.getElementById('openaiPrompt');
 const launchTriggersEl = document.getElementById('launchTriggers');
 const exitKeywordsEl = document.getElementById('exitKeywords');
 const llmIntentClassifierEl = document.getElementById('llmIntentClassifier');
+const moonshineIntentRecognizerEl = document.getElementById('moonshineIntentRecognizer');
 const intentManifestEl = document.getElementById('intentManifest');
 const gameManifestEl = document.getElementById('gameManifest');
 const piperStatusEl = document.getElementById('piperStatus');
@@ -102,6 +104,10 @@ const ollamaModelReadyEl = document.getElementById('ollamaModelReady');
 const ollamaHintEl = document.getElementById('ollamaHint');
 function setText(el, v){ if(el){ el.value = String(v || ''); } }
 function getText(el){ return el ? String(el.value || '').trim() : ''; }
+function setSelectOptions(el, values){
+  if(!el || !Array.isArray(values) || !values.length){ return; }
+  el.innerHTML = values.map(v => `<option value="${String(v)}">${String(v)}</option>`).join('');
+}
 async function fetchJson(url, opts){
   const resp = await fetch(url, opts);
   const data = await resp.json();
@@ -174,7 +180,8 @@ async function reloadAll(){
       fetchJson('/api/runtime/config'),
       fetchJson('/api/runtime/prereq')
     ]);
-    setText(asrModeEl, asrData.mode || 'offline');
+    setSelectOptions(asrModeEl, asrData.available_modes);
+    setText(asrModeEl, asrData.mode || 'whisper-large-v3');
     if(listeningEl){ listeningEl.checked = !!asrData.listening; }
     setText(openaiKeyEl, runtimeData.openai_api_key);
     setText(openaiModelEl, runtimeData.openai_transcribe_model);
@@ -184,6 +191,7 @@ async function reloadAll(){
     setText(launchTriggersEl, runtimeData.launch_triggers);
     setText(exitKeywordsEl, runtimeData.exit_keywords);
     if(llmIntentClassifierEl){ llmIntentClassifierEl.checked = !!runtimeData.use_llm_intent_classifier; }
+    if(moonshineIntentRecognizerEl){ moonshineIntentRecognizerEl.checked = !!runtimeData.use_moonshine_intent_recognizer; }
     setText(intentManifestEl, runtimeData.intent_manifest_path);
     setText(gameManifestEl, runtimeData.game_manifest_path);
     setText(piperStatusEl, prereqData.piper_ready ? 'ready' : 'missing executable/model');
@@ -213,6 +221,7 @@ async function saveAll(){
         launch_triggers: getText(launchTriggersEl),
         exit_keywords: getText(exitKeywordsEl),
         use_llm_intent_classifier: !!(llmIntentClassifierEl && llmIntentClassifierEl.checked),
+        use_moonshine_intent_recognizer: !!(moonshineIntentRecognizerEl && moonshineIntentRecognizerEl.checked),
         intent_manifest_path: getText(intentManifestEl),
         game_manifest_path: getText(gameManifestEl)
       })
@@ -220,7 +229,7 @@ async function saveAll(){
     await fetchJson('/api/asr', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ action:'set_mode', mode:getText(asrModeEl) || 'offline' })
+      body: JSON.stringify({ action:'set_mode', mode:getText(asrModeEl) || 'whisper-large-v3' })
     });
     await fetchJson('/api/asr', {
       method:'POST',

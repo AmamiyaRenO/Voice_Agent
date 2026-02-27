@@ -38,6 +38,7 @@ class LauncherDefaults:
     intent_launch_triggers: List[str]
     intent_exit_keywords: List[str]
     intent_use_llm_classifier: bool
+    intent_use_moonshine_recognizer: bool
     extra_env: Dict[str, str]
     default_voice_cmd: str
     default_voice_dir: str
@@ -93,6 +94,10 @@ def parse_command(value: str, *, windows: bool) -> List[str]:
     normalized: List[str] = []
     for part in parts:
         token = part.strip()
+        # Accept accidentally escaped quotes from environment/batch values like:
+        # \"C:\path\python.exe\" -m uvicorn ...
+        if len(token) >= 4 and token.startswith('\\"') and token.endswith('\\"'):
+            token = token[2:-2]
         if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
             token = token[1:-1]
         normalized.append(token)
@@ -101,6 +106,16 @@ def parse_command(value: str, *, windows: bool) -> List[str]:
 
 def _normalize_string(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _env_or_default(name: str, default: Optional[str]) -> Optional[str]:
+    raw = os.environ.get(name)
+    if not isinstance(raw, str):
+        return default
+    text = raw.strip()
+    if text:
+        return text
+    return default
 
 
 def _json_object(value: object) -> Dict[str, object]:
@@ -382,6 +397,38 @@ def _resolve_python_executable(
     return fallback
 
 
+def _collapse_spaces(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _maybe_normalize_bare_uvicorn_env(
+    *,
+    env_var: str,
+    app: str,
+    python_exe: str,
+    port: int,
+) -> None:
+    raw = _normalize_string(os.environ.get(env_var, ""))
+    if not raw:
+        return
+
+    normalized = _collapse_spaces(raw).lower()
+    allowed = {
+        f"uvicorn {app}",
+        f"uvicorn {app} --port {port}",
+        f"uvicorn {app} --host 0.0.0.0 --port {port}",
+        f"uvicorn {app} --host 127.0.0.1 --port {port}",
+    }
+    if normalized not in allowed:
+        return
+
+    normalized_cmd = (
+        f"{_quote_command_token(python_exe)} -m uvicorn {app} --host 0.0.0.0 --port {port}"
+    )
+    os.environ[env_var] = normalized_cmd
+    print(f"[voice-agent] normalized {env_var} to use {python_exe}")
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = (os.environ.get(name, "") or "").strip().lower()
     if not raw:
@@ -531,6 +578,24 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         env_var="VOICE_AGENT_TTS_PYTHON",
         fallback=asr_python,
     )
+    _maybe_normalize_bare_uvicorn_env(
+        env_var="VOICE_AGENT_VOICE_CMD",
+        app="main:app",
+        python_exe=asr_python,
+        port=8000,
+    )
+    _maybe_normalize_bare_uvicorn_env(
+        env_var="VOICE_AGENT_PIPER_HTTP_CMD",
+        app="piper_http:app",
+        python_exe=tts_python,
+        port=5005,
+    )
+    _maybe_normalize_bare_uvicorn_env(
+        env_var="VOICE_AGENT_QWEN_HTTP_CMD",
+        app="qwen_tts_http:app",
+        python_exe=tts_python,
+        port=5006,
+    )
 
     intent_manifest = _config_get_string(paths_cfg, "intent_manifest") or _config_get_string(
         launcher_config, "intent_manifest_path"
@@ -564,6 +629,11 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
     intent_use_llm_classifier = _config_get_bool(intent_cfg, "use_llm_classifier")
     if intent_use_llm_classifier is None:
         intent_use_llm_classifier = False
+    intent_use_moonshine_recognizer = _config_get_bool(
+        intent_cfg, "use_moonshine_intent_recognizer"
+    )
+    if intent_use_moonshine_recognizer is None:
+        intent_use_moonshine_recognizer = False
 
     asr_python_cmd = _quote_command_token(asr_python)
     tts_python_cmd = _quote_command_token(tts_python)
@@ -683,6 +753,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         intent_launch_triggers=intent_launch_triggers,
         intent_exit_keywords=intent_exit_keywords,
         intent_use_llm_classifier=intent_use_llm_classifier,
+        intent_use_moonshine_recognizer=intent_use_moonshine_recognizer,
         extra_env=env_cfg,
         default_voice_cmd=default_voice_cmd,
         default_voice_dir=default_voice_dir,
@@ -727,23 +798,17 @@ def _build_parser(defaults: LauncherDefaults) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--voice-cmd",
-        default=os.environ.get(
-            "VOICE_AGENT_VOICE_CMD",
-            defaults.default_voice_cmd,
-        ),
+        default=_env_or_default("VOICE_AGENT_VOICE_CMD", defaults.default_voice_cmd),
         help="Command used to start the Python voice service.",
     )
     parser.add_argument(
         "--voice-dir",
-        default=os.environ.get(
-            "VOICE_AGENT_VOICE_CWD",
-            defaults.default_voice_dir,
-        ),
+        default=_env_or_default("VOICE_AGENT_VOICE_CWD", defaults.default_voice_dir),
         help="Working directory for the Python voice service command.",
     )
     parser.add_argument(
         "--orchestrator-cmd",
-        default=os.environ.get("VOICE_AGENT_ORCH_CMD"),
+        default=_env_or_default("VOICE_AGENT_ORCH_CMD", None),
         help=(
             "Optional command used to start the orchestrator that manages Mosquitto. "
             "Set VOICE_AGENT_ORCH_CMD or pass --orchestrator-cmd to enable it."
@@ -751,7 +816,7 @@ def _build_parser(defaults: LauncherDefaults) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--orchestrator-dir",
-        default=os.environ.get("VOICE_AGENT_ORCH_CWD", str(Path.cwd())),
+        default=_env_or_default("VOICE_AGENT_ORCH_CWD", str(Path.cwd())),
         help="Working directory for the orchestrator command.",
     )
     parser.add_argument(
@@ -764,10 +829,7 @@ def _build_parser(defaults: LauncherDefaults) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--piper-http-dir",
-        default=os.environ.get(
-            "VOICE_AGENT_PIPER_HTTP_CWD",
-            defaults.default_piper_http_dir,
-        ),
+        default=_env_or_default("VOICE_AGENT_PIPER_HTTP_CWD", defaults.default_piper_http_dir),
         help="Working directory for the Piper HTTP wrapper service.",
     )
     parser.add_argument(
@@ -780,18 +842,12 @@ def _build_parser(defaults: LauncherDefaults) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--qwen-http-dir",
-        default=os.environ.get(
-            "VOICE_AGENT_QWEN_HTTP_CWD",
-            defaults.default_qwen_http_dir,
-        ),
+        default=_env_or_default("VOICE_AGENT_QWEN_HTTP_CWD", defaults.default_qwen_http_dir),
         help="Working directory for the Qwen HTTP wrapper service.",
     )
     parser.add_argument(
         "--intent-cmd",
-        default=os.environ.get(
-            "VOICE_AGENT_INTENT_CMD",
-            defaults.default_intent_cmd,
-        ),
+        default=_env_or_default("VOICE_AGENT_INTENT_CMD", defaults.default_intent_cmd),
         help=(
             "Optional command used to start the intent recognition service. "
             "Set VOICE_AGENT_INTENT_CMD or pass --intent-cmd to enable it."
@@ -799,18 +855,12 @@ def _build_parser(defaults: LauncherDefaults) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--intent-dir",
-        default=os.environ.get(
-            "VOICE_AGENT_INTENT_CWD",
-            defaults.default_intent_dir,
-        ),
+        default=_env_or_default("VOICE_AGENT_INTENT_CWD", defaults.default_intent_dir),
         help="Working directory for the intent recognition service.",
     )
     parser.add_argument(
         "--dialog-cmd",
-        default=os.environ.get(
-            "VOICE_AGENT_DIALOG_CMD",
-            defaults.default_dialog_cmd,
-        ),
+        default=_env_or_default("VOICE_AGENT_DIALOG_CMD", defaults.default_dialog_cmd),
         help=(
             "Optional command used to start the dialog (LLM+TTS) service. "
             "Set VOICE_AGENT_DIALOG_CMD or pass --dialog-cmd to enable it."
@@ -818,15 +868,12 @@ def _build_parser(defaults: LauncherDefaults) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--dialog-dir",
-        default=os.environ.get(
-            "VOICE_AGENT_DIALOG_CWD",
-            defaults.default_dialog_dir,
-        ),
+        default=_env_or_default("VOICE_AGENT_DIALOG_CWD", defaults.default_dialog_dir),
         help="Working directory for the dialog (LLM+TTS) service.",
     )
     parser.add_argument(
         "--launcher-cmd",
-        default=os.environ.get("VOICE_AGENT_LAUNCHER_CMD", defaults.default_launcher_cmd),
+        default=_env_or_default("VOICE_AGENT_LAUNCHER_CMD", defaults.default_launcher_cmd),
         help=(
             "Optional command used to start the local game launcher service that consumes "
             "robot/intent and opens/closes games."
@@ -834,15 +881,12 @@ def _build_parser(defaults: LauncherDefaults) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--launcher-dir",
-        default=os.environ.get(
-            "VOICE_AGENT_LAUNCHER_CWD",
-            defaults.default_launcher_dir,
-        ),
+        default=_env_or_default("VOICE_AGENT_LAUNCHER_CWD", defaults.default_launcher_dir),
         help="Working directory for the local game launcher service.",
     )
     parser.add_argument(
         "--telemetry-cmd",
-        default=os.environ.get("VOICE_AGENT_TELEMETRY_CMD", defaults.default_telemetry_cmd),
+        default=_env_or_default("VOICE_AGENT_TELEMETRY_CMD", defaults.default_telemetry_cmd),
         help=(
             "Optional command used to start the telemetry aggregation service "
             "(HTTP metrics + MQTT ingest)."
@@ -850,10 +894,7 @@ def _build_parser(defaults: LauncherDefaults) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--telemetry-dir",
-        default=os.environ.get(
-            "VOICE_AGENT_TELEMETRY_CWD",
-            defaults.default_telemetry_dir,
-        ),
+        default=_env_or_default("VOICE_AGENT_TELEMETRY_CWD", defaults.default_telemetry_dir),
         help="Working directory for the telemetry service.",
     )
     parser.add_argument(
@@ -996,6 +1037,9 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     if defaults.intent_exit_keywords:
         env["INTENT_EXIT_KEYWORDS"] = json.dumps(defaults.intent_exit_keywords, ensure_ascii=False)
     env["INTENT_USE_LLM_CLASSIFIER"] = "1" if defaults.intent_use_llm_classifier else "0"
+    env["INTENT_USE_MOONSHINE_RECOGNIZER"] = (
+        "1" if defaults.intent_use_moonshine_recognizer else "0"
+    )
     if args.env_file is not None:
         apply_env_file(args.env_file, env)
 
@@ -1015,7 +1059,7 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     # ASR defaults for NucBox M6 (no NVIDIA GPU): CPU-only faster-whisper tuning.
     env.setdefault("WHISPER_DEVICE", "cpu")
     env.setdefault("WHISPER_COMPUTE_TYPE", "int8")
-    env.setdefault("WHISPER_MODEL_PATH", "Systran/faster-whisper-large-v3-turbo")
+    env.setdefault("WHISPER_MODEL_PATH", "Systran/faster-distil-whisper-large-v3")
     env.setdefault("WHISPER_CPU_THREADS", "6")
     env.setdefault("WHISPER_VAD_SILENCE_MS", "220")
     env.setdefault("WHISPER_VAD_MIN_SPEECH_MS", "120")
@@ -1156,6 +1200,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(
         "[voice-agent] INTENT_USE_LLM_CLASSIFIER="
         + str(env.get("INTENT_USE_LLM_CLASSIFIER", ""))
+    )
+    print(
+        "[voice-agent] INTENT_USE_MOONSHINE_RECOGNIZER="
+        + str(env.get("INTENT_USE_MOONSHINE_RECOGNIZER", ""))
     )
     handles = _build_handles(commands, dirs, env)
     return _run_supervisor(handles, env, no_wait=args.no_wait)

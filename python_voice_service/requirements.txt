@@ -7,3 +7,4 @@ openai>=1.0.0
 scipy==1.11.4
 paho-mqtt==2.0.0
 PyYAML==6.0.2
+moonshine-voice==0.0.49

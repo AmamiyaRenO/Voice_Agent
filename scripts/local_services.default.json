@@ -7,6 +7,7 @@
   },
   "intent": {
     "use_llm_classifier": false,
+    "use_moonshine_intent_recognizer": false,
     "launch_triggers": [
       "open",
       "start",

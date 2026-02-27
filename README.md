@@ -481,7 +481,7 @@ Service file: `python_voice_service/main.py`
 ### Main endpoints
 
 - `POST /transcribe` -> ASR output (speech JSON + metadata)
-- `GET /transcribe/config` -> read current ASR mode (`offline` or `api`)
+- `GET /transcribe/config` -> read current ASR mode (`whisper-large-v3`, `moonshine-small`, `moonshine-medium`, or `api`)
 - `POST /transcribe/config` -> switch ASR mode at runtime
 - `POST /respond` -> LLM reply generation
 - `GET /respond/config` -> current runtime/system prompt
@@ -507,7 +507,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
   - `WHISPER_DEVICE`
   - `WHISPER_COMPUTE_TYPE`
 - ASR mode / OpenAI:
-  - `TRANSCRIBE_MODE` (`offline` | `api`)
+  - `TRANSCRIBE_MODE` (`whisper-large-v3` | `moonshine-small` | `moonshine-medium` | `api`)
   - `OPENAI_API_KEY`
   - `OPENAI_TRANSCRIBE_MODEL`
   - `OPENAI_TRANSCRIBE_PROMPT` (optional; recommended to keep empty)
@@ -576,7 +576,34 @@ pip install -r python_sdk/requirements-dev.txt
 python -m pytest tests/test_voice_agent_sdk.py
 ```
 
+Service smoke tests (intent + dialog memory pipeline):
+
+```powershell
+# First time only in the service venv
+.\python_voice_service\.venv_asr\Scripts\python.exe -m pip install pytest
+
+# Run full smoke suite (services + userpanel route contract + userpanel live checks)
+.\python_voice_service\.venv_asr\Scripts\python.exe scripts\run_smoke_tests.py
+```
+
+User Panel full API smoke (live integration against running Unity panel):
+
+```powershell
+# Optional explicit panel URL
+.\python_voice_service\.venv_asr\Scripts\python.exe scripts\run_smoke_tests.py --panel-url http://127.0.0.1:8787
+
+# Optional: skip live panel checks (minimal smoke)
+.\python_voice_service\.venv_asr\Scripts\python.exe scripts\run_smoke_tests.py --no-panel-live
+```
+
+Direct pytest target:
+
+```powershell
+.\python_voice_service\.venv_asr\Scripts\python.exe -m pytest tests\test_smoke_services.py -q
+```
+
 When updating SDK behavior, keep `tests/test_voice_agent_sdk.py` aligned with API expectations.
+When updating local services (`intent_service`, `dialog_service`, `python_voice_service`) or panel APIs, run smoke tests before commit.
 
 ## License
 
