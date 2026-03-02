@@ -138,6 +138,19 @@ class IntentRouterEngine:
     def close(self) -> None:
         self.moonshine_matcher.close()
 
+    def _has_launch_signal(self, text: str) -> bool:
+        value = normalize_match_text(text)
+        if not value:
+            return False
+        haystack = f" {value} "
+        for raw_trigger in self.cfg.launch_triggers or []:
+            trigger = normalize_match_text(str(raw_trigger))
+            if not trigger:
+                continue
+            if haystack.find(f" {trigger} ") >= 0:
+                return True
+        return False
+
     def route(self, text: str, corr_id: str) -> RouteDecision:
         if self.cfg.require_wake_word and not has_wake_word(text, self.cfg.wake_words):
             return RouteDecision(topic=None, payload=None, log_line=f"[intent] no wake word: {text}")
@@ -236,7 +249,7 @@ class IntentRouterEngine:
 
         # Optional semantic intent matching via Moonshine embedding model.
         moonshine_game, moonshine_similarity = self.moonshine_matcher.resolve_best_name(text)
-        if moonshine_game:
+        if moonshine_game and self._has_launch_signal(text):
             payload = {
                 "type": "LAUNCH_GAME",
                 "game_name": moonshine_game,

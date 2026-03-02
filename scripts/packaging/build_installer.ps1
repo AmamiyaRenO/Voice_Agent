@@ -129,11 +129,13 @@ else {
 }
 
 $isccArgs = @(
-    "/DUnityBuildDir=$UnityBuildDir",
-    "/DServiceExeDir=$ServicesDir"
+    # Use forward slashes for ISPP define values to avoid backslash escape
+    # parsing edge cases in Inno preprocessor command-line defines.
+    "/DUnityBuildDir=$($UnityBuildDir -replace '\\','/')",
+    "/DServiceExeDir=$($ServicesDir -replace '\\','/')"
 )
 if ($PiperRuntimeDir) {
-    $isccArgs += "/DPiperRuntimeDir=$PiperRuntimeDir"
+    $isccArgs += "/DPiperRuntimeDir=$($PiperRuntimeDir -replace '\\','/')"
 }
 $isccArgs += $InstallerScript
 $buildStarted = Get-Date

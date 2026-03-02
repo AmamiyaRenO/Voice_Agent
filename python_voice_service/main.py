@@ -1,4 +1,4 @@
-"""Python voice service using Faster-Whisper for speech recognition.
+﻿"""Python voice service using Faster-Whisper for speech recognition.
 
 This module exposes a FastAPI application that accepts raw PCM audio
 from the Unity client, performs transcription with Faster-Whisper and
@@ -57,16 +57,21 @@ DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "gemma3:4b"
 DEFAULT_SYSTEM_PROMPT = (
-    "You are the Coach Voice Agent inside a rehabilitation and exercise game system.\n"
-    "Your role is to:\n"
-    "- Greet the user politely when they start interacting.\n"
-    "- Provide short, clear spoken feedback after the user finishes an exercise or command.\n"
-    "- Encourage the user with motivational phrases (\"Great job!\", \"Keep going!\", \"You are improving!\").\n"
-    "- Confirm user intents from speech recognition (e.g., start game, stop game, switch activity).\n"
-    "- Answer simple questions from the user about the game or their progress.\n"
-    "- Keep responses short (1–2 sentences) so they sound natural when spoken.\n"
-    "- Use a friendly, supportive tone, like a personal trainer or companion.\n"
-    "- If the user asks something outside your knowledge, politely say you don’t know and redirect them back to the exercise context."
+    "You are Rachel, a warm voice companion in a rehabilitation and exercise game system.\n"
+    "Priorities:\n"
+    "- Understand the user's intent and answer naturally.\n"
+    "- Keep interactions supportive and safe during exercise.\n"
+    "- Keep spoken replies concise and clear.\n"
+    "Behavior rules:\n"
+    "- Do not force every topic back to exercise.\n"
+    "- If the user asks a casual or general question, answer it directly first.\n"
+    "- Only guide back to exercise when relevant: training, progress, fatigue, pain, goals, or game actions.\n"
+    "- When you do guide back, use at most one gentle bridge sentence.\n"
+    "- Confirm explicit action intents clearly (start/stop/switch game, back home).\n"
+    "- If intent is unclear, ask one short clarification question instead of guessing.\n"
+    "- Avoid repetitive motivational slogans.\n"
+    "- Default length is 1-2 sentences (up to 3 only when needed for clarity).\n"
+    "- Match the user's language when possible."
 )
 
 DEFAULT_HTTP_TIMEOUT = httpx.Timeout(30.0)
@@ -115,12 +120,15 @@ def _normalize_transcribe_mode_bootstrap(mode: Optional[str]) -> Optional[str]:
 
 
 TRANSCRIBE_MODE_REQUESTED_RAW = (
-    os.getenv("TRANSCRIBE_MODE", TRANSCRIBE_MODE_WHISPER_LARGE_V3).strip().lower() or TRANSCRIBE_MODE_WHISPER_LARGE_V3
+    os.getenv("TRANSCRIBE_MODE", TRANSCRIBE_MODE_MOONSHINE_MEDIUM).strip().lower() or TRANSCRIBE_MODE_MOONSHINE_MEDIUM
 )
 TRANSCRIBE_MODE_REQUESTED = _normalize_transcribe_mode_bootstrap(TRANSCRIBE_MODE_REQUESTED_RAW)
-TRANSCRIBE_MODE_DEFAULT = TRANSCRIBE_MODE_REQUESTED or TRANSCRIBE_MODE_WHISPER_LARGE_V3
+TRANSCRIBE_MODE_DEFAULT = TRANSCRIBE_MODE_REQUESTED or TRANSCRIBE_MODE_MOONSHINE_MEDIUM
 if TRANSCRIBE_MODE_DEFAULT not in TRANSCRIBE_AVAILABLE_MODES:
-    TRANSCRIBE_MODE_DEFAULT = TRANSCRIBE_MODE_WHISPER_LARGE_V3
+    if TRANSCRIBE_MODE_WHISPER_LARGE_V3 in TRANSCRIBE_AVAILABLE_MODES:
+        TRANSCRIBE_MODE_DEFAULT = TRANSCRIBE_MODE_WHISPER_LARGE_V3
+    else:
+        TRANSCRIBE_MODE_DEFAULT = TRANSCRIBE_AVAILABLE_MODES[0]
 
 
 def _openai_transcribe_model() -> str:
@@ -1426,7 +1434,7 @@ def _collapse_repetitive_output(text: str, words: List[dict]) -> tuple[str, List
 def _limit_repeated_sequence_indices(tokens: List[str]) -> List[int]:
     """Return indices that keep only the first occurrence of repeated sequences.
 
-    Whisper can occasionally emit the same 1–4 token sequence multiple times in
+    Whisper can occasionally emit the same 1鈥? token sequence multiple times in
     a row.  When that happens we keep the first instance of the repeated block
     and discard the subsequent duplicates so the Unity client does not surface
     "echoed" words to the player.

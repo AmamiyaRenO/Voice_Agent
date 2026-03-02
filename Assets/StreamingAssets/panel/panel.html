@@ -42,6 +42,7 @@ textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0
 <p><a href="/telemetry.html" style="color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;">Open Exercise Dashboard</a></p>
 <p><a href="/games.html" style="color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;">Open Game Config</a></p>
 <p><a href="/runtime.html" style="color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;">Open Runtime Config</a></p>
+<p><a href="/memory.html" style="color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;">Open User Memory</a></p>
 <p><a href="/setup.html" style="color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;">Open First-Run Wizard</a></p>
 <div class="transcript-card">
 <div class="transcript-header">
@@ -624,19 +625,28 @@ function stopCameraPreview(){
   if(cameraView){ cameraView.removeAttribute('src'); }
 }
 document.addEventListener('visibilitychange', () => {
-  if(cameraAutoStart){
+  if(!cameraAutoStart) return;
+  if(document.hidden){
+    stopPolling();
+    return;
+  }
+  startPolling();
+  setTimeout(pullCameraFrame, 30);
+  setTimeout(pullCameraFrame, 200);
+});
+window.addEventListener('focus', () => {
+  if(cameraAutoStart && !document.hidden){
     startPolling();
     setTimeout(pullCameraFrame, 30);
-    setTimeout(pullCameraFrame, 200);
   }
 });
-window.addEventListener('focus', () => { if(cameraAutoStart){ startPolling(); setTimeout(pullCameraFrame, 30); } });
 document.addEventListener('fullscreenchange', () => {
-  if(cameraAutoStart){
+  if(cameraAutoStart && !document.hidden){
     startPolling();
     setTimeout(pullCameraFrame, 30);
   }
 });
+window.addEventListener('pagehide', stopPolling);
 window.addEventListener('beforeunload', stopPolling);
 function initCamera(){ if(!cameraView) return; if(cameraAutoStart){ startPolling(); } }
 initCamera();

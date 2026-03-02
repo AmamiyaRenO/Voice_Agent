@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>User Memory</title>
+<style>
+:root{
+  --bg:#0f1117;
+  --card:rgba(255,255,255,.05);
+  --line:rgba(255,255,255,.14);
+  --text:#eef2ff;
+  --muted:#a5b4fc;
+  --btn:#2563eb;
+  --btn2:#334155;
+  --danger:#b91c1c;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:1rem;background:var(--bg);color:var(--text);font-family:'Segoe UI',sans-serif;}
+a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}
+h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}
+small{opacity:.78;}
+.layout{display:grid;grid-template-columns:340px 1fr;gap:.9rem;margin-top:.8rem;}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:.85rem;}
+.toolbar{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;}
+button{cursor:pointer;border:none;border-radius:8px;padding:.5rem .85rem;background:var(--btn);color:#fff;font-weight:600;}
+button.secondary{background:var(--btn2);}
+button.danger{background:var(--danger);}
+button:disabled{opacity:.5;cursor:not-allowed;}
+input,textarea{width:100%;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#fff;padding:.5rem .6rem;}
+textarea{min-height:88px;font-family:'Segoe UI',sans-serif;font-size:.9rem;line-height:1.35;resize:vertical;}
+.list{max-height:65vh;overflow:auto;margin-top:.6rem;display:flex;flex-direction:column;gap:.45rem;}
+.item{border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:.55rem .6rem;cursor:pointer;background:rgba(255,255,255,.03);}
+.item.active{border-color:#60a5fa;background:rgba(59,130,246,.15);}
+.item .id{font-weight:700;font-size:.92rem;}
+.item .meta{font-size:.78rem;opacity:.82;margin-top:.25rem;}
+.muted{font-size:.82rem;opacity:.84;}
+.section{margin-top:.75rem;}
+.section h2{margin:.1rem 0 .5rem 0;font-size:1rem;}
+.field{margin-bottom:.55rem;}
+.field label{display:block;margin:0 0 .25rem 0;font-size:.8rem;opacity:.88;}
+.kv{display:grid;grid-template-columns:150px 1fr;gap:.45rem .7rem;margin:.65rem 0 .45rem 0;font-size:.85rem;}
+.mono{font-family:Consolas,monospace;font-size:.82rem;white-space:pre-wrap;}
+.status{margin-top:.6rem;font-size:.9rem;opacity:.9;min-height:1.3rem;}
+@media (max-width:980px){
+  .layout{grid-template-columns:1fr;}
+}
+</style>
+</head>
+<body>
+<h1>User Memory</h1>
+<p><a href="/index.html">Back to User Panel</a></p>
+<div class="card">
+  <small>Friendly editor for long-term memory. Enter one item per line for likes, dislikes, goals, and notes.</small>
+  <div id="path" class="mono" style="margin-top:.45rem;opacity:.82;"></div>
+</div>
+<div class="layout">
+  <div class="card">
+    <div class="toolbar">
+      <button onclick="reloadMemory()">Reload</button>
+      <button class="secondary" onclick="selectFirstUser()">Select First</button>
+    </div>
+    <div class="section">
+      <div class="field">
+        <label>Open user by ID (existing or new)</label>
+        <input id="userIdInput" placeholder="user_001">
+      </div>
+      <div class="toolbar">
+        <button class="secondary" onclick="loadByInputUserId()">Open User</button>
+      </div>
+      <div id="userCount" class="muted" style="margin-top:.55rem;"></div>
+    </div>
+    <div id="users" class="list"></div>
+  </div>
+  <div class="card">
+    <div class="toolbar">
+      <button id="saveBtn" onclick="saveSelectedUser()">Save Changes</button>
+      <button id="deleteBtn" class="danger" onclick="deleteSelectedUser()">Delete User</button>
+    </div>
+    <div class="kv">
+      <div>Selected User</div><div id="selectedId">-</div>
+      <div>Identity Keys</div><div id="identityKeys" class="mono">-</div>
+      <div>Utterances</div><div id="utteranceCount">0</div>
+      <div>Last Seen</div><div id="lastSeen">-</div>
+      <div>Embedded Memories</div><div id="memoryItemsCount">0</div>
+      <div>Voice Samples</div><div id="sampleCount">0</div>
+    </div>
+
+    <div class="section">
+      <h2>Profile</h2>
+      <div class="field">
+        <label>Display Name</label>
+        <input id="displayNameInput" placeholder="Friendly name shown in panel">
+      </div>
+      <div class="field">
+        <label>Preferred Name</label>
+        <input id="nameInput" placeholder="How the assistant should call this user">
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Interests</h2>
+      <div class="field">
+        <label>Likes (one per line)</label>
+        <textarea id="likesInput" placeholder="disc golf&#10;co-op games"></textarea>
+      </div>
+      <div class="field">
+        <label>Dislikes (one per line)</label>
+        <textarea id="dislikesInput" placeholder="loud music"></textarea>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Goals And Notes</h2>
+      <div class="field">
+        <label>Goals (one per line)</label>
+        <textarea id="goalsInput" placeholder="finish 5 sessions this week"></textarea>
+      </div>
+      <div class="field">
+        <label>Recent Notes (one per line)</label>
+        <textarea id="recentNotesInput" placeholder="asked for lighter warm-up today"></textarea>
+      </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:.5rem;">
+          <input id="clearEmbeddingOnSaveInput" type="checkbox" checked style="width:auto;">
+          Save notes as source of truth (clear old embedded memories)
+        </label>
+      </div>
+    </div>
+
+    <div id="status" class="status">Ready.</div>
+  </div>
+</div>
+<script>
+const usersEl = document.getElementById('users');
+const statusEl = document.getElementById('status');
+const selectedIdEl = document.getElementById('selectedId');
+const identityKeysEl = document.getElementById('identityKeys');
+const pathEl = document.getElementById('path');
+const userCountEl = document.getElementById('userCount');
+const userIdInputEl = document.getElementById('userIdInput');
+const saveBtnEl = document.getElementById('saveBtn');
+const deleteBtnEl = document.getElementById('deleteBtn');
+const displayNameInputEl = document.getElementById('displayNameInput');
+const nameInputEl = document.getElementById('nameInput');
+const likesInputEl = document.getElementById('likesInput');
+const dislikesInputEl = document.getElementById('dislikesInput');
+const goalsInputEl = document.getElementById('goalsInput');
+const recentNotesInputEl = document.getElementById('recentNotesInput');
+const clearEmbeddingOnSaveInputEl = document.getElementById('clearEmbeddingOnSaveInput');
+const utteranceCountEl = document.getElementById('utteranceCount');
+const lastSeenEl = document.getElementById('lastSeen');
+const memoryItemsCountEl = document.getElementById('memoryItemsCount');
+const sampleCountEl = document.getElementById('sampleCount');
+
+let memoryState = null;
+let selectedUserId = '';
+let selectedProfile = {};
+
+function setStatus(text){
+  if(statusEl){ statusEl.textContent = text || ''; }
+}
+
+function esc(text){
+  return String(text || '')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+function normalizeId(raw){
+  return String(raw || '').trim();
+}
+
+function parseList(text, maxItems, maxChars){
+  const out = [];
+  const seen = new Set();
+  const rows = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  for(let i = 0; i < rows.length; i++){
+    let row = String(rows[i] || '').trim();
+    if(!row){ continue; }
+    if(row.length > maxChars){ row = row.slice(0, maxChars).trim(); }
+    const key = row.toLowerCase();
+    if(!row || seen.has(key)){ continue; }
+    seen.add(key);
+    out.push(row);
+    if(out.length >= maxItems){ break; }
+  }
+  return out;
+}
+
+function toTextList(node){
+  if(!Array.isArray(node)){ return ''; }
+  return node.map(item => String(item || '').trim()).filter(Boolean).join('\n');
+}
+
+function toInt(value, fallback){
+  const n = Number(value);
+  if(!Number.isFinite(n)){ return fallback; }
+  return Math.max(0, Math.trunc(n));
+}
+
+function toFinite(value){
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function pickSelectedSummary(data){
+  const users = Array.isArray(data && data.users) ? data.users : [];
+  for(let i = 0; i < users.length; i++){
+    const u = users[i];
+    if(String(u && u.user_id || '') === selectedUserId){
+      return u;
+    }
+  }
+  return null;
+}
+
+function setButtonsEnabled(enabled){
+  if(saveBtnEl){ saveBtnEl.disabled = !enabled; }
+  if(deleteBtnEl){ deleteBtnEl.disabled = !enabled; }
+}
+
+async function fetchMemory(userId){
+  const parts = [];
+  if(userId){
+    parts.push('user_id=' + encodeURIComponent(userId));
+  }
+  parts.push('_ts=' + Date.now());
+  const qs = parts.length ? ('?' + parts.join('&')) : '';
+  const resp = await fetch('/api/memory' + qs, { cache: 'no-store' });
+  const data = await resp.json();
+  if(!resp.ok || data.status !== 'ok'){
+    throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+  }
+  return data;
+}
+
+function renderUsers(data){
+  const users = Array.isArray(data.users) ? data.users : [];
+  if(userCountEl){ userCountEl.textContent = 'Users: ' + users.length; }
+  if(!usersEl){ return; }
+  if(!users.length){
+    usersEl.innerHTML = '<div class="muted">No users found.</div>';
+    return;
+  }
+  usersEl.innerHTML = users.map(u => {
+    const id = String(u.user_id || '');
+    const active = id === selectedUserId ? ' active' : '';
+    const displayName = String(u.display_name || id).trim() || id;
+    const name = String(u.name || '').trim();
+    const sub = name ? ('Preferred: ' + name) : 'Preferred: -';
+    const meta = 'likes:' + (u.likes_count||0) + ' goals:' + (u.goals_count||0) + ' notes:' + (u.recent_notes_count||0);
+    return '<div class="item' + active + '" onclick="selectUser(\'' + esc(id) + '\')">' +
+      '<div class="id">' + esc(displayName) + '</div>' +
+      '<div class="meta">' + esc(id) + '</div>' +
+      '<div class="meta">' + esc(sub) + '</div>' +
+      '<div class="meta">' + esc(meta) + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function renderSelection(data){
+  selectedUserId = normalizeId(data.selected_user_id || selectedUserId);
+  const profileFromApi = (data.selected_profile && typeof data.selected_profile === 'object')
+    ? data.selected_profile
+    : {};
+  const hasExistingProfile = !!(profileFromApi && Object.keys(profileFromApi).length);
+  selectedProfile = hasExistingProfile ? profileFromApi : {
+    display_name: selectedUserId,
+    name: '',
+    likes: [],
+    dislikes: [],
+    goals: [],
+    recent_notes: [],
+    memory_items: [],
+    utterance_count: 0
+  };
+
+  if(selectedIdEl){ selectedIdEl.textContent = selectedUserId || '-'; }
+  const keys = Array.isArray(data.selected_identity_keys) ? data.selected_identity_keys : [];
+  if(identityKeysEl){ identityKeysEl.textContent = keys.length ? keys.join('\n') : '-'; }
+  if(pathEl){ pathEl.textContent = 'Path: ' + String(data.path || ''); }
+
+  if(displayNameInputEl){
+    displayNameInputEl.value = String(selectedProfile.display_name || selectedUserId || '').trim();
+  }
+  if(nameInputEl){
+    nameInputEl.value = String(selectedProfile.name || '').trim();
+  }
+  if(likesInputEl){
+    likesInputEl.value = toTextList(selectedProfile.likes);
+  }
+  if(dislikesInputEl){
+    dislikesInputEl.value = toTextList(selectedProfile.dislikes);
+  }
+  if(goalsInputEl){
+    goalsInputEl.value = toTextList(selectedProfile.goals);
+  }
+  if(recentNotesInputEl){
+    recentNotesInputEl.value = toTextList(selectedProfile.recent_notes);
+  }
+
+  const summary = pickSelectedSummary(data);
+  if(utteranceCountEl){
+    const source = summary && summary.utterance_count != null ? summary.utterance_count : selectedProfile.utterance_count;
+    utteranceCountEl.textContent = String(toInt(source, 0));
+  }
+  if(lastSeenEl){
+    const iso = summary ? String(summary.last_seen_iso || '').trim() : '';
+    lastSeenEl.textContent = iso || '-';
+  }
+  if(memoryItemsCountEl){
+    const count = summary && summary.memory_items_count != null
+      ? toInt(summary.memory_items_count, 0)
+      : (Array.isArray(selectedProfile.memory_items) ? selectedProfile.memory_items.length : 0);
+    memoryItemsCountEl.textContent = String(count);
+  }
+  if(sampleCountEl){
+    sampleCountEl.textContent = String(toInt(summary && summary.sample_count, 0));
+  }
+
+  setButtonsEnabled(!!selectedUserId);
+}
+
+async function reloadMemory(){
+  setStatus('Loading memory...');
+  try{
+    const data = await fetchMemory(selectedUserId);
+    memoryState = data;
+    renderSelection(data);
+    renderUsers(data);
+    setStatus('Loaded.');
+  }catch(err){
+    setStatus('Error: ' + err);
+  }
+}
+
+async function selectUser(userId){
+  selectedUserId = normalizeId(userId);
+  await reloadMemory();
+}
+
+async function selectFirstUser(){
+  if(!memoryState || !Array.isArray(memoryState.users) || !memoryState.users.length){
+    await reloadMemory();
+  }
+  if(memoryState && Array.isArray(memoryState.users) && memoryState.users.length){
+    selectedUserId = normalizeId(memoryState.users[0].user_id || '');
+    await reloadMemory();
+  }
+}
+
+async function loadByInputUserId(){
+  const id = normalizeId((userIdInputEl && userIdInputEl.value) || '');
+  if(!id){
+    setStatus('Error: user id is required');
+    return;
+  }
+  selectedUserId = id;
+  await reloadMemory();
+}
+
+function buildProfilePayload(){
+  const base = selectedProfile && typeof selectedProfile === 'object' ? selectedProfile : {};
+  const profile = {};
+  profile.display_name = normalizeId(displayNameInputEl && displayNameInputEl.value) || selectedUserId;
+  profile.name = normalizeId(nameInputEl && nameInputEl.value);
+  profile.likes = parseList(likesInputEl && likesInputEl.value, 24, 80);
+  profile.dislikes = parseList(dislikesInputEl && dislikesInputEl.value, 24, 80);
+  profile.goals = parseList(goalsInputEl && goalsInputEl.value, 24, 120);
+  profile.recent_notes = parseList(recentNotesInputEl && recentNotesInputEl.value, 64, 180);
+  const clearEmbeddings = !!(clearEmbeddingOnSaveInputEl && clearEmbeddingOnSaveInputEl.checked);
+  profile.memory_items = clearEmbeddings ? [] : (Array.isArray(base.memory_items) ? base.memory_items : []);
+
+  const firstSeen = toFinite(base.first_seen_ts);
+  const lastSeen = toFinite(base.last_seen_ts);
+  if(firstSeen !== null){ profile.first_seen_ts = firstSeen; }
+  if(lastSeen !== null){ profile.last_seen_ts = lastSeen; }
+  profile.utterance_count = toInt(base.utterance_count, 0);
+  return profile;
+}
+
+async function saveSelectedUser(){
+  if(!selectedUserId){
+    setStatus('Error: select or open a user first');
+    return;
+  }
+  setStatus('Saving...');
+  try{
+    const payload = {
+      action: 'update_user_raw',
+      user_id: selectedUserId,
+      profile: buildProfilePayload()
+    };
+    const resp = await fetch('/api/memory', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      cache: 'no-store',
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){
+      throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+    }
+    const verifyData = await fetchMemory(selectedUserId);
+    memoryState = verifyData;
+    renderSelection(verifyData);
+    renderUsers(verifyData);
+    const clearEmbeddings = !!(clearEmbeddingOnSaveInputEl && clearEmbeddingOnSaveInputEl.checked);
+    const suffix = clearEmbeddings ? ' (embedded memories cleared)' : '';
+    setStatus((data.message || 'Saved.') + suffix);
+  }catch(err){
+    setStatus('Error: ' + err);
+  }
+}
+
+async function deleteSelectedUser(){
+  if(!selectedUserId){
+    setStatus('Error: select a user first');
+    return;
+  }
+  if(!window.confirm('Delete user ' + selectedUserId + '? This cannot be undone.')){
+    return;
+  }
+
+  setStatus('Deleting...');
+  try{
+    const resp = await fetch('/api/memory', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      cache: 'no-store',
+      body: JSON.stringify({action:'delete_user', user_id:selectedUserId})
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){
+      throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+    }
+    selectedUserId = '';
+    selectedProfile = {};
+    memoryState = data;
+    renderSelection(data);
+    renderUsers(data);
+    setStatus(data.message || 'Deleted.');
+  }catch(err){
+    setStatus('Error: ' + err);
+  }
+}
+
+reloadMemory();
+</script>
+</body>
+</html>

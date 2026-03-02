@@ -57,20 +57,6 @@
       ],
       "env" : {
       }
-    },
-    {
-      "id" : "pickleball",
-      "name" : "Pickleball",
-      "synonyms" : [
-        "pickleball",
-        "pickle ball"
-      ],
-      "exec" : "",
-      "workdir" : "",
-      "args" : [
-      ],
-      "env" : {
-      }
     }
   ]
 }

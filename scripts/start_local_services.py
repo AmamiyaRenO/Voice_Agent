@@ -1072,6 +1072,7 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     env.setdefault("ASR_DEFAULT_LANGUAGE", "en")
     env.setdefault("ASR_FORCE_LANGUAGE", "en")
     env.setdefault("ASR_ENGLISH_ONLY", "1")
+    env.setdefault("TRANSCRIBE_MODE", "moonshine-medium")
     env.setdefault("DIALOG_REPLY_COMPRESS", "1")
     env.setdefault("DIALOG_MAX_REPLY_SENTENCES", "3")
     env.setdefault("DIALOG_MAX_REPLY_CHARS", "0")
@@ -1080,11 +1081,17 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     env.setdefault("QWEN_TTS_SPEAKER", "Ryan")
     env.setdefault("QWEN_TTS_INSTRUCT", "")
     env.setdefault("QWEN_TTS_DO_SAMPLE", "0")
-    env.setdefault("QWEN_TTS_MAX_TEXT_CHARS", "90")
+    # Do not hard-truncate reply text by default; this can sound like the last
+    # 1-2 words are "swallowed" on longer sentences. Users can still opt-in.
+    env.setdefault("QWEN_TTS_MAX_TEXT_CHARS", "0")
     env.setdefault("QWEN_TTS_FAST_SHORT_MAX_NEW_TOKENS", "240")
     env.setdefault("QWEN_TTS_WARMUP_TEXT", "Hello. I am ready.")
     env.setdefault("MQTT_HOST", "127.0.0.1")
     env.setdefault("MQTT_PORT", "1883")
+    env.setdefault(
+        "DIALOG_USER_MEMORY_PATH",
+        str(defaults.script_dir / "dialog_service" / "user_memory.json"),
+    )
     env.setdefault("TELEMETRY_HOST", "0.0.0.0")
     env.setdefault("TELEMETRY_MQTT_TOPIC", "voiceagent/telemetry/#")
     env.setdefault("TELEMETRY_AUTO_SEED", "1")

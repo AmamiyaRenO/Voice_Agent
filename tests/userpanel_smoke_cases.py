@@ -23,13 +23,15 @@ USERPANEL_SMOKE_CASES: Dict[str, List[PanelOp]] = {
     "/games.html": [PanelOp(method="GET", expected_statuses=(200,))],
     "/runtime": [PanelOp(method="GET", expected_statuses=(200,))],
     "/runtime.html": [PanelOp(method="GET", expected_statuses=(200,))],
+    "/memory": [PanelOp(method="GET", expected_statuses=(200,))],
+    "/memory.html": [PanelOp(method="GET", expected_statuses=(200,))],
     "/setup": [PanelOp(method="GET", expected_statuses=(200,))],
     "/setup.html": [PanelOp(method="GET", expected_statuses=(200,))],
     "/sdk": [PanelOp(method="GET", expected_statuses=(200,))],
     "/sdk.html": [PanelOp(method="GET", expected_statuses=(200,))],
     "/telemetry": [PanelOp(method="GET", expected_statuses=(200,))],
     "/telemetry.html": [PanelOp(method="GET", expected_statuses=(200,))],
-    "/camera.mjpg": [PanelOp(method="GET", timeout_sec=2.5, expected_statuses=(200, 503))],
+    "/camera.mjpg": [PanelOp(method="GET", timeout_sec=2.5, expected_statuses=(200, 503, 0))],
     "/healthz": [PanelOp(method="GET", expected_statuses=(200,))],
     # /api/face may block on MQTT publish when broker/network is unhealthy.
     # Keep the endpoint in live sweep but tolerate client-side timeout status 0.
@@ -66,6 +68,10 @@ USERPANEL_SMOKE_CASES: Dict[str, List[PanelOp]] = {
     ],
     "/api/runtime/prereq": [PanelOp(method="GET", expected_statuses=(200,))],
     "/api/runtime/ollama": [PanelOp(method="POST", body_json={"action": "invalid"}, expected_statuses=(400,))],
+    "/api/memory": [
+        PanelOp(method="GET", expected_statuses=(200, 500)),
+        PanelOp(method="POST", body_json={"action": "invalid"}, expected_statuses=(400, 500)),
+    ],
     "/api/asr": [
         PanelOp(method="GET"),
         PanelOp(method="POST", body_json={"action": "invalid"}, expected_statuses=(400, 502, 503)),

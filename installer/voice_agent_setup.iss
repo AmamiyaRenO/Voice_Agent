@@ -40,9 +40,16 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop icon"; Flags: unchecked
 
 [Files]
-Source: "{#UnityBuildDir}\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Include only expected Unity player outputs to avoid accidentally packaging
+; unrelated large folders from parent/root paths.
+Source: "{#UnityBuildDir}\VoiceAgent.exe"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "{#UnityBuildDir}\UnityPlayer.dll"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "{#UnityBuildDir}\UnityCrashHandler64.exe"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "{#UnityBuildDir}\MonoBleedingEdge\*"; DestDir: "{app}\app\MonoBleedingEdge"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#UnityBuildDir}\VoiceAgent_Data\*"; DestDir: "{app}\app\VoiceAgent_Data"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#UnityBuildDir}\VoiceAgent_BurstDebugInformation_DoNotShip\*"; DestDir: "{app}\app\VoiceAgent_BurstDebugInformation_DoNotShip"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#ServiceExeDir}\*"; DestDir: "{app}\runtime\services"; Flags: ignoreversion recursesubdirs createallsubdirs
-#if Len("{#PiperRuntimeDir}") > 0
+#if Len(PiperRuntimeDir) > 0
 Source: "{#PiperRuntimeDir}\*"; DestDir: "{app}\runtime\piper"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
 Source: "..\scripts\local_services.default.json"; DestDir: "{app}\scripts"; Flags: ignoreversion

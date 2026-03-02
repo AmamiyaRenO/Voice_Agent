@@ -116,7 +116,23 @@ def _normalize_text_for_tts(text: str) -> str:
     t = _REPEATED_PUNCT_RE.sub(r"\1", t)
     max_chars = _env_int("QWEN_TTS_MAX_TEXT_CHARS", 0, floor=0)
     if max_chars > 0 and len(t) > max_chars:
-        t = t[:max_chars].strip()
+        # Prefer a natural boundary so clipped tails do not sound like
+        # missing half-words. Keep near-max length to preserve latency intent.
+        clipped = t[:max_chars]
+        boundary_candidates = [
+            clipped.rfind(" "),
+            clipped.rfind("."),
+            clipped.rfind("!"),
+            clipped.rfind("?"),
+            clipped.rfind(","),
+            clipped.rfind(";"),
+            clipped.rfind(":"),
+        ]
+        boundary = max(boundary_candidates)
+        min_boundary = max(12, int(max_chars * 0.65))
+        if boundary >= min_boundary:
+            clipped = clipped[:boundary]
+        t = clipped.strip()
     return t
 
 

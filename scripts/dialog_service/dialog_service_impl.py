@@ -185,6 +185,35 @@ class DialogService:
                 print(f"[dialog] user memory resolve failed: {exc}")
                 memory_context = ""
 
+        if user_id and self.user_memory is not None and self._is_memory_query(text):
+            try:
+                memory_reply = (self.user_memory.build_facts_reply(user_id) or "").strip()
+            except Exception as exc:
+                print(f"[dialog] user memory reply failed: {exc}")
+                memory_reply = ""
+            if memory_reply:
+                memory_reply = sanitize_tts_text(memory_reply)
+                if memory_reply:
+                    if self.reply_compress:
+                        memory_reply = compress_reply_for_latency(
+                            memory_reply,
+                            max_sentences=self.reply_max_sentences,
+                            max_chars=self.reply_max_chars,
+                        )
+                        memory_reply = compress_reply_by_words(memory_reply, self.reply_max_words)
+                        memory_reply = trim_trailing_connectors(memory_reply)
+                        if memory_reply and memory_reply[-1] not in ".!?":
+                            memory_reply = f"{memory_reply}."
+                    self._publish_answer_ex(
+                        text=memory_reply,
+                        corr_id=corr_id,
+                        tts_speaker=self.tts_voice or None,
+                        user_id=user_id,
+                    )
+                    if self.cfg.speak_audio:
+                        self._tts_and_play(memory_reply, corr_id)
+                    return
+
         try:
             url = f"{self.cfg.respond_api_url}{self.cfg.respond_endpoint}"
             body = {"text": text}
@@ -258,3 +287,24 @@ class DialogService:
         except Exception:
             pass
         return raw
+
+    @staticmethod
+    def _is_memory_query(text: str) -> bool:
+        lowered = " ".join((text or "").strip().lower().split())
+        if not lowered:
+            return False
+        patterns = (
+            "what do you know about me",
+            "what do you remember about me",
+            "do you remember me",
+            "tell me about me",
+            "who am i",
+            "what do you know of me",
+            "where am i from",
+            "where do i come from",
+            "what is my name",
+            "what's my name",
+            "what do i like",
+            "what are my goals",
+        )
+        return any(p in lowered for p in patterns)

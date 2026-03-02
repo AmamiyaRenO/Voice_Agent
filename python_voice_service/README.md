@@ -222,7 +222,7 @@ $env:QWEN_TTS_CACHE_SIZE="8"
 $env:QWEN_TTS_NUM_THREADS="4"
 $env:QWEN_TTS_NUM_INTEROP="1"
 $env:QWEN_TTS_SPEED_PROFILE="fast"
-$env:QWEN_TTS_MAX_TEXT_CHARS="90"
+$env:QWEN_TTS_MAX_TEXT_CHARS="0"
 $env:QWEN_TTS_FAST_SHORT_MAX_NEW_TOKENS="240"
 python scripts/start_local_services.py
 ```
