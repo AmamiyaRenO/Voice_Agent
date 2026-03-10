@@ -54,9 +54,9 @@ pip install -r requirements.txt
    export OPENAI_TRANSCRIBE_MODEL="gpt-4o-mini-transcribe"
    # Optional: prompt bias for OpenAI STT (recommended empty to avoid prompt leakage)
    export OPENAI_TRANSCRIBE_PROMPT=""
-   # API language control (defaults already enforce English)
+   # API language control (defaults follow normal ASR language settings)
    export ASR_API_LANGUAGE="en"
-   export ASR_API_FORCE_LANGUAGE="1"
+   export ASR_API_FORCE_LANGUAGE="0"
    # Optional: Moonshine model selection (advanced)
    export MOONSHINE_LANGUAGE="en"
    export MOONSHINE_SMALL_MODEL_PATH=""    # optional override for moonshine-small
@@ -89,7 +89,11 @@ pip install -r requirements.txt
    ```bash
    # Optional: customise the Ollama integration
    export OLLAMA_BASE_URL="http://127.0.0.1:11434"
-   export OLLAMA_MODEL="gemma3:4b"
+   export OLLAMA_MODEL="qwen3.5:0.8b"
+   export OLLAMA_THINK="0"
+    export OLLAMA_TEMPERATURE="0.7"
+    export OLLAMA_TOP_P="0.8"
+    export OLLAMA_TOP_K="20"
    export OLLAMA_SYSTEM_PROMPT="You are the Coach Voice Agent..."
 
    uvicorn main:app --host 0.0.0.0 --port 8000
@@ -142,7 +146,8 @@ curl -X POST "http://127.0.0.1:8000/transcribe/config" \
 
 ### English enforcement and game-term normalization
 
-- In API mode, language is forced to English by default (`ASR_API_FORCE_LANGUAGE=1`, `ASR_API_LANGUAGE=en`).
+- API mode now follows the same language pipeline as Moonshine by default.
+- If you need forced English in API mode, set `ASR_API_FORCE_LANGUAGE=1` and `ASR_API_LANGUAGE=en`.
 - The service also normalizes common game terms to improve intent matching:
   - `corn hole` -> `cornhole`
   - `discgolf` / `disc-golf` -> `disc golf`
@@ -152,13 +157,29 @@ curl -X POST "http://127.0.0.1:8000/transcribe/config" \
 
 The `/respond` endpoint relays recognised text to a local Ollama
 deployment. By default it targets `http://127.0.0.1:11434/api/generate`
-with the `gemma3:4b` model and the coach system prompt. Send
+with the `qwen3.5:0.8b` model (`OLLAMA_THINK=0`, no-thinking mode) and the coach system prompt. Send
 a POST request with a JSON body containing the `text` field:
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/respond" \
      -H "Content-Type: application/json" \
      -d '{"text": "Start the balance exercise"}'
+```
+
+For multi-turn dialogue coherence, you can optionally provide context fields:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/respond" \
+     -H "Content-Type: application/json" \
+     -d '{
+           "text":"what about tomorrow?",
+           "user_id":"user_001",
+           "memory_context":"Preferred name: Alex. Goals: improve balance.",
+           "dialog_context":"Current topic: rehab schedule. Recent dialogue: User: I can train today. Coach: Great, let us do 20 minutes.",
+           "dialog_policy":"continue_topic",
+           "current_topic":"rehab schedule",
+           "open_question":"Do you want a light or normal plan today?"
+         }'
 ```
 
 The response contains the generated `text`, ready to be spoken by the

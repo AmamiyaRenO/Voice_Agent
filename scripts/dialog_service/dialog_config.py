@@ -45,6 +45,19 @@ class Config:
     user_memory_embedding_cache_dir: str = ""
     user_memory_query_prefix: str = ""
     user_memory_doc_prefix: str = ""
+    enable_dialog_context: bool = True
+    enable_dialog_policy: bool = True
+    dialog_history_turns: int = 8
+    dialog_summary_max_chars: int = 420
+    dialog_context_max_chars: int = 900
+    memory_query_rule: bool = True
+    memory_query_semantic: bool = True
+    memory_query_threshold: float = 0.58
+    enable_vision_query: bool = True
+    vision_describe_url: str = "http://127.0.0.1:8787/api/vision/describe"
+    vision_query_prompt: str = "Describe what you see in this camera frame in 2-4 concise sentences."
+    vision_query_model: str = ""
+    vision_timeout_seconds: float = 12.0
 
 
 def _env_int(key: str, default: int, floor: int = 0) -> int:
@@ -67,6 +80,16 @@ def _env_bool(key: str, default: bool) -> bool:
     if value in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _env_float(key: str, default: float, floor: float = 0.0) -> float:
+    raw = os.environ.get(key)
+    if raw is None:
+        return max(floor, float(default))
+    try:
+        return max(floor, float(raw))
+    except Exception:
+        return max(floor, float(default))
 
 
 def _default_embedder_repo(embedder: str) -> str:
@@ -164,5 +187,39 @@ def load_config() -> Config:
     )
     cfg.user_memory_doc_prefix = (
         os.environ.get("DIALOG_USER_MEMORY_DOC_PREFIX", cfg.user_memory_doc_prefix).strip()
+    )
+    cfg.enable_dialog_context = _env_bool("DIALOG_ENABLE_CONTEXT_MEMORY", cfg.enable_dialog_context)
+    cfg.enable_dialog_policy = _env_bool("DIALOG_ENABLE_POLICY", cfg.enable_dialog_policy)
+    cfg.dialog_history_turns = _env_int("DIALOG_HISTORY_TURNS", cfg.dialog_history_turns, floor=2)
+    cfg.dialog_summary_max_chars = _env_int(
+        "DIALOG_SUMMARY_MAX_CHARS",
+        cfg.dialog_summary_max_chars,
+        floor=120,
+    )
+    cfg.dialog_context_max_chars = _env_int(
+        "DIALOG_CONTEXT_MAX_CHARS",
+        cfg.dialog_context_max_chars,
+        floor=180,
+    )
+    cfg.memory_query_rule = _env_bool("DIALOG_MEMORY_QUERY_RULE", cfg.memory_query_rule)
+    cfg.memory_query_semantic = _env_bool(
+        "DIALOG_MEMORY_QUERY_SEMANTIC",
+        cfg.memory_query_semantic,
+    )
+    cfg.memory_query_threshold = _env_float(
+        "DIALOG_MEMORY_QUERY_THRESHOLD",
+        cfg.memory_query_threshold,
+        floor=0.0,
+    )
+    cfg.enable_vision_query = _env_bool("DIALOG_ENABLE_VISION_QUERY", cfg.enable_vision_query)
+    cfg.vision_describe_url = (
+        os.environ.get("DIALOG_VISION_DESCRIBE_URL", cfg.vision_describe_url).strip() or cfg.vision_describe_url
+    )
+    cfg.vision_query_prompt = os.environ.get("DIALOG_VISION_QUERY_PROMPT", cfg.vision_query_prompt).strip()
+    cfg.vision_query_model = os.environ.get("DIALOG_VISION_QUERY_MODEL", cfg.vision_query_model).strip()
+    cfg.vision_timeout_seconds = _env_float(
+        "DIALOG_VISION_TIMEOUT_SECONDS",
+        cfg.vision_timeout_seconds,
+        floor=1.0,
     )
     return cfg

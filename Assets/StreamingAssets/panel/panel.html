@@ -33,6 +33,16 @@ textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0
 .log-speaker { font-weight: 600; letter-spacing: 0.08em; }
 .log-message { margin-top: 0.2rem; font-size: 0.95rem; color: #f8fafc; }
 .log-empty { padding: 1.2rem 0; font-size: 0.9rem; opacity: 0.6; text-align: center; }
+.asr-metrics { margin-top: 0.9rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem; }
+.asr-card { padding: 0.75rem 0.8rem; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); }
+.asr-card-title { display:flex; justify-content:space-between; gap:0.6rem; font-size:0.82rem; opacity:0.84; margin-bottom:0.45rem; }
+.asr-meter { height: 10px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
+.asr-meter-fill { height: 100%; width: 0%; border-radius: 999px; background: linear-gradient(90deg, #22c55e, #facc15, #ef4444); transition: width 0.18s ease; }
+.asr-badges { display:flex; flex-wrap:wrap; gap:0.45rem; margin-top:0.8rem; }
+.asr-badge { padding:0.3rem 0.55rem; border-radius:999px; font-size:0.78rem; border:1px solid rgba(255,255,255,0.14); background:rgba(255,255,255,0.05); }
+.asr-badge.live { border-color: rgba(74,222,128,0.45); color:#86efac; }
+.asr-badge.warn { border-color: rgba(248,113,113,0.45); color:#fca5a5; }
+.asr-detail { margin-top:0.75rem; font-size:0.84rem; opacity:0.85; display:grid; gap:0.22rem; }
 </style>
 </head>
 <body>
@@ -123,14 +133,14 @@ textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0
 <button onclick="startCameraPreview()">Start Preview</button>
 <button onclick="stopCameraPreview()">Stop Preview</button>
 </div>
-<img id="cameraView" src="/camera.jpg" alt="camera" style="max-width:100%;width:640px;height:auto;border-radius:12px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 12px 36px rgba(0,0,0,0.35)"/>
-<small style="opacity:0.7">Preview keeps polling while started. Use Stop Preview to pause it.</small>
+<img id="cameraView" alt="camera" style="display:none;max-width:100%;width:640px;height:auto;border-radius:12px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 12px 36px rgba(0,0,0,0.35)"/>
+<small style="opacity:0.7">Camera is off by default. Click Start Preview to open it, Stop Preview to close it.</small>
 </div>
 </section>
 <section>
 <h2>Camera Vision (LLM)</h2>
 <div class="controls" style="flex-direction:column;align-items:stretch;">
-<input id="visionModel" type="text" placeholder="Vision model (e.g. gemma3:4b)" value="gemma3:4b">
+<input id="visionModel" type="text" placeholder="Vision model (e.g. qwen3.5:0.8b)" value="qwen3.5:0.8b">
 <textarea id="visionPrompt" placeholder="Ask the model what it sees in the current camera frame...">Describe what you see and call out anything important for the current exercise.</textarea>
 <div class="controls" style="width:100%;">
 <button onclick="describeCameraNow()">Describe Current Frame</button>
@@ -194,12 +204,43 @@ textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0
 <label for="asrModeSelect">ASR Mode</label>
 <select id="asrModeSelect"></select>
 <button onclick="applyAsrMode()">Apply Mode</button>
+<label for="serverAsrModeSelect">Backend ASR</label>
+<select id="serverAsrModeSelect"></select>
+<button onclick="applyServerAsrMode()">Apply Backend</button>
 <button onclick="refreshAsrStatus()">Refresh Status</button>
 </div>
 <div class="controls">
 <button onclick="startAgentListening()">Start Listening</button>
 <button onclick="pauseAgentListening()">Pause Listening</button>
 <span id="asrState" style="font-size:0.9rem;opacity:0.85;">Loading ASR status...</span>
+</div>
+<div class="asr-metrics">
+  <div class="asr-card">
+    <div class="asr-card-title"><span>Input Level</span><span id="asrInputLevelText">-- dBFS</span></div>
+    <div class="asr-meter"><div id="asrInputLevelFill" class="asr-meter-fill"></div></div>
+  </div>
+  <div class="asr-card">
+    <div class="asr-card-title"><span>Input Peak</span><span id="asrInputPeakText">-- dBFS</span></div>
+    <div class="asr-meter"><div id="asrInputPeakFill" class="asr-meter-fill"></div></div>
+  </div>
+  <div class="asr-card">
+    <div class="asr-card-title"><span>Noise Floor</span><span id="asrNoiseFloorText">-- dBFS</span></div>
+    <div class="asr-meter"><div id="asrNoiseFloorFill" class="asr-meter-fill"></div></div>
+  </div>
+  <div class="asr-card">
+    <div class="asr-card-title"><span>Frontend Gain</span><span id="asrFrontendGainText">-- dB</span></div>
+    <div class="asr-meter"><div id="asrFrontendGainFill" class="asr-meter-fill"></div></div>
+  </div>
+</div>
+<div class="asr-badges">
+  <span id="asrSpeechBadge" class="asr-badge">Speech: --</span>
+  <span id="asrClipBadge" class="asr-badge">Clip: --</span>
+  <span id="asrQueueBadge" class="asr-badge">Queue: --</span>
+  <span id="asrDropBadge" class="asr-badge">Dropped: --</span>
+</div>
+<div class="asr-detail">
+  <div><strong>Current Partial:</strong> <span id="asrCurrentPartialText">--</span></div>
+  <div><strong>Stable Partial:</strong> <span id="asrStablePartialText">--</span></div>
 </div>
 </section>
 <section>
@@ -232,10 +273,28 @@ const voiceSelect = document.getElementById('voiceSelect');
 const modelSelect = document.getElementById('ttsModelSelect');
 const qwenSpeakerSelect = document.getElementById('qwenSpeakerSelect');
 const asrModeSelect = document.getElementById('asrModeSelect');
+const serverAsrModeSelect = document.getElementById('serverAsrModeSelect');
 const asrStateEl = document.getElementById('asrState');
+const asrInputLevelTextEl = document.getElementById('asrInputLevelText');
+const asrInputPeakTextEl = document.getElementById('asrInputPeakText');
+const asrNoiseFloorTextEl = document.getElementById('asrNoiseFloorText');
+const asrFrontendGainTextEl = document.getElementById('asrFrontendGainText');
+const asrInputLevelFillEl = document.getElementById('asrInputLevelFill');
+const asrInputPeakFillEl = document.getElementById('asrInputPeakFill');
+const asrNoiseFloorFillEl = document.getElementById('asrNoiseFloorFill');
+const asrFrontendGainFillEl = document.getElementById('asrFrontendGainFill');
+const asrSpeechBadgeEl = document.getElementById('asrSpeechBadge');
+const asrClipBadgeEl = document.getElementById('asrClipBadge');
+const asrQueueBadgeEl = document.getElementById('asrQueueBadge');
+const asrDropBadgeEl = document.getElementById('asrDropBadge');
+const asrCurrentPartialTextEl = document.getElementById('asrCurrentPartialText');
+const asrStablePartialTextEl = document.getElementById('asrStablePartialText');
 const llmPromptEl = document.getElementById('llmPromptText');
 const logContainer = document.getElementById('transcriptLog');
 const cameraView = document.getElementById('cameraView');
+let liveLogVersion = -1;
+let liveLogEventSource = null;
+let liveLogPollTimer = null;
 const logRoleStyles = {
   user:{icon:'\uD83D\uDC64',bg:'rgba(59,130,246,0.18)',color:'#60a5fa'},
   coach:{icon:'\uD83E\uDD16',bg:'rgba(251,146,60,0.18)',color:'#fb923c'},
@@ -300,29 +359,102 @@ function renderLog(entries){
     logContainer.scrollTop = logContainer.scrollHeight;
   }
 }
+function applyLogPayload(data){
+  if(!data || typeof data !== 'object') return;
+  const version = Number.isFinite(Number(data.version)) ? Number(data.version) : liveLogVersion;
+  if(version >= 0 && version === liveLogVersion){ return; }
+  liveLogVersion = version;
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  renderLog(entries);
+}
 async function refreshLog(){
   if(!logContainer) return;
   try {
-    const resp = await fetch('/api/logs');
+    const resp = await fetch('/api/logs', { cache:'no-store' });
     if(!resp.ok) return;
     const data = await resp.json();
-    const entries = Array.isArray(data.entries) ? data.entries : [];
-    renderLog(entries);
+    applyLogPayload(data);
   } catch(err) {
     console.warn('log fetch failed', err);
+  }
+}
+function stopLogPolling(){
+  if(liveLogPollTimer){
+    clearInterval(liveLogPollTimer);
+    liveLogPollTimer = null;
+  }
+}
+function ensureLogPolling(){
+  if(liveLogPollTimer) return;
+  refreshLog();
+  liveLogPollTimer = setInterval(refreshLog, 1000);
+}
+function connectLiveLogStream(){
+  if(!logContainer || typeof EventSource === 'undefined'){
+    ensureLogPolling();
+    return;
+  }
+  if(liveLogEventSource){
+    liveLogEventSource.close();
+    liveLogEventSource = null;
+  }
+  try {
+    const source = new EventSource('/api/logs/stream');
+    source.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        applyLogPayload(data);
+        stopLogPolling();
+      } catch(err) {
+        console.warn('log stream parse failed', err);
+      }
+    };
+    source.onerror = () => {
+      if(liveLogEventSource){
+        liveLogEventSource.close();
+        liveLogEventSource = null;
+      }
+      ensureLogPolling();
+      setTimeout(() => {
+        if(!liveLogEventSource && !document.hidden){
+          connectLiveLogStream();
+        }
+      }, 2000);
+    };
+    liveLogEventSource = source;
+  } catch(err) {
+    console.warn('log stream init failed', err);
+    ensureLogPolling();
   }
 }
 async function send(endpoint, payload){
   statusEl.textContent = 'Sending ' + endpoint + ' ...';
   try {
     const resp = await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})});
-    const data = await resp.json();
+    const data = await parseApiResponse(resp);
     statusEl.textContent = data.status + ': ' + data.message;
     return data;
   } catch(err){
     statusEl.textContent = 'error: ' + err;
     return null;
   }
+}
+async function parseApiResponse(resp){
+  const raw = await resp.text();
+  let data = null;
+  if(raw){
+    try {
+      data = JSON.parse(raw);
+    } catch(err) {
+      data = {status: resp.ok ? 'ok' : 'error', message: raw.trim() || ('HTTP ' + resp.status)};
+    }
+  } else {
+    data = {status: resp.ok ? 'ok' : 'error', message: 'HTTP ' + resp.status};
+  }
+  if(typeof data.status !== 'string'){ data.status = resp.ok ? 'ok' : 'error'; }
+  if(typeof data.message !== 'string' && typeof data.detail === 'string'){ data.message = data.detail; }
+  if(typeof data.message !== 'string' || !data.message.trim()){ data.message = raw.trim() || ('HTTP ' + resp.status); }
+  return data;
 }
 function parseSeconds(){
   const seconds = parseFloat(document.getElementById('faceSeconds').value);
@@ -391,14 +523,16 @@ async function describeCameraNow(){
   const promptEl = document.getElementById('visionPrompt');
   const modelEl = document.getElementById('visionModel');
   const resultEl = document.getElementById('visionResult');
+  if(!cameraPolling){
+    const msg = 'camera preview is off. Click Start Preview first.';
+    if(resultEl){ resultEl.textContent = 'Error: ' + msg; }
+    if(statusEl){ statusEl.textContent = msg; }
+    return;
+  }
   if(resultEl){ resultEl.textContent = 'Preparing latest camera frame...'; }
   if(statusEl){ statusEl.textContent = 'vision: preparing request...'; }
-  if(!cameraPolling){
-    cameraAutoStart = true;
-    startPolling();
-    pullCameraFrame();
-    await new Promise(resolve => setTimeout(resolve, 280));
-  }
+  pullCameraFrame();
+  await new Promise(resolve => setTimeout(resolve, 280));
   const prompt = promptEl ? String(promptEl.value || '').trim() : '';
   const model = modelEl ? String(modelEl.value || '').trim() : '';
   const payload = { prompt: prompt };
@@ -470,25 +604,71 @@ function launchGame(){
 function exitGame(){
   send('/api/game',{action:'exit'});
 }
+function formatDb(value, suffix='dBFS'){
+  const num = Number(value);
+  if(!Number.isFinite(num)){ return '-- ' + suffix; }
+  return `${num.toFixed(1)} ${suffix}`;
+}
+function meterPercent(value, min, max){
+  const num = Number(value);
+  if(!Number.isFinite(num)){ return 0; }
+  const pct = ((num - min) / (max - min)) * 100;
+  return Math.max(0, Math.min(100, pct));
+}
+function setMeter(fillEl, textEl, value, min, max, suffix='dBFS'){
+  if(fillEl){ fillEl.style.width = meterPercent(value, min, max).toFixed(1) + '%'; }
+  if(textEl){ textEl.textContent = formatDb(value, suffix); }
+}
+function setBadge(el, text, live){
+  if(!el) return;
+  el.textContent = text;
+  el.classList.toggle('live', !!live);
+  el.classList.toggle('warn', !live);
+}
 function renderAsrStatus(data){
   if(!data) return;
   const mode = (typeof data.mode === 'string' && data.mode) ? data.mode : 'whisper-large-v3';
   const listening = !!data.listening;
-  const apiReady = !!data.openai_configured;
+  const serverCfg = (data && typeof data.server_transcribe === 'object' && data.server_transcribe) ? data.server_transcribe : {};
+  const serverMode = (typeof serverCfg.mode === 'string' && serverCfg.mode) ? serverCfg.mode : '';
+  const apiReady = !!serverCfg.openai_configured;
+  const lcMissing = (mode === 'live-captions' && !data.live_captions_available);
   if(asrStateEl){
-    const suffix = (mode === 'api' && !apiReady) ? ' | OPENAI_API_KEY missing' : '';
-    asrStateEl.textContent = `Mode: ${mode} | Listening: ${listening ? 'ON' : 'PAUSED'}${suffix}`;
+    const suffix = (serverMode === 'api' && !apiReady) ? ' | OPENAI_API_KEY missing' : '';
+    const lcSuffix = lcMissing ? ' | LiveCaptionsListener missing' : '';
+    const backendPart = serverMode ? ` | Backend: ${serverMode}` : '';
+    asrStateEl.textContent = `Desktop: ${mode}${backendPart} | Listening: ${listening ? 'ON' : 'PAUSED'}${suffix}${lcSuffix}`;
   }
-  const modes = Array.isArray(data.available_modes) ? data.available_modes : ['whisper-large-v3','moonshine-small','moonshine-medium','api'];
+  const modes = Array.isArray(data.available_modes) ? data.available_modes : ['moonshine-small','moonshine-medium','live-captions'];
   if(asrModeSelect){
     asrModeSelect.innerHTML = modes.map(v => `<option value="${v}">${v}</option>`).join('');
     if(modes.includes(mode)){ asrModeSelect.value = mode; }
   }
+  const serverModes = Array.isArray(serverCfg.available_modes) ? serverCfg.available_modes : ['whisper-large-v3','moonshine-small','moonshine-medium','api'];
+  if(serverAsrModeSelect){
+    serverAsrModeSelect.innerHTML = serverModes.map(v => `<option value="${v}">${v}</option>`).join('');
+    if(serverModes.includes(serverMode)){ serverAsrModeSelect.value = serverMode; }
+  }
+  setMeter(asrInputLevelFillEl, asrInputLevelTextEl, data.input_level_dbfs, -72, -6);
+  setMeter(asrInputPeakFillEl, asrInputPeakTextEl, data.input_peak_dbfs, -72, 0);
+  setMeter(asrNoiseFloorFillEl, asrNoiseFloorTextEl, data.noise_floor_dbfs, -90, -18);
+  setMeter(asrFrontendGainFillEl, asrFrontendGainTextEl, data.frontend_gain_db, 0, 24, 'dB');
+  setBadge(asrSpeechBadgeEl, `Speech: ${data.speech_active ? 'ACTIVE' : 'idle'}`, !!data.speech_active);
+  setBadge(asrClipBadgeEl, `Clip: ${data.clipped_recently ? 'YES' : 'no'}`, !data.clipped_recently);
+  if(asrQueueBadgeEl){ asrQueueBadgeEl.textContent = `Queue: ${Number(data.queued_input_frames || 0)} frame(s)`; }
+  if(asrDropBadgeEl){
+    const dropped = Number(data.dropped_input_frames || 0);
+    asrDropBadgeEl.textContent = `Dropped: ${dropped}`;
+    asrDropBadgeEl.classList.toggle('warn', dropped > 0);
+    asrDropBadgeEl.classList.toggle('live', dropped === 0);
+  }
+  if(asrCurrentPartialTextEl){ asrCurrentPartialTextEl.textContent = String(data.current_partial || '--'); }
+  if(asrStablePartialTextEl){ asrStablePartialTextEl.textContent = String(data.stable_partial || '--'); }
 }
 async function refreshAsrStatus(){
   try {
     const resp = await fetch('/api/asr');
-    const data = await resp.json();
+    const data = await parseApiResponse(resp);
     if(!resp.ok || data.status !== 'ok'){
       const msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);
       if(asrStateEl){ asrStateEl.textContent = 'ASR error: ' + msg; }
@@ -505,6 +685,14 @@ async function applyAsrMode(){
   const data = await send('/api/asr',{action:'set_mode',mode:mode});
   if(data && data.status === 'ok'){
     renderAsrStatus(data);
+  }
+}
+async function applyServerAsrMode(){
+  const mode = serverAsrModeSelect ? String(serverAsrModeSelect.value || '').trim() : '';
+  if(!mode){ statusEl.textContent = 'error: select backend ASR mode'; return; }
+  const data = await send('/api/asr/backend',{action:'set_mode',mode:mode});
+  if(data && data.status === 'ok'){
+    await refreshAsrStatus();
   }
 }
 async function startAgentListening(){
@@ -557,7 +745,7 @@ async function loadQwenOptions(){
 }
 if(logContainer){ renderLog([]); }
 refreshLog();
-setInterval(refreshLog, 4000);
+connectLiveLogStream();
 loadVoiceOptions();
 loadQwenOptions();
 refreshAsrStatus();
@@ -577,7 +765,7 @@ function cameraHeartbeat(){
   fetch('/api/camera/ping',{method:'POST',cache:'no-store'}).catch(()=>{});
 }
 function pullCameraFrame(){
-  if(!cameraView) return;
+  if(!cameraView || !cameraPolling) return;
   const now = Date.now();
   if(cameraRequestInFlight && (now - cameraRequestStartedAt) < 1800){ return; }
   cameraSeq++;
@@ -587,7 +775,7 @@ function pullCameraFrame(){
   cameraView.src = '/camera.jpg?t=' + cameraLastSetAt + '&n=' + cameraSeq;
 }
 function cameraWatchdog(){
-  if(!cameraView) return;
+  if(!cameraView || !cameraPolling) return;
   const now = Date.now();
   if(cameraRequestInFlight && (now - cameraRequestStartedAt) > 2500){
     cameraRequestInFlight = false;
@@ -616,15 +804,22 @@ function stopPolling(){
 }
 function startCameraPreview(){
   cameraAutoStart = true;
+  if(cameraView){ cameraView.style.display = 'block'; }
   startPolling();
   pullCameraFrame();
 }
 function stopCameraPreview(){
   cameraAutoStart = false;
   stopPolling();
-  if(cameraView){ cameraView.removeAttribute('src'); }
+  if(cameraView){
+    cameraView.removeAttribute('src');
+    cameraView.style.display = 'none';
+  }
 }
 document.addEventListener('visibilitychange', () => {
+  if(!document.hidden && !liveLogEventSource){
+    connectLiveLogStream();
+  }
   if(!cameraAutoStart) return;
   if(document.hidden){
     stopPolling();
@@ -647,8 +842,20 @@ document.addEventListener('fullscreenchange', () => {
   }
 });
 window.addEventListener('pagehide', stopPolling);
-window.addEventListener('beforeunload', stopPolling);
-function initCamera(){ if(!cameraView) return; if(cameraAutoStart){ startPolling(); } }
+window.addEventListener('beforeunload', () => {
+  stopPolling();
+  stopLogPolling();
+  if(liveLogEventSource){
+    liveLogEventSource.close();
+    liveLogEventSource = null;
+  }
+});
+function initCamera(){
+  if(!cameraView) return;
+  cameraView.removeAttribute('src');
+  cameraView.style.display = 'none';
+  if(cameraAutoStart){ startPolling(); }
+}
 initCamera();
 </script>
 </body>

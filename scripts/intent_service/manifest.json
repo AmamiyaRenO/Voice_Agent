@@ -1,38 +1,42 @@
-﻿{
-  "games" : [
+{
+  "games": [
     {
-      "id" : "cornhole",
-      "name" : "Bean Bag Toss",
-      "synonyms" : [
-        "bean bag toss",
-        "beanbag toss",
-        "bean bags toss",
+      "id": "cornhole",
+      "name": "Bean Bag Toss",
+      "synonyms": [
+        "Bean Bag Toss",
         "bag toss",
         "bags",
         "bean bag",
+        "bean bag toss",
+        "bean bags toss",
         "beanbag",
-        "corn hole toss",
-        "cornhole",
-        "corn hole",
-        "core hole",
-        "core whole",
-        "core home",
-        "corn whole",
-        "corn hall",
-        "corn hold",
-        "corn haul",
-        "corn home",
-        "cornhall",
-        "corn whole game",
-        "corn hole game",
-        "cornhole game",
-        "bing back",
+        "beanbag toss",
+        "dean bag toss",
         "being back",
-        "call home"
+        "bing back",
+        "call home",
+        "core hole",
+        "core home",
+        "core whole",
+        "corn hall",
+        "corn haul",
+        "corn hold",
+        "corn hole",
+        "corn hole game",
+        "corn hole toss",
+        "corn home",
+        "corn whole",
+        "corn whole game",
+        "cornhall",
+        "kong ho",
+        "konghou",
+        "cornhole",
+        "cornhole game"
       ],
-      "exec" : "D:\\unityproject\\cornhole\\MediaPipeTestDemo.exe",
-      "workdir" : "D:\\unityproject\\cornhole",
-      "args" : [
+      "exec": "D:\\unityproject\\cornhole\\MediaPipeTestDemo.exe",
+      "workdir": "D:\\unityproject\\cornhole",
+      "args": [
         "-screen-fullscreen",
         "1",
         "-screen-width",
@@ -40,23 +44,58 @@
         "-screen-height",
         "1080"
       ],
-      "env" : {
-      }
+      "env": {},
+      "description": "Bean Bag Toss is a tossing game where players throw bean bags at a raised board with a hole.",
+      "how_to_play": "Players take turns throwing bean bags and score by landing on the board or through the hole.",
+      "players_min": 1,
+      "players_max": 1,
+      "tags": [
+        "casual",
+        "throwing",
+        "accuracy",
+        "precision",
+        "coordination",
+        "low-impact",
+        "stationary",
+        "upper-body"
+      ],
+      "activity_level": "low",
+      "recommendation_weight": 0.85
     },
     {
-      "id" : "disc_golf",
-      "name" : "Disc Golf",
-      "synonyms" : [
+      "id": "disc_golf",
+      "name": "Disc Golf",
+      "synonyms": [
+        "Disc Golf",
         "disc golf",
+        "disc_golf",
         "discgolf",
+        "disk code",
+        "disk golf",
         "frisbee golf"
       ],
-      "exec" : "D:\\unityproject\\disc\\MediaPipeTestDemo.exe",
-      "workdir" : "D:\\unityproject\\disc",
-      "args" : [
+      "exec": "D:\\unityproject\\disc\\MediaPipeTestDemo.exe",
+      "workdir": "D:\\unityproject\\disc",
+      "args": [],
+      "env": {},
+      "description": "Disc Golf is a throwing game where players aim flying discs at basket-style targets.",
+      "how_to_play": "Players throw discs toward the target and try to finish each hole in as few throws as possible.",
+      "players_min": 1,
+      "players_max": 1,
+      "tags": [
+        "throwing",
+        "walking",
+        "accuracy",
+        "precision",
+        "balance",
+        "mobility",
+        "endurance",
+        "cardio",
+        "dynamic",
+        "upper-body"
       ],
-      "env" : {
-      }
+      "activity_level": "medium",
+      "recommendation_weight": 0.8
     }
   ]
 }

@@ -1,0 +1,191 @@
+[
+  {
+    "name": "command_launch_cornhole",
+    "category": "command",
+    "text": "open cornhole",
+    "expect_route": "LAUNCH_GAME",
+    "expect_contains": ["Opening Bean Bag Toss"]
+  },
+  {
+    "name": "command_back_home",
+    "category": "command",
+    "text": "back home",
+    "expect_route": "BACK_HOME",
+    "expect_contains": ["Going back home"]
+  },
+  {
+    "name": "casual_hello",
+    "category": "casual",
+    "text": "say hello in one short sentence",
+    "expect_route": "QUERY",
+    "expect_contains": ["hello"],
+    "require_final_text": true
+  },
+  {
+    "name": "casual_game_explain_grounded",
+    "category": "casual",
+    "text": "Explain cornhole in one short sentence.",
+    "expect_route": "QUERY",
+    "allowed_providers": ["game_catalog"],
+    "expect_contains": ["bean bag", "board"],
+    "reject_contains": ["rehabilitation", "training claims", "wooden ball"]
+  },
+  {
+    "name": "casual_game_recommend_grounded",
+    "category": "casual",
+    "user_id": "eval_recommend_user",
+    "steps": [
+      {
+        "name": "store_preference",
+        "text": "Please remember that my favorite game is cornhole. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "recommend_local_game",
+        "text": "Recommend a game for two people in one short sentence.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["game_catalog"],
+        "expect_contains": ["Bean Bag Toss", "single-player"],
+        "reject_contains": ["standard game designed"]
+      }
+    ]
+  },
+  {
+    "name": "recommend_goal_walking",
+    "category": "casual",
+    "user_id": "eval_goal_walk_user",
+    "steps": [
+      {
+        "name": "store_goal",
+        "text": "Please remember that my goal is improve walking endurance. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "recommend_for_goal",
+        "text": "Recommend a local game in one short sentence.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["game_catalog"],
+        "expect_contains": ["Disc Golf"]
+      }
+    ]
+  },
+  {
+    "name": "recommend_low_impact_after_soreness",
+    "category": "casual",
+    "user_id": "eval_low_impact_user",
+    "steps": [
+      {
+        "name": "store_constraint",
+        "text": "My knee is sore and I want something low impact today.",
+        "expect_route": "QUERY",
+        "require_final_text": true
+      },
+      {
+        "name": "recommend_for_constraint",
+        "text": "Recommend a local game in one short sentence.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["game_catalog"],
+        "expect_contains": ["Bean Bag Toss"]
+      }
+    ]
+  },
+  {
+    "name": "recommend_then_open_contextual_game",
+    "category": "command",
+    "user_id": "eval_context_launch_user",
+    "steps": [
+      {
+        "name": "store_goal",
+        "text": "Please remember that my goal is improve walking endurance. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "recommend_game",
+        "text": "recommend a game to me.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["game_catalog"],
+        "expect_contains": ["Disc Golf"]
+      },
+      {
+        "name": "open_context_game",
+        "text": "Open it.",
+        "expect_route": "LAUNCH_GAME",
+        "expect_contains": ["Opening Disc Golf"]
+      }
+    ]
+  },
+  {
+    "name": "barge_in_rephrase",
+    "category": "barge_in",
+    "user_id": "eval_barge_in_user",
+    "steps": [
+      {
+        "name": "seed_long_reply",
+        "text": "Explain cornhole in two short sentences.",
+        "expect_route": "QUERY",
+        "expect_contains": ["cornhole"],
+        "require_final_text": true
+      },
+      {
+        "name": "interrupt_and_rephrase",
+        "text": "Stop. Just say what cornhole is in one short sentence.",
+        "barge_in": true,
+        "interrupted_tts_text": "Cornhole is a lawn game where players toss bean bags toward a raised board.",
+        "interrupted_tts_corr_id": "simulated-interrupt-001",
+        "expect_route": "QUERY",
+        "expect_contains": ["cornhole"],
+        "require_final_text": true
+      }
+    ]
+  },
+  {
+    "name": "multi_turn_memory_name_recall",
+    "category": "memory",
+    "user_id": "eval_memory_name_user",
+    "steps": [
+      {
+        "name": "store_name",
+        "text": "Please remember that my name is Taylor. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "recall_name",
+        "text": "What is my name?",
+        "expect_route": "QUERY",
+        "expect_contains": ["taylor"]
+      },
+      {
+        "name": "episodic_recall",
+        "text": "What did I say about my name?",
+        "expect_route": "QUERY",
+        "expect_contains": ["Taylor"]
+      }
+    ]
+  },
+  {
+    "name": "profile_compare_local",
+    "category": "profile_compare",
+    "profile": "local",
+    "text": "say hello in one short sentence",
+    "expect_route": "QUERY",
+    "expect_contains": ["hello"],
+    "expect_provider": "ollama"
+  },
+  {
+    "name": "profile_compare_cloud",
+    "category": "profile_compare",
+    "profile": "cloud",
+    "text": "say hello in one short sentence",
+    "expect_route": "QUERY",
+    "expect_contains": ["hello"],
+    "expect_provider": "openai"
+  }
+]

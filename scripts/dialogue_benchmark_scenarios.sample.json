@@ -1,0 +1,437 @@
+[
+  {
+    "name": "benchmark_empathetic_01",
+    "category": "benchmark_empathy",
+    "source_dataset": "empathetic_dialogues",
+    "user_id": "benchmark_empathetic_user_01",
+    "source_context": "terrified",
+    "text": "One time while I was camping, there was a giant rattle snake trying to attack us.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.82,
+    "max_token_overlap_to_user": 0.72,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed",
+      "ready to help"
+    ]
+  },
+  {
+    "name": "benchmark_empathetic_02",
+    "category": "benchmark_empathy",
+    "source_dataset": "empathetic_dialogues",
+    "user_id": "benchmark_empathetic_user_02",
+    "source_context": "surprised",
+    "text": "I cant believe I flunked the test I studied all night for.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.82,
+    "max_token_overlap_to_user": 0.72,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed",
+      "ready to help"
+    ]
+  },
+  {
+    "name": "benchmark_empathetic_03",
+    "category": "benchmark_empathy",
+    "source_dataset": "empathetic_dialogues",
+    "user_id": "benchmark_empathetic_user_03",
+    "source_context": "prepared",
+    "text": "Before I left the country I paid my bills and rent ahead for 2 months. Maybe I should have listed on Airbnb instead.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.82,
+    "max_token_overlap_to_user": 0.72,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed",
+      "ready to help"
+    ]
+  },
+  {
+    "name": "benchmark_empathetic_04",
+    "category": "benchmark_empathy",
+    "source_dataset": "empathetic_dialogues",
+    "user_id": "benchmark_empathetic_user_04",
+    "source_context": "grateful",
+    "text": "I feel asleep while driving home last night. I almost hit a pole but my phone rang and I woke up!",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.82,
+    "max_token_overlap_to_user": 0.72,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed",
+      "ready to help"
+    ]
+  },
+  {
+    "name": "benchmark_empathetic_05",
+    "category": "benchmark_empathy",
+    "source_dataset": "empathetic_dialogues",
+    "user_id": "benchmark_empathetic_user_05",
+    "source_context": "lonely",
+    "text": "I was feeling pretty much alone when I didn't see my boyfriend for two days.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.82,
+    "max_token_overlap_to_user": 0.72,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed",
+      "ready to help"
+    ]
+  },
+  {
+    "name": "benchmark_empathetic_06",
+    "category": "benchmark_empathy",
+    "source_dataset": "empathetic_dialogues",
+    "user_id": "benchmark_empathetic_user_06",
+    "source_context": "sentimental",
+    "text": "When I had to clear out my old bedroom when I left home, I really found it hard to throw away a lot of the stuff in there!",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.82,
+    "max_token_overlap_to_user": 0.72,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed",
+      "ready to help"
+    ]
+  },
+  {
+    "name": "benchmark_persona_memory_01",
+    "category": "benchmark_persona_memory",
+    "source_dataset": "bavard/personachat_truecased",
+    "user_id": "benchmark_persona_memory_user_01",
+    "steps": [
+      {
+        "name": "share_fact",
+        "text": "I like to go hunting.",
+        "expect_route": "QUERY",
+        "allowed_providers": [
+          "memory_write"
+        ],
+        "expect_contains": [
+          "got it"
+        ],
+        "reject_contains": [
+          "what would you like to explore next"
+        ]
+      },
+      {
+        "name": "recall_fact",
+        "text": "What do I like?",
+        "expect_route": "QUERY",
+        "allowed_providers": [
+          "memory"
+        ],
+        "expect_contains": [
+          "to go hunting"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "benchmark_persona_memory_02",
+    "category": "benchmark_persona_memory",
+    "source_dataset": "bavard/personachat_truecased",
+    "user_id": "benchmark_persona_memory_user_02",
+    "steps": [
+      {
+        "name": "share_fact",
+        "text": "I like to shoot a bow.",
+        "expect_route": "QUERY",
+        "allowed_providers": [
+          "memory_write"
+        ],
+        "expect_contains": [
+          "got it"
+        ],
+        "reject_contains": [
+          "what would you like to explore next"
+        ]
+      },
+      {
+        "name": "recall_fact",
+        "text": "What do I like?",
+        "expect_route": "QUERY",
+        "allowed_providers": [
+          "memory"
+        ],
+        "expect_contains": [
+          "to shoot a bow"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "benchmark_persona_memory_03",
+    "category": "benchmark_persona_memory",
+    "source_dataset": "bavard/personachat_truecased",
+    "user_id": "benchmark_persona_memory_user_03",
+    "steps": [
+      {
+        "name": "share_fact",
+        "text": "I like to remodel homes.",
+        "expect_route": "QUERY",
+        "allowed_providers": [
+          "memory_write"
+        ],
+        "expect_contains": [
+          "got it"
+        ],
+        "reject_contains": [
+          "what would you like to explore next"
+        ]
+      },
+      {
+        "name": "recall_fact",
+        "text": "What do I like?",
+        "expect_route": "QUERY",
+        "allowed_providers": [
+          "memory"
+        ],
+        "expect_contains": [
+          "to remodel homes"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "benchmark_smalltalk_01",
+    "category": "benchmark_smalltalk",
+    "source_dataset": "blended_skill_talk",
+    "user_id": "benchmark_smalltalk_user_01",
+    "source_context": "empathetic_dialogues",
+    "text": "I hate being in debt, just brings on more stress than saving.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.8,
+    "max_token_overlap_to_user": 0.7,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed"
+    ]
+  },
+  {
+    "name": "benchmark_smalltalk_02",
+    "category": "benchmark_smalltalk",
+    "source_dataset": "blended_skill_talk",
+    "user_id": "benchmark_smalltalk_user_02",
+    "source_context": "convai2",
+    "text": "Hey! its good to know you. Have you ever been to Paris before?",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.8,
+    "max_token_overlap_to_user": 0.7,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed"
+    ]
+  },
+  {
+    "name": "benchmark_smalltalk_03",
+    "category": "benchmark_smalltalk",
+    "source_dataset": "blended_skill_talk",
+    "user_id": "benchmark_smalltalk_user_03",
+    "source_context": "wizard_of_wikipedia",
+    "text": "That is cool. I like to drink coffee when I wake up. Do you exercise?",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.8,
+    "max_token_overlap_to_user": 0.7,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed"
+    ]
+  },
+  {
+    "name": "benchmark_smalltalk_04",
+    "category": "benchmark_smalltalk",
+    "source_dataset": "blended_skill_talk",
+    "user_id": "benchmark_smalltalk_user_04",
+    "source_context": "empathetic_dialogues",
+    "text": "It is! After trying for so long, I finally feel happy.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.8,
+    "max_token_overlap_to_user": 0.7,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed"
+    ]
+  },
+  {
+    "name": "benchmark_smalltalk_05",
+    "category": "benchmark_smalltalk",
+    "source_dataset": "blended_skill_talk",
+    "user_id": "benchmark_smalltalk_user_05",
+    "source_context": "convai2",
+    "text": "Awesome! My favorite subject in school was science!",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.8,
+    "max_token_overlap_to_user": 0.7,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed"
+    ]
+  },
+  {
+    "name": "benchmark_smalltalk_06",
+    "category": "benchmark_smalltalk",
+    "source_dataset": "blended_skill_talk",
+    "user_id": "benchmark_smalltalk_user_06",
+    "source_context": "empathetic_dialogues",
+    "text": "Yes, it was a little tiring. I love being able to spoil her, though!",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 3,
+    "max_chars": 220,
+    "max_similarity_to_user": 0.8,
+    "max_token_overlap_to_user": 0.7,
+    "reject_contains": [
+      "what would you like to explore next",
+      "how would you like to proceed"
+    ]
+  },
+  {
+    "name": "benchmark_oos_01",
+    "category": "benchmark_oos",
+    "source_dataset": "clinc_oos",
+    "user_id": "benchmark_oos_user_01",
+    "text": "is android better than iphone.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 2,
+    "max_chars": 180,
+    "reject_contains": [
+      "Opening Bean Bag Toss",
+      "Opening Disc Golf",
+      "Going back home"
+    ]
+  },
+  {
+    "name": "benchmark_oos_02",
+    "category": "benchmark_oos",
+    "source_dataset": "clinc_oos",
+    "user_id": "benchmark_oos_user_02",
+    "text": "show me recent activity in my backyard.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 2,
+    "max_chars": 180,
+    "reject_contains": [
+      "Opening Bean Bag Toss",
+      "Opening Disc Golf",
+      "Going back home"
+    ]
+  },
+  {
+    "name": "benchmark_oos_03",
+    "category": "benchmark_oos",
+    "source_dataset": "clinc_oos",
+    "user_id": "benchmark_oos_user_03",
+    "text": "where do eggs come from.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 2,
+    "max_chars": 180,
+    "reject_contains": [
+      "Opening Bean Bag Toss",
+      "Opening Disc Golf",
+      "Going back home"
+    ]
+  },
+  {
+    "name": "benchmark_oos_04",
+    "category": "benchmark_oos",
+    "source_dataset": "clinc_oos",
+    "user_id": "benchmark_oos_user_04",
+    "text": "what is happening with brexit right nowu.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 2,
+    "max_chars": 180,
+    "reject_contains": [
+      "Opening Bean Bag Toss",
+      "Opening Disc Golf",
+      "Going back home"
+    ]
+  },
+  {
+    "name": "benchmark_oos_05",
+    "category": "benchmark_oos",
+    "source_dataset": "clinc_oos",
+    "user_id": "benchmark_oos_user_05",
+    "text": "how do i compute the median of a set of numbers.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 2,
+    "max_chars": 180,
+    "reject_contains": [
+      "Opening Bean Bag Toss",
+      "Opening Disc Golf",
+      "Going back home"
+    ]
+  },
+  {
+    "name": "benchmark_oos_06",
+    "category": "benchmark_oos",
+    "source_dataset": "clinc_oos",
+    "user_id": "benchmark_oos_user_06",
+    "text": "do ducks sleep.",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 2,
+    "max_chars": 180,
+    "reject_contains": [
+      "Opening Bean Bag Toss",
+      "Opening Disc Golf",
+      "Going back home"
+    ]
+  },
+  {
+    "name": "benchmark_guard_weather_01",
+    "category": "benchmark_general_guard",
+    "source_dataset": "local_regression",
+    "user_id": "benchmark_general_guard_user_01",
+    "text": "How's the weather today?",
+    "expect_route": "QUERY",
+    "require_final_text": true,
+    "max_sentences": 2,
+    "max_chars": 120,
+    "max_similarity_to_user": 0.65,
+    "max_token_overlap_to_user": 0.6,
+    "reject_contains": [
+      "how's the weather today",
+      "hows the weather today",
+      "weather today?"
+    ]
+  }
+]

@@ -30,7 +30,7 @@ th{text-align:left;font-size:.78rem;opacity:.85;text-transform:uppercase;letter-
 <p><a href="/index.html">Back to User Panel</a></p>
 <div class="card">
 <small>
-Edit the local game manifest here: game name, launch keywords, executable path, and workdir.
+Edit the local game manifest here: game name, launch keywords, executable path, workdir, and grounded game-card fields used for explanation and recommendation.
 Use Browse to pick files on the host machine; paths are normalized to absolute paths.
 </small>
 <div id="manifestPath"></div>
@@ -38,9 +38,11 @@ Use Browse to pick files on the host machine; paths are normalized to absolute p
 <button onclick="addRow()">Add Game</button>
 <button class="secondary" onclick="reloadGames()">Reload</button>
 <button onclick="saveGames()">Save</button>
+<button class="secondary" onclick="exportQmd()">Export QMD</button>
+<button class="secondary" onclick="importQmd()">Import QMD</button>
 </div>
 <table>
-<thead><tr><th>ID</th><th>Game Name</th><th>Keywords</th><th>Executable Path</th><th>Workdir</th><th>Action</th></tr></thead>
+<thead><tr><th>ID</th><th>Game Name</th><th>Keywords</th><th>Description</th><th>How To Play</th><th>Players</th><th>Tags</th><th>Level</th><th>Weight</th><th>Executable Path</th><th>Workdir</th><th>Action</th></tr></thead>
 <tbody id="rows"></tbody>
 </table>
 <div id="status">Ready.</div>
@@ -56,20 +58,38 @@ function splitKeywords(text){
 }
 function render(){
   if(!rowsEl) return;
-  if(!gameRows.length){ rowsEl.innerHTML = '<tr><td colspan="6">No games configured.</td></tr>'; return; }
+  if(!gameRows.length){ rowsEl.innerHTML = '<tr><td colspan="12">No games configured.</td></tr>'; return; }
   rowsEl.innerHTML = gameRows.map((g,i)=>`
     <tr>
       <td data-label="ID"><input value="${esc(g.id)}" oninput="updateField(${i},'id',this.value)" placeholder="disc_golf"></td>
       <td data-label="Game Name"><input value="${esc(g.name)}" oninput="updateField(${i},'name',this.value)" placeholder="Disc Golf"></td>
       <td data-label="Keywords"><input value="${esc(g.keywords_text)}" oninput="updateField(${i},'keywords_text',this.value)" placeholder="disc golf,discgolf,frisbee golf"></td>
+      <td data-label="Description"><input value="${esc(g.description)}" oninput="updateField(${i},'description',this.value)" placeholder="Short grounded description"></td>
+      <td data-label="How To Play"><input value="${esc(g.how_to_play)}" oninput="updateField(${i},'how_to_play',this.value)" placeholder="How the game is played"></td>
+      <td data-label="Players"><input value="${esc(g.players_text)}" oninput="updateField(${i},'players_text',this.value)" placeholder="1-4"></td>
+      <td data-label="Tags"><input value="${esc(g.tags_text)}" oninput="updateField(${i},'tags_text',this.value)" placeholder="casual,throwing"></td>
+      <td data-label="Level"><input value="${esc(g.activity_level)}" oninput="updateField(${i},'activity_level',this.value)" placeholder="low"></td>
+      <td data-label="Weight"><input value="${esc(g.recommendation_weight)}" oninput="updateField(${i},'recommendation_weight',this.value)" placeholder="0.85"></td>
       <td data-label="Executable Path"><div class="pathRow"><input value="${esc(g.exec)}" oninput="updateField(${i},'exec',this.value)" placeholder="D:\\Games\\DiscGolf\\DiscGolf.exe"><button type="button" class="tinyBtn" onclick="browseExec(${i})">Browse</button></div></td>
       <td data-label="Workdir"><input value="${esc(g.workdir)}" oninput="updateField(${i},'workdir',this.value)" placeholder="D:\\Games\\DiscGolf"></td>
       <td data-label="Action"><button class="warn" onclick="removeRow(${i})">Delete</button></td>
     </tr>`).join('');
 }
 function updateField(i,key,val){ if(!gameRows[i]) return; gameRows[i][key]=val; }
-function addRow(){ gameRows.push({id:'',name:'',keywords_text:'',exec:'',workdir:''}); render(); }
+function addRow(){ gameRows.push({id:'',name:'',keywords_text:'',description:'',how_to_play:'',players_text:'1-4',tags_text:'',activity_level:'',recommendation_weight:'0.5',exec:'',workdir:''}); render(); }
 function removeRow(i){ gameRows.splice(i,1); render(); }
+function parsePlayers(text){
+  const value = String(text || '').trim();
+  const match = value.match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
+  if(match){
+    return {min: Math.max(1, Number(match[1]) || 1), max: Math.max(1, Number(match[2]) || 4)};
+  }
+  const single = Number(value);
+  if(Number.isFinite(single) && single > 0){
+    return {min: Math.max(1, Math.trunc(single)), max: Math.max(1, Math.trunc(single))};
+  }
+  return {min:1,max:4};
+}
 async function browseExec(i){
   if(!gameRows[i]) return;
   statusEl.textContent = 'Opening file picker on host...';
@@ -110,7 +130,13 @@ async function reloadGames(){
       name: String(g.name||''),
       exec: String(g.exec||''),
       workdir: String(g.workdir||''),
-      keywords_text: Array.isArray(g.keywords) ? g.keywords.join(', ') : ''
+      keywords_text: Array.isArray(g.keywords) ? g.keywords.join(', ') : '',
+      description: String(g.description||''),
+      how_to_play: String(g.how_to_play||''),
+      players_text: String((g.players_min||1)) + '-' + String((g.players_max||4)),
+      tags_text: Array.isArray(g.tags) ? g.tags.join(', ') : '',
+      activity_level: String(g.activity_level||''),
+      recommendation_weight: String(g.recommendation_weight ?? '0.5')
     }));
     if(manifestPathEl){ manifestPathEl.textContent = 'Manifest: ' + String(data.path||''); }
     render();
@@ -128,6 +154,13 @@ async function saveGames(){
       id: String(g.id||'').trim(),
       name: String(g.name||'').trim(),
       keywords: splitKeywords(g.keywords_text),
+      description: String(g.description||'').trim(),
+      how_to_play: String(g.how_to_play||'').trim(),
+      players_min: parsePlayers(g.players_text).min,
+      players_max: parsePlayers(g.players_text).max,
+      tags: splitKeywords(g.tags_text),
+      activity_level: String(g.activity_level||'').trim(),
+      recommendation_weight: Number(g.recommendation_weight || 0.5) || 0.5,
       exec: String(g.exec||'').trim(),
       workdir: String(g.workdir||'').trim()
     }))
@@ -142,6 +175,37 @@ async function saveGames(){
     const data = await resp.json();
     if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }
     statusEl.textContent = 'Saved. ' + (data.message || 'Restart intent_service and game_launcher to apply immediately.');
+    await reloadGames();
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+async function exportQmd(){
+  statusEl.textContent = 'Exporting QMD...';
+  try {
+    const resp = await fetch('/api/qmd', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action:'export'})
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }
+    statusEl.textContent = data.message || 'QMD exported.';
+  } catch(err){
+    statusEl.textContent = 'error: ' + err;
+  }
+}
+async function importQmd(){
+  statusEl.textContent = 'Importing QMD...';
+  try {
+    const resp = await fetch('/api/qmd', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action:'import'})
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }
+    statusEl.textContent = data.message || 'QMD imported.';
     await reloadGames();
   } catch(err){
     statusEl.textContent = 'error: ' + err;

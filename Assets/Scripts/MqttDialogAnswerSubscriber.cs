@@ -125,6 +125,15 @@ namespace RobotVoice
 
                 PostToMainThread(() =>
                 {
+                    if (launcher != null && !launcher.ShouldAcceptDialogAnswer(corrId))
+                    {
+                        if (verboseLogging)
+                        {
+                            Debug.Log($"[DialogAnswerSubscriber] skip stale answer corr_id={corrId}");
+                        }
+                        return;
+                    }
+
                     ConversationLog.AddEntry(ConversationRole.Coach, text, "dialog_service");
                     if (playAnswerInUnity && launcher != null)
                     {

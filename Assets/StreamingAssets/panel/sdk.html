@@ -109,7 +109,7 @@ const sdkMap = {
   'get_llm_prompt()': { endpoint:'/api/llm/prompt', method:'GET', payload:{} },
   'set_llm_prompt(prompt)': { endpoint:'/api/llm/prompt', payload:{ prompt:'You are a concise coach. Keep replies under 2 sentences.' } },
   'reset_llm_prompt()': { endpoint:'/api/llm/prompt', payload:{ reset:true } },
-  'describe_camera(prompt,model)': { endpoint:'/api/vision/describe', payload:{ prompt:'Describe what you see in the current camera frame.', model:'gemma3:4b' } },
+  'describe_camera(prompt,model)': { endpoint:'/api/vision/describe', payload:{ prompt:'Describe what you see in the current camera frame.', model:'qwen3.5:0.8b' } },
   'launch_game(name)': { endpoint:'/api/game', payload:{ action:'launch', name:'cornhole' } },
   'exit_game()': { endpoint:'/api/game', payload:{ action:'exit' } },
   'face_preset(mode,seconds)': { endpoint:'/api/face', payload:{ mode:'happy', seconds:3 } },

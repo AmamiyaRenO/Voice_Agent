@@ -1,4 +1,4 @@
-{
+﻿{
   "python": {
     "asr": "",
     "tts": ""
@@ -34,5 +34,29 @@
       "close game"
     ]
   },
-  "env": {}
+  "env": {
+    "VOICE_PIPELINE_MODE": "direct_unified",
+    "VOICE_CONVERSATION_PROFILE": "local",
+    "VOICE_LOCAL_ASR_MODE": "moonshine-medium",
+    "VOICE_CLOUD_ASR_MODE": "api",
+    "VOICE_CLOUD_RESPONSE_PROVIDER": "openai",
+    "OPENAI_RESPONSE_MODEL": "gpt-4o-mini",
+    "OLLAMA_MODEL": "qwen3.5:0.8b",
+    "OLLAMA_THINK": "0",
+    "OLLAMA_TEMPERATURE": "0.7",
+    "OLLAMA_TOP_P": "0.8",
+    "OLLAMA_TOP_K": "20",
+    "DIALOG_ENABLE_CONTEXT_MEMORY": "1",
+    "DIALOG_ENABLE_POLICY": "1",
+    "DIALOG_HISTORY_TURNS": "8",
+    "DIALOG_SUMMARY_MAX_CHARS": "420",
+    "DIALOG_CONTEXT_MAX_CHARS": "900",
+    "DIALOG_MEMORY_QUERY_RULE": "1",
+    "DIALOG_MEMORY_QUERY_SEMANTIC": "1",
+    "DIALOG_MEMORY_QUERY_THRESHOLD": "0.58",
+    "DIALOG_ENABLE_VISION_QUERY": "1",
+    "DIALOG_VISION_DESCRIBE_URL": "http://127.0.0.1:8787/api/vision/describe",
+    "DIALOG_VISION_QUERY_PROMPT": "Describe what you see in this camera frame in 2-4 concise sentences.",
+    "DIALOG_VISION_TIMEOUT_SECONDS": "12"
+  }
 }

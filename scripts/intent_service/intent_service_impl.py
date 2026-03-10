@@ -14,6 +14,18 @@ except Exception:
     from intent_config import Config
     from intent_routing import IntentRouterEngine, ManifestAliasResolver, new_corr_id, normalize
 
+try:
+    from dialog_service.dialog_config import load_config as load_dialog_config
+    from dialog_service.user_memory import UserMemoryStore, speaker_identity_key
+except Exception:
+    try:
+        from scripts.dialog_service.dialog_config import load_config as load_dialog_config
+        from scripts.dialog_service.user_memory import UserMemoryStore, speaker_identity_key
+    except Exception:
+        load_dialog_config = None
+        UserMemoryStore = None
+        speaker_identity_key = None
+
 
 def extract_identity_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     result: Dict[str, Any] = {}
@@ -54,6 +66,25 @@ class IntentService:
         self._stopping = False
         self._resolver = ManifestAliasResolver(cfg.manifest_path)
         self._router = IntentRouterEngine(cfg, self._resolver)
+        self._user_memory = self._init_user_memory()
+
+    def _init_user_memory(self):
+        if load_dialog_config is None or UserMemoryStore is None:
+            return None
+        try:
+            dialog_cfg = load_dialog_config()
+            if not getattr(dialog_cfg, "enable_user_memory", True):
+                return None
+            return UserMemoryStore(
+                path=str(dialog_cfg.user_memory_path),
+                max_notes=int(dialog_cfg.user_memory_max_notes),
+                prompt_max_chars=int(dialog_cfg.user_memory_prompt_max_chars),
+                embedder=None,
+                retrieve_top_k=max(1, int(getattr(dialog_cfg, "user_memory_retrieve_top_k", 3))),
+            )
+        except Exception as exc:
+            print(f"[intent] user memory unavailable for contextual routing: {exc}")
+            return None
 
     def start(self) -> None:
         print(f"[intent] connecting to mqtt {self.cfg.host}:{self.cfg.port}")
@@ -107,7 +138,17 @@ class IntentService:
 
         corr_id = str(payload.get("corr_id") or new_corr_id())
         identity_fields = extract_identity_fields(payload)
-        decision = self._router.route(text, corr_id)
+        context_game_name = ""
+        if self._user_memory is not None:
+            try:
+                resolved_user_id = str(payload.get("user_id") or "").strip()
+                if not resolved_user_id and speaker_identity_key is not None:
+                    resolved_user_id = self._user_memory.resolve_user(speaker_identity_key(payload))
+                if resolved_user_id:
+                    context_game_name = self._user_memory.get_game_reference(resolved_user_id)
+            except Exception as exc:
+                print(f"[intent] contextual game resolve failed: {exc}")
+        decision = self._router.route(text, corr_id, context_game_name=context_game_name)
         if decision.log_line:
             print(decision.log_line)
         if decision.topic and decision.payload is not None:

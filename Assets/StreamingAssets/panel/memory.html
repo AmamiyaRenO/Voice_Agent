@@ -42,6 +42,7 @@ textarea{min-height:88px;font-family:'Segoe UI',sans-serif;font-size:.9rem;line-
 .kv{display:grid;grid-template-columns:150px 1fr;gap:.45rem .7rem;margin:.65rem 0 .45rem 0;font-size:.85rem;}
 .mono{font-family:Consolas,monospace;font-size:.82rem;white-space:pre-wrap;}
 .status{margin-top:.6rem;font-size:.9rem;opacity:.9;min-height:1.3rem;}
+.pill{display:inline-block;padding:.15rem .45rem;border-radius:999px;background:rgba(59,130,246,.18);font-size:.75rem;margin-right:.3rem;margin-bottom:.3rem;}
 @media (max-width:980px){
   .layout{grid-template-columns:1fr;}
 }
@@ -52,7 +53,12 @@ textarea{min-height:88px;font-family:'Segoe UI',sans-serif;font-size:.9rem;line-
 <p><a href="/index.html">Back to User Panel</a></p>
 <div class="card">
   <small>Friendly editor for long-term memory. Enter one item per line for likes, dislikes, goals, and notes.</small>
+  <div class="toolbar" style="margin-top:.55rem;">
+    <button class="secondary" onclick="exportQmd()">Export QMD</button>
+    <button class="secondary" onclick="importQmd()">Import QMD</button>
+  </div>
   <div id="path" class="mono" style="margin-top:.45rem;opacity:.82;"></div>
+  <div id="qmdPath" class="mono" style="margin-top:.35rem;opacity:.82;"></div>
 </div>
 <div class="layout">
   <div class="card">
@@ -83,6 +89,8 @@ textarea{min-height:88px;font-family:'Segoe UI',sans-serif;font-size:.9rem;line-
       <div>Utterances</div><div id="utteranceCount">0</div>
       <div>Last Seen</div><div id="lastSeen">-</div>
       <div>Embedded Memories</div><div id="memoryItemsCount">0</div>
+      <div>Structured Facts</div><div id="factsCount">0</div>
+      <div>Episodes</div><div id="episodesCount">0</div>
       <div>Voice Samples</div><div id="sampleCount">0</div>
     </div>
 
@@ -95,6 +103,22 @@ textarea{min-height:88px;font-family:'Segoe UI',sans-serif;font-size:.9rem;line-
       <div class="field">
         <label>Preferred Name</label>
         <input id="nameInput" placeholder="How the assistant should call this user">
+      </div>
+      <div class="field">
+        <label>Origin</label>
+        <input id="originInput" placeholder="Toronto">
+      </div>
+      <div class="field">
+        <label>Favorite Game</label>
+        <input id="favoriteGameInput" placeholder="Bean Bag Toss">
+      </div>
+      <div class="field">
+        <label>Preferred Training Day</label>
+        <input id="preferredDayInput" placeholder="Monday">
+      </div>
+      <div class="field">
+        <label>Preferred Training Time</label>
+        <input id="preferredTimeInput" placeholder="evening">
       </div>
     </div>
 
@@ -128,6 +152,16 @@ textarea{min-height:88px;font-family:'Segoe UI',sans-serif;font-size:.9rem;line-
       </div>
     </div>
 
+    <div class="section">
+      <h2>Structured Facts</h2>
+      <div id="factsView" class="mono">-</div>
+    </div>
+
+    <div class="section">
+      <h2>Recent Episodes</h2>
+      <div id="episodesView" class="mono">-</div>
+    </div>
+
     <div id="status" class="status">Ready.</div>
   </div>
 </div>
@@ -143,6 +177,10 @@ const saveBtnEl = document.getElementById('saveBtn');
 const deleteBtnEl = document.getElementById('deleteBtn');
 const displayNameInputEl = document.getElementById('displayNameInput');
 const nameInputEl = document.getElementById('nameInput');
+const originInputEl = document.getElementById('originInput');
+const favoriteGameInputEl = document.getElementById('favoriteGameInput');
+const preferredDayInputEl = document.getElementById('preferredDayInput');
+const preferredTimeInputEl = document.getElementById('preferredTimeInput');
 const likesInputEl = document.getElementById('likesInput');
 const dislikesInputEl = document.getElementById('dislikesInput');
 const goalsInputEl = document.getElementById('goalsInput');
@@ -151,7 +189,12 @@ const clearEmbeddingOnSaveInputEl = document.getElementById('clearEmbeddingOnSav
 const utteranceCountEl = document.getElementById('utteranceCount');
 const lastSeenEl = document.getElementById('lastSeen');
 const memoryItemsCountEl = document.getElementById('memoryItemsCount');
+const factsCountEl = document.getElementById('factsCount');
+const episodesCountEl = document.getElementById('episodesCount');
 const sampleCountEl = document.getElementById('sampleCount');
+const factsViewEl = document.getElementById('factsView');
+const episodesViewEl = document.getElementById('episodesView');
+const qmdPathEl = document.getElementById('qmdPath');
 
 let memoryState = null;
 let selectedUserId = '';
@@ -194,6 +237,34 @@ function parseList(text, maxItems, maxChars){
 function toTextList(node){
   if(!Array.isArray(node)){ return ''; }
   return node.map(item => String(item || '').trim()).filter(Boolean).join('\n');
+}
+
+function activeFacts(profile){
+  if(!profile || !Array.isArray(profile.facts)){ return []; }
+  return profile.facts.filter(item => item && String(item.status || 'active').toLowerCase() === 'active');
+}
+
+function renderFacts(profile){
+  const rows = activeFacts(profile).map(item => {
+    const field = String(item.field || '').trim();
+    const value = String(item.value || '').trim();
+    const confidence = Number(item.confidence || 0);
+    const sourceKind = String(item.source_kind || '').trim();
+    if(!field || !value){ return ''; }
+    return field + ': ' + value + ' [' + confidence.toFixed(2) + (sourceKind ? (', ' + sourceKind) : '') + ']';
+  }).filter(Boolean);
+  return rows.length ? rows.join('\n') : 'No active structured facts.';
+}
+
+function renderEpisodes(profile){
+  if(!profile || !Array.isArray(profile.episodes) || !profile.episodes.length){
+    return 'No recent episodes.';
+  }
+  return profile.episodes.slice(-10).map(item => {
+    const role = String(item.role || 'user').trim();
+    const text = String(item.text || '').trim();
+    return text ? (role + ': ' + text) : '';
+  }).filter(Boolean).join('\n');
 }
 
 function toInt(value, fallback){
@@ -271,9 +342,15 @@ function renderSelection(data){
   selectedProfile = hasExistingProfile ? profileFromApi : {
     display_name: selectedUserId,
     name: '',
+    origin: '',
+    favorite_game: '',
+    preferred_training_day: '',
+    preferred_training_time: '',
     likes: [],
     dislikes: [],
     goals: [],
+    facts: [],
+    episodes: [],
     recent_notes: [],
     memory_items: [],
     utterance_count: 0
@@ -289,6 +366,18 @@ function renderSelection(data){
   }
   if(nameInputEl){
     nameInputEl.value = String(selectedProfile.name || '').trim();
+  }
+  if(originInputEl){
+    originInputEl.value = String(selectedProfile.origin || '').trim();
+  }
+  if(favoriteGameInputEl){
+    favoriteGameInputEl.value = String(selectedProfile.favorite_game || '').trim();
+  }
+  if(preferredDayInputEl){
+    preferredDayInputEl.value = String(selectedProfile.preferred_training_day || '').trim();
+  }
+  if(preferredTimeInputEl){
+    preferredTimeInputEl.value = String(selectedProfile.preferred_training_time || '').trim();
   }
   if(likesInputEl){
     likesInputEl.value = toTextList(selectedProfile.likes);
@@ -318,8 +407,26 @@ function renderSelection(data){
       : (Array.isArray(selectedProfile.memory_items) ? selectedProfile.memory_items.length : 0);
     memoryItemsCountEl.textContent = String(count);
   }
+  if(factsCountEl){
+    const count = summary && summary.facts_count != null
+      ? toInt(summary.facts_count, 0)
+      : activeFacts(selectedProfile).length;
+    factsCountEl.textContent = String(count);
+  }
+  if(episodesCountEl){
+    const count = summary && summary.episodes_count != null
+      ? toInt(summary.episodes_count, 0)
+      : (Array.isArray(selectedProfile.episodes) ? selectedProfile.episodes.length : 0);
+    episodesCountEl.textContent = String(count);
+  }
   if(sampleCountEl){
     sampleCountEl.textContent = String(toInt(summary && summary.sample_count, 0));
+  }
+  if(factsViewEl){
+    factsViewEl.textContent = renderFacts(selectedProfile);
+  }
+  if(episodesViewEl){
+    episodesViewEl.textContent = renderEpisodes(selectedProfile);
   }
 
   setButtonsEnabled(!!selectedUserId);
@@ -368,12 +475,18 @@ function buildProfilePayload(){
   const profile = {};
   profile.display_name = normalizeId(displayNameInputEl && displayNameInputEl.value) || selectedUserId;
   profile.name = normalizeId(nameInputEl && nameInputEl.value);
+  profile.origin = normalizeId(originInputEl && originInputEl.value);
+  profile.favorite_game = normalizeId(favoriteGameInputEl && favoriteGameInputEl.value);
+  profile.preferred_training_day = normalizeId(preferredDayInputEl && preferredDayInputEl.value);
+  profile.preferred_training_time = normalizeId(preferredTimeInputEl && preferredTimeInputEl.value);
   profile.likes = parseList(likesInputEl && likesInputEl.value, 24, 80);
   profile.dislikes = parseList(dislikesInputEl && dislikesInputEl.value, 24, 80);
   profile.goals = parseList(goalsInputEl && goalsInputEl.value, 24, 120);
   profile.recent_notes = parseList(recentNotesInputEl && recentNotesInputEl.value, 64, 180);
   const clearEmbeddings = !!(clearEmbeddingOnSaveInputEl && clearEmbeddingOnSaveInputEl.checked);
   profile.memory_items = clearEmbeddings ? [] : (Array.isArray(base.memory_items) ? base.memory_items : []);
+  profile.facts = Array.isArray(base.facts) ? base.facts : [];
+  profile.episodes = Array.isArray(base.episodes) ? base.episodes : [];
 
   const firstSeen = toFinite(base.first_seen_ts);
   const lastSeen = toFinite(base.last_seen_ts);
@@ -381,6 +494,58 @@ function buildProfilePayload(){
   if(lastSeen !== null){ profile.last_seen_ts = lastSeen; }
   profile.utterance_count = toInt(base.utterance_count, 0);
   return profile;
+}
+
+async function refreshQmdStatus(){
+  try{
+    const resp = await fetch('/api/qmd?_ts=' + Date.now(), { cache: 'no-store' });
+    const data = await resp.json();
+    if(resp.ok && data.status === 'ok' && qmdPathEl){
+      qmdPathEl.textContent = 'QMD: ' + String(data.path || '');
+    }
+  }catch(err){
+  }
+}
+
+async function exportQmd(){
+  setStatus('Exporting QMD...');
+  try{
+    const resp = await fetch('/api/qmd', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      cache: 'no-store',
+      body: JSON.stringify({action:'export'})
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){
+      throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+    }
+    await refreshQmdStatus();
+    setStatus(data.message || 'QMD exported.');
+  }catch(err){
+    setStatus('Error: ' + err);
+  }
+}
+
+async function importQmd(){
+  setStatus('Importing QMD...');
+  try{
+    const resp = await fetch('/api/qmd', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      cache: 'no-store',
+      body: JSON.stringify({action:'import'})
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){
+      throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+    }
+    await refreshQmdStatus();
+    await reloadMemory();
+    setStatus(data.message || 'QMD imported.');
+  }catch(err){
+    setStatus('Error: ' + err);
+  }
 }
 
 async function saveSelectedUser(){
@@ -449,6 +614,7 @@ async function deleteSelectedUser(){
   }
 }
 
+refreshQmdStatus();
 reloadMemory();
 </script>
 </body>

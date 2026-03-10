@@ -24,7 +24,7 @@ namespace RobotVoice.EditorTools
         private const string QwenSpeakUrl = "http://127.0.0.1:5006/speak";
         private const string OllamaBaseUrl = "http://127.0.0.1:11434";
         private const string TelemetryDashboardUrl = "http://127.0.0.1:8101/dashboard";
-        private const string DefaultVisionModel = "gemma3:4b";
+        private const string DefaultVisionModel = "qwen3.5:0.8b";
         private const string UnityVoiceSource = "unity_voice";
 
         [MenuItem("Tools/Voice Agent/Migrate Scene Defaults")]

@@ -32,7 +32,7 @@ button.secondary{background:#334155;}
 <div class="field"><label>Piper Status</label><input id="piperStatus" readonly></div>
 <div class="field"><label>Piper Model Path</label><input id="piperModelPath" readonly></div>
 <div class="field"><label>Ollama Status</label><input id="ollamaStatus" readonly></div>
-<div class="field"><label>Ollama Model</label><input id="ollamaModel" placeholder="gemma3:4b"></div>
+<div class="field"><label>Ollama Model</label><input id="ollamaModel" placeholder="qwen3.5:0.8b"></div>
 <div class="field"><label>Model Downloaded</label><input id="ollamaModelReady" readonly></div>
 <div class="field"><label>Ollama Hint</label><input id="ollamaHint" readonly></div>
 </div>
@@ -121,7 +121,7 @@ async function refreshPrereq(){
     const data = await fetchJson('/api/runtime/prereq');
     setText(piperStatusEl, data.piper_ready ? 'ready' : 'missing executable/model');
     setText(piperModelPathEl, data.piper_model_path || '');
-    if(!getText(ollamaModelEl)){ setText(ollamaModelEl, data.ollama_model || 'gemma3:4b'); }
+    if(!getText(ollamaModelEl)){ setText(ollamaModelEl, data.ollama_model || 'qwen3.5:0.8b'); }
     const ollamaState = data.ollama_running ? 'running' : (data.ollama_installed ? 'installed (not running)' : 'not installed');
     setText(ollamaStatusEl, ollamaState);
     setText(ollamaModelReadyEl, data.ollama_model_available ? 'yes' : 'no');
@@ -159,7 +159,7 @@ async function installOllama(){
   }
 }
 async function pullOllamaModel(){
-  const model = getText(ollamaModelEl) || 'gemma3:4b';
+  const model = getText(ollamaModelEl) || 'qwen3.5:0.8b';
   statusEl.textContent = 'Starting model pull: ' + model + ' ...';
   try {
     const data = await fetchJson('/api/runtime/ollama', {
@@ -187,7 +187,7 @@ async function reloadAll(){
     setText(openaiModelEl, runtimeData.openai_transcribe_model);
     setText(openaiBaseUrlEl, runtimeData.openai_base_url);
     setText(openaiPromptEl, runtimeData.openai_transcribe_prompt);
-    setText(ollamaModelEl, runtimeData.ollama_model || prereqData.ollama_model || 'gemma3:4b');
+    setText(ollamaModelEl, runtimeData.ollama_model || prereqData.ollama_model || 'qwen3.5:0.8b');
     setText(launchTriggersEl, runtimeData.launch_triggers);
     setText(exitKeywordsEl, runtimeData.exit_keywords);
     if(llmIntentClassifierEl){ llmIntentClassifierEl.checked = !!runtimeData.use_llm_intent_classifier; }

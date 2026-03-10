@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import logging
 import os
 import subprocess
@@ -60,6 +61,33 @@ def _infer_config_for_model(model_path: str) -> str | None:
     return None
 
 
+def _resolve_synthesis_settings(
+    model_override: str | None = None,
+    config_override: str | None = None,
+    speaker_override: str | None = None,
+) -> tuple[str, str, str | None, str | None]:
+    exe = _env("PIPER_EXECUTABLE", "piper")
+    model = (model_override or "").strip()
+    if not model:
+        model = _env("PIPER_MODEL_PATH")
+    if not model:
+        raise HTTPException(status_code=500, detail="PIPER_MODEL_PATH is not configured")
+    model_path = str(Path(os.path.expandvars(model)).expanduser())
+    if not Path(model_path).exists():
+        raise HTTPException(status_code=500, detail=f"Piper model not found: {model_path}")
+    cfg = (config_override or "").strip()
+    if not cfg:
+        cfg = _env("PIPER_CONFIG_PATH")
+    if not cfg and model_override:
+        inferred = _infer_config_for_model(model_path)
+        if inferred:
+            cfg = inferred
+    speaker = _normalize_speaker_arg(speaker_override)
+    if not speaker:
+        speaker = _normalize_speaker_arg(_env("PIPER_SPEAKER"))
+    return exe, model_path, cfg or None, speaker
+
+
 def _normalize_speaker_arg(speaker_raw: str | None) -> str | None:
     speaker = (speaker_raw or "").strip()
     if not speaker:
@@ -80,15 +108,11 @@ def _build_command(
     speaker_override: str | None = None,
     raw_output: bool = False,
 ) -> list[str]:
-    exe = _env("PIPER_EXECUTABLE", "piper")
-    model = (model_override or "").strip()
-    if not model:
-        model = _env("PIPER_MODEL_PATH")
-    if not model:
-        raise HTTPException(status_code=500, detail="PIPER_MODEL_PATH is not configured")
-    model_path = str(Path(os.path.expandvars(model)).expanduser())
-    if not Path(model_path).exists():
-        raise HTTPException(status_code=500, detail=f"Piper model not found: {model_path}")
+    exe, model_path, cfg, speaker = _resolve_synthesis_settings(
+        model_override=model_override,
+        config_override=config_override,
+        speaker_override=speaker_override,
+    )
     cmd = [exe, "--model", model_path]
     if raw_output:
         cmd += ["--output_raw"]
@@ -96,31 +120,26 @@ def _build_command(
         if out_path is None:
             raise HTTPException(status_code=500, detail="Output path is required for non-streaming mode")
         cmd += ["--output_file", str(out_path)]
-    cfg = (config_override or "").strip()
-    if not cfg:
-        cfg = _env("PIPER_CONFIG_PATH")
-    if not cfg and model_override:
-        inferred = _infer_config_for_model(model_path)
-        if inferred:
-            cfg = inferred
     if cfg:
         cmd += ["--config", cfg]
-    speaker = _normalize_speaker_arg(speaker_override)
-    if not speaker:
-        speaker = _normalize_speaker_arg(_env("PIPER_SPEAKER"))
     if speaker:
         cmd += ["--speaker", speaker]
     return cmd
 
 
-def _run_piper_subprocess(text: str, model_override: str | None = None, config_override: str | None = None) -> bytes:
+def _run_piper_subprocess(
+    text: str,
+    model_override: str | None = None,
+    config_override: str | None = None,
+    speaker_override: str | None = None,
+) -> bytes:
     with tempfile.TemporaryDirectory(prefix="piper-http-") as tmp:
         out_path = Path(tmp) / "out.wav"
         cmd = _build_command(
             out_path,
             model_override=model_override,
             config_override=config_override,
-            speaker_override=None,
+            speaker_override=speaker_override,
             raw_output=False,
         )
         try:
@@ -200,6 +219,167 @@ async def _stream_piper_raw(
             pass
 
 
+class _PersistentPiperWorker:
+    def __init__(self, *, exe: str, model_path: str, config_path: str | None, speaker: str | None) -> None:
+        self.exe = exe
+        self.model_path = model_path
+        self.config_path = config_path
+        self.speaker = speaker
+        self._process: asyncio.subprocess.Process | None = None
+        self._lock = asyncio.Lock()
+        self._stderr_buffer: list[str] = []
+        self._stderr_task: asyncio.Task[None] | None = None
+
+    async def _ensure_process(self) -> None:
+        if self._process is not None and self._process.returncode is None:
+            return
+        cmd = [self.exe, "--model", self.model_path, "--json-input"]
+        if self.config_path:
+            cmd += ["--config", self.config_path]
+        if self.speaker:
+            cmd += ["--speaker", self.speaker]
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        self._process = process
+        self._stderr_buffer = []
+        self._stderr_task = asyncio.create_task(self._drain_stderr(process))
+
+    async def _drain_stderr(self, process: asyncio.subprocess.Process) -> None:
+        if process.stderr is None:
+            return
+        try:
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").strip()
+                if text:
+                    self._stderr_buffer.append(text)
+                    while len(self._stderr_buffer) > 24:
+                        del self._stderr_buffer[0]
+        except Exception:
+            return
+
+    def _stderr_summary(self) -> str:
+        return " | ".join(self._stderr_buffer[-6:]).strip()
+
+    async def _close_process(self) -> None:
+        process = self._process
+        self._process = None
+        task = self._stderr_task
+        self._stderr_task = None
+        if process is not None and process.returncode is None:
+            try:
+                process.kill()
+            except Exception:
+                pass
+            try:
+                await process.wait()
+            except Exception:
+                pass
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except Exception:
+                pass
+
+    async def synthesize_wav(self, text: str) -> bytes:
+        async with self._lock:
+            await self._ensure_process()
+            process = self._process
+            if process is None or process.stdin is None:
+                raise RuntimeError("persistent Piper worker is not available")
+            with tempfile.TemporaryDirectory(prefix="piper-http-worker-") as tmp:
+                out_path = Path(tmp) / "out.wav"
+                payload = {"text": text, "output_file": str(out_path)}
+                try:
+                    process.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8", errors="replace"))
+                    await process.stdin.drain()
+                except Exception:
+                    await self._close_process()
+                    raise RuntimeError("failed to write to persistent Piper worker")
+
+                deadline = asyncio.get_running_loop().time() + max(15.0, min(90.0, 4.0 + len(text) * 0.12))
+                last_size = -1
+                stable_passes = 0
+                while asyncio.get_running_loop().time() < deadline:
+                    if process.returncode is not None:
+                        detail = self._stderr_summary() or f"piper exited with code {process.returncode}"
+                        await self._close_process()
+                        raise RuntimeError(detail)
+                    if out_path.exists():
+                        try:
+                            size = out_path.stat().st_size
+                        except OSError:
+                            size = -1
+                        if size > 44 and size == last_size:
+                            stable_passes += 1
+                        else:
+                            stable_passes = 0
+                        last_size = size
+                        if stable_passes >= 2:
+                            try:
+                                wav_bytes = out_path.read_bytes()
+                                with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+                                    if wf.getnframes() > 0:
+                                        return wav_bytes
+                            except Exception:
+                                pass
+                    await asyncio.sleep(0.05)
+                detail = self._stderr_summary() or "persistent Piper worker timed out"
+                await self._close_process()
+                raise RuntimeError(detail)
+
+
+_PERSISTENT_WORKERS: dict[tuple[str, str, str | None, str | None], _PersistentPiperWorker] = {}
+_PERSISTENT_WORKERS_LOCK = asyncio.Lock()
+
+
+def _persistent_enabled() -> bool:
+    return _env_bool("PIPER_PERSISTENT_WORKER", True)
+
+
+async def _persistent_worker_for(
+    model_override: str | None = None,
+    config_override: str | None = None,
+    speaker_override: str | None = None,
+) -> _PersistentPiperWorker:
+    exe, model_path, config_path, speaker = _resolve_synthesis_settings(
+        model_override=model_override,
+        config_override=config_override,
+        speaker_override=speaker_override,
+    )
+    key = (exe, model_path, config_path, speaker)
+    async with _PERSISTENT_WORKERS_LOCK:
+        worker = _PERSISTENT_WORKERS.get(key)
+        if worker is None:
+            worker = _PersistentPiperWorker(
+                exe=exe,
+                model_path=model_path,
+                config_path=config_path,
+                speaker=speaker,
+            )
+            _PERSISTENT_WORKERS[key] = worker
+        return worker
+
+
+@app.on_event("shutdown")
+async def _shutdown_persistent_workers() -> None:
+    async with _PERSISTENT_WORKERS_LOCK:
+        workers = list(_PERSISTENT_WORKERS.values())
+        _PERSISTENT_WORKERS.clear()
+    for worker in workers:
+        try:
+            await worker._close_process()
+        except Exception:
+            pass
+
+
 # Gate synthesis concurrency to avoid spawning multiple heavy Piper processes simultaneously.
 _SYNTH_SEM = asyncio.Semaphore(max(1, int(os.getenv("PIPER_MAX_CONCURRENCY", "1") or "1")))
 
@@ -215,11 +395,38 @@ def _wav_to_pcm16_mono(wav_bytes: bytes) -> bytes:
         return wf.readframes(wf.getnframes())
 
 
-async def _synthesize_audio(text: str, model_override: str | None = None, config_override: str | None = None) -> tuple[bytes, int]:
-    sample_rate = int(_env("PIPER_SAMPLE_RATE", "22050"))
+def _wav_sample_rate(wav_bytes: bytes, fallback: int) -> int:
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            return int(wf.getframerate())
+    except Exception:
+        return int(fallback)
+
+
+async def _synthesize_audio(
+    text: str,
+    model_override: str | None = None,
+    config_override: str | None = None,
+    speaker_override: str | None = None,
+) -> tuple[bytes, int]:
+    fallback_sample_rate = int(_env("PIPER_SAMPLE_RATE", "22050"))
     async with _SYNTH_SEM:
-        audio_bytes = await asyncio.to_thread(_run_piper_subprocess, text, model_override, config_override)
-    return audio_bytes, sample_rate
+        if _persistent_enabled():
+            worker = await _persistent_worker_for(
+                model_override=model_override,
+                config_override=config_override,
+                speaker_override=speaker_override,
+            )
+            audio_bytes = await worker.synthesize_wav(text)
+        else:
+            audio_bytes = await asyncio.to_thread(
+                _run_piper_subprocess,
+                text,
+                model_override,
+                config_override,
+                speaker_override,
+            )
+    return audio_bytes, _wav_sample_rate(audio_bytes, fallback_sample_rate)
 
 
 @app.post("/speak", response_model=TtsResponse)
@@ -273,6 +480,22 @@ async def speak_stream(
     }
 
     async def _iter() -> AsyncIterator[bytes]:
+        if _persistent_enabled() and not _env_bool("PIPER_STREAM_FORCE_DIRECT", False):
+            try:
+                wav_bytes, _ = await _synthesize_audio(
+                    text=text,
+                    model_override=model_override,
+                    config_override=config_override,
+                    speaker_override=speaker_override,
+                )
+                pcm_bytes = _wav_to_pcm16_mono(wav_bytes)
+                chunk_size = 4096
+                for offset in range(0, len(pcm_bytes), chunk_size):
+                    yield pcm_bytes[offset : offset + chunk_size]
+                return
+            except Exception as exc:
+                logger.warning("Persistent Piper stream synth failed (%s); trying direct raw stream", exc)
+
         stream_started = False
         try:
             async with _SYNTH_SEM:
@@ -297,6 +520,7 @@ async def speak_stream(
             text=text,
             model_override=model_override,
             config_override=config_override,
+            speaker_override=speaker_override,
         )
         pcm_bytes = _wav_to_pcm16_mono(wav_bytes)
         chunk_size = 4096

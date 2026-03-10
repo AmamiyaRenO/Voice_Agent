@@ -16,6 +16,9 @@ namespace RobotVoice
         [SerializeField] private MqttIntentPublisher publisher;
         [SerializeField] private VoskSpeechToText speechToText;
 		[SerializeField] private PiMessageHub piHub;
+        [Header("Unity Speech Fallback")]
+        [SerializeField, Tooltip("If false, Unity-side microphone/ASR fallback stays disabled and the standalone desktop runtime should handle speech input.")]
+        private bool enableUnitySpeechInputFallback = false;
 
         [Header("Configuration")]
         [SerializeField] private TextAsset intentConfigJson;
@@ -36,6 +39,15 @@ namespace RobotVoice
         private float noiseAverageLogProbThreshold = -0.6f;
         [SerializeField, Tooltip("Seconds to suppress repeated transcripts"), Min(0f)]
         private float duplicateSuppressionSeconds = 2f;
+        [Header("Speech Turn Taking")]
+        [SerializeField, Tooltip("If enabled, adjacent ASR chunks are merged and dispatched after a short quiet window to avoid mid-sentence interruption.")]
+        private bool deferBackendSpeechDispatch = true;
+        [SerializeField, Tooltip("Quiet window before dispatching buffered user speech (seconds)."), Range(0.15f, 2.5f)]
+        private float backendSpeechQuietWindowSeconds = 1.05f;
+        [SerializeField, Tooltip("Hard max wait for buffered speech dispatch (seconds)."), Range(0.5f, 8f)]
+        private float backendSpeechMaxWaitSeconds = 4.2f;
+        [SerializeField, Tooltip("If true, command-like speech bypasses buffering and dispatches immediately.")]
+        private bool backendSpeechDispatchCommandsImmediately = false;
         [Header("Wake Word Interaction")]
         [SerializeField] private string wakeWordPrompt = "Listening";
         [SerializeField] private AudioSource wakeWordPromptSource;
@@ -55,8 +67,10 @@ namespace RobotVoice
         private int ttsStreamSampleRate = 22050;
         [SerializeField, Tooltip("How much audio to buffer before starting playback (seconds)."), Range(0.02f, 1.0f)]
         private float ttsStreamStartBufferSeconds = 0.15f;
-        [SerializeField, Tooltip("Extra realtime seconds to wait after stream buffer drains before stopping playback (prevents clipped final phonemes)."), Range(0f, 0.5f)]
-        private float ttsStreamDrainTailSeconds = 0.12f;
+        [SerializeField, Tooltip("Extra realtime seconds to wait after stream buffer drains before stopping playback (prevents clipped final phonemes)."), Range(0f, 1.2f)]
+        private float ttsStreamDrainTailSeconds = 0.28f;
+        [SerializeField, Tooltip("Extra realtime seconds to wait after clip playback ends before moving on (reduces clipped ending words)."), Range(0f, 0.25f)]
+        private float ttsClipEndPaddingSeconds = 0.06f;
         [SerializeField, Tooltip("In-memory PCM ring buffer size in seconds for true streaming playback."), Range(4, 60)]
         private int ttsStreamRingBufferSeconds = 20;
         [SerializeField, Tooltip("Force a fixed speaker for dialog answer playback (ignores dialog_service tts_speaker).")]
@@ -110,6 +124,14 @@ namespace RobotVoice
         private bool dropTtsEchoWhileSpeaking = true;
         [SerializeField, Tooltip("If true, suppress ASR routing while TTS is playing/tail (strong protection against self-trigger/hallucination).")]
         private bool suppressAsrDuringTtsWindow = true;
+        [SerializeField, Tooltip("If true, real user speech can interrupt current TTS playback (barge-in).")]
+        private bool enableUserBargeInDuringTts = true;
+        [SerializeField, Tooltip("Minimum words required to trigger barge-in during TTS."), Range(1, 6)]
+        private int bargeInMinWords = 2;
+        [SerializeField, Tooltip("Minimum normalized chars required to trigger barge-in during TTS."), Range(2, 20)]
+        private int bargeInMinChars = 6;
+        [SerializeField, Tooltip("Minimum energy to trigger barge-in for short phrases (0-1)."), Range(0f, 1f)]
+        private float bargeInMinEnergy = 0.03f;
         [SerializeField, Tooltip("If true, command-like phrases can still pass during TTS window (barge-in).")]
         private bool allowCommandBargeInDuringTtsWindow = false;
         [SerializeField, Tooltip("If true, keep mic playback-mute enabled even when AEC is active.")]
@@ -144,8 +166,24 @@ namespace RobotVoice
         private float lastTtsEndTime = -999f;
         private string pendingTtsText = string.Empty;
         private string pendingTtsCorrId = string.Empty;
+        private bool ttsSessionActive = false;
+        private bool ttsSessionMuteApplied = false;
+        private bool pendingBargeInForNextUserTurn = false;
+        private string pendingBargeInInterruptedText = string.Empty;
+        private string pendingBargeInInterruptedCorrId = string.Empty;
         private bool ttsWasPlayingLastFrame = false;
+        private bool unitySpeechInputFallbackRuntimeEnabled;
+        private string testerPanelVoiceCodeOverride = string.Empty;
+        private string testerPanelModelPathOverride = string.Empty;
         private Coroutine activeTtsCoroutine;
+        private Coroutine pendingSpeechDispatchCoroutine;
+        private readonly List<string> pendingSpeechSegments = new List<string>();
+        private RecognitionMetadata pendingSpeechMetadata;
+        private string pendingSpeechSource = "asr";
+        private string pendingSpeechSpeakerKey = string.Empty;
+        private string pendingSpeechLastNormalized = string.Empty;
+        private float pendingSpeechFirstTs = -1f;
+        private float pendingSpeechLastTs = -1f;
         private float manualTesterSpeakSuppressUntil = -999f;
         private PendingSpeakRequest queuedSpeakAfterCurrent;
 
@@ -158,6 +196,8 @@ namespace RobotVoice
         private readonly Queue<string> recentCorrOrder = new Queue<string>();
         [SerializeField, Tooltip("How many corr_id->user-text mappings to keep for debug logging.")]
         private int corrHistorySize = 32;
+        private string latestPublishedUserCorrId = string.Empty;
+        private float latestPublishedUserCorrTs = -999f;
         private readonly HashSet<string> playedAnswerCorrIds = new HashSet<string>();
         private readonly Queue<string> playedAnswerOrder = new Queue<string>();
         [SerializeField, Tooltip("How many answer corr_ids to remember for de-duping playback.")]
@@ -166,6 +206,8 @@ namespace RobotVoice
         private static readonly HashSet<string> NoiseSingles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "you",
+            "hi",
+            "hey",
             "uh",
             "um",
             "yeah",
@@ -208,6 +250,7 @@ namespace RobotVoice
             public float MaxAmplitude;
             public float Rms;
             public string Text;
+            public string EndpointReason;
             public bool HasSpeakerTag;
             public int SpeakerIndex;
             public ulong SpeakerId;
@@ -392,8 +435,11 @@ namespace RobotVoice
             }
             Application.runInBackground = true;
             ApplyFullscreenMode();
+            ApplyUnitySpeechInputFallbackRuntime();
             runtimeConfig = BuildRuntimeConfig();
             ApplySpeechKeyPhrases();
+            ApplyTurnTakingRuntimeDefaults();
+            InitializeDirectConversationRuntime();
 
             // Ensure Unity can actually publish to MQTT; otherwise the backend never receives transcripts.
             if (autoEnableMqttPublishing && publisher != null)
@@ -404,6 +450,60 @@ namespace RobotVoice
                 }
                 catch { }
             }
+        }
+
+        private void ApplyUnitySpeechInputFallbackRuntime()
+        {
+            unitySpeechInputFallbackRuntimeEnabled = enableUnitySpeechInputFallback;
+            if (speechToText == null)
+            {
+                return;
+            }
+
+            speechToText.AutoStart = unitySpeechInputFallbackRuntimeEnabled;
+            if (!unitySpeechInputFallbackRuntimeEnabled)
+            {
+                speechToText.SetListeningEnabled(false);
+            }
+        }
+
+        private bool IsUnitySpeechInputFallbackEnabled()
+        {
+            return unitySpeechInputFallbackRuntimeEnabled;
+        }
+
+        private void SetUnitySpeechInputFallbackEnabled(bool enabled)
+        {
+            unitySpeechInputFallbackRuntimeEnabled = enabled;
+            if (speechToText == null)
+            {
+                speechToText = GetComponent<VoskSpeechToText>();
+            }
+            if (speechToText == null)
+            {
+                return;
+            }
+
+            speechToText.AutoStart = enabled;
+            if (!enabled)
+            {
+                speechToText.SetListeningEnabled(false);
+            }
+        }
+
+        private void ApplyTurnTakingRuntimeDefaults()
+        {
+            backendSpeechQuietWindowSeconds = Mathf.Clamp(
+                Mathf.Max(backendSpeechQuietWindowSeconds, 0.95f),
+                0.15f,
+                2.5f);
+            backendSpeechMaxWaitSeconds = Mathf.Clamp(
+                Mathf.Max(backendSpeechMaxWaitSeconds, backendSpeechQuietWindowSeconds + 1.6f),
+                0.5f,
+                8f);
+            // Conservative default: avoid accidental mid-sentence dispatch when text contains command-like words.
+            backendSpeechDispatchCommandsImmediately = false;
+            enableUserBargeInDuringTts = true;
         }
 
         private void Start()
@@ -429,6 +529,7 @@ namespace RobotVoice
         private void OnDestroy()
         {
             StopWakeWordListeningIndicator();
+            CancelPendingSpeechDispatch(clearOnly: true);
             queuedSpeakAfterCurrent = null;
             if (activeTtsCoroutine != null)
             {
@@ -437,6 +538,7 @@ namespace RobotVoice
             }
             if (wakeWordPromptSource != null) wakeWordPromptSource.Stop();
             if (ttsFallbackSource != null) ttsFallbackSource.Stop();
+            DisposeDirectConversationRuntime();
             // Piper 缁熶竴鍑哄０锛屾棤闇€ Windows TTS 閲婃斁
         }
 

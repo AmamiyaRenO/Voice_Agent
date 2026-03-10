@@ -1,21 +1,43 @@
-# Voice Agent (Unity + Python Services + SDK)
+# Voice Agent (Desktop Runtime + Python Services + Optional Unity Shell)
 
-Voice Agent is a Unity-based voice interaction client for rehabilitation/game scenarios.  
-It integrates speech recognition, intent routing, MQTT-based robot control, HTTP TTS playback, and telemetry aggregation APIs.
+Voice Agent is a local-first voice interaction stack for rehabilitation and exercise-game scenarios.
+The maintained fast path is now a standalone desktop runtime on `127.0.0.1:8787` plus Python services for ASR, grounded dialog, memory, TTS, and game launching. Unity is optional and currently treated as a shell layer for avatar/UI/game integration instead of the primary conversation orchestrator.
 
 The repository also includes:
 - A Python speech service (`python_voice_service/`) for ASR + LLM reply generation.
 - A Python SDK (`python_sdk/`) for non-Unity control and automation.
 - Local orchestration scripts for multi-process development.
 
+## At a Glance
+
+| If you want to... | Start here | What you get |
+|---|---|---|
+| Run the full voice loop with the least setup | `.\helper.bat` -> `http://127.0.0.1:8787` | The maintained path: browser panel, runtime switching, memory tools, game manifest tools, camera, and logs |
+| Control the agent from Python without opening Unity | [`python_sdk/README.md`](python_sdk/README.md) | SDK access to speech, face, LED, servo, game intents, and prompt control |
+| Keep Unity in the loop for avatar/gameplay/camera UI | Start services first, then open the Unity project | Unity acts as an optional shell around the desktop runtime and MQTT actions |
+| Package the stack for Windows deployment | [`scripts/packaging/`](scripts/packaging/) and [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WINDOWS.md) | Service executables, installer assets, and a near one-click runtime |
+
+### Default runtime ports
+
+| Component | Port | Notes |
+|---|---:|---|
+| Desktop runtime / browser panel | `8787` | Main operator surface for runtime config, memory, games, SDK visualizer, and camera tools |
+| Python voice service | `8000` | Conversation, ASR, and response APIs |
+| Piper HTTP wrapper | `5005` | Main low-latency local TTS path |
+| Qwen TTS wrapper | `5006` | Optional alternate TTS backend |
+| Telemetry service | `8101` | Exercise/usage metrics aggregation |
+| MQTT broker | `1883` | Robot, dialog, intent, and telemetry messaging |
+
 ## Recent Updates
 
-- ASR mode matrix now includes `whisper-large-v3`, `moonshine-small`, `moonshine-medium`, and `api` (OpenAI STT), with runtime switching.
-- User Panel ASR controls (`/api/asr`) now expose `available_modes`, mode switch, and listening state controls.
-- Intent routing is split into smaller modules (`manifest_resolver`, `llm_classifier`, `match_utils`) for easier maintenance and tuning.
-- Intent recognition supports both curated manifest alias matching and optional Moonshine embedding-based matching.
-- Dialog service now supports speaker-linked persistent memory with optional ONNX embeddings (MiniLM/BGE) and survives service restarts.
-- Smoke tests now default to full run (services + userpanel route contract + userpanel live checks).
+- Standalone desktop runtime + panel can now run the full local/cloud conversation loop without Unity Play Mode.
+- Direct unified conversation flow is available on `/conversation/turn/stream` with runtime profile switching between `local` and `cloud`.
+- Main local speech path is tuned around `moonshine-medium`; cloud STT/response settings are exposed through panel/runtime config.
+- Structured memory now stores facts, episodic turns, recent launched games, and last referenced game for contextual follow-ups.
+- Grounded game replies now cover explain/recommend/list behavior from the local manifest instead of freeform LLM guesses.
+- Contextual command carryover works for phrases such as `Open it.` after a recommendation or grounded explanation.
+- Piper runs as a persistent worker instead of a per-request process, which reduces TTS startup cost.
+- Repeatable conversation regression now includes profile compare, grounded game cases, and a dedicated memory regression scenario set.
 
 ## SDK Spotlight (Start Here for Integration)
 
@@ -23,11 +45,12 @@ If your goal is to control the robot/agent from Python (without editing Unity sc
 
 - **SDK guide:** [`python_sdk/README.md`](python_sdk/README.md)
 
-This SDK mirrors the Unity `UserTestControlPanel` capabilities (TTS, face/LED/servo commands, game intents, and runtime LLM prompt control).
+This SDK mirrors the desktop runtime API surface (and remains compatible with the legacy Unity control flows) for TTS, face/LED/servo commands, game intents, and runtime LLM prompt control.
 It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for interactive API testing and flow prototyping.
 
 ## Table of Contents
 
+- [At a Glance](#at-a-glance)
 - [Architecture Overview](#architecture-overview)
 - [Repository Layout](#repository-layout)
 - [Features](#features)
@@ -49,72 +72,119 @@ It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for 
 
 ## Architecture Overview
 
-```text
-Microphone / External Transcript Source
-        |
-        v
-Unity Voice Layer (SpeechToText / VoiceGameLauncher / VoiceGameWiring / UserTestControlPanel)
-        |                \
-        |                 +--> HTTP 8000: python_voice_service (/transcribe, /respond)
-        |
-        +--> MQTT broker (robot/voice/text, robot/intent, robot/dialog/*, robot/pi/*, robot/tts/*)
-               |            \
-               |             +--> intent_service (voice text -> intent/query routing)
-               |                     \
-               |                      +--> robot/intent (LAUNCH_GAME/BACK_HOME)
-               |                      +--> robot/dialog/query (QUERY)
-               |
-               +--> dialog_service (query -> /respond -> answer + memory context)
-               |
-               +--> telemetry_service (voiceagent/telemetry/# -> weekly metrics API)
-
-Unity TTS playback path:
-Unity -> HTTP GET/POST /speak (port 5005 by default) -> Piper or Qwen wrapper
+```mermaid
+flowchart LR
+    Mic["Microphone / Desktop Audio Agent"] --> Runtime["Desktop Runtime<br/>:8787"]
+    Runtime --> Voice["Python Voice Service<br/>:8000"]
+    Voice --> Turn["/conversation/turn/stream"]
+    Turn --> Route["Intent + grounding layer<br/>manifest / fuzzy / optional Moonshine / LLM classifier"]
+    Turn --> Memory["Structured memory<br/>facts / episodes / recent games / last referenced game"]
+    Turn --> Provider["Reply provider<br/>local Ollama or cloud OpenAI"]
+    Turn --> Vision["Optional vision query<br/>desktop camera snapshot -> describe"]
+    Runtime --> TTS["/api/speak -> Piper or Qwen"]
+    Runtime --> MQTT["MQTT bridge"]
+    MQTT --> Robot["robot/pi/*<br/>face / servo / LED"]
+    MQTT --> Intent["robot/intent<br/>launch / back home"]
+    MQTT --> Telemetry["voiceagent/telemetry/*"]
+    Runtime -. Optional shell .-> Unity["Unity shell<br/>avatar / subtitles / gameplay / camera"]
 ```
 
-The maintained recognition path in this repo is `python_voice_service/main.py` (`/transcribe` with Whisper/Moonshine/API), or any custom transcript source integrated into Unity.
+The maintained speech entry points are `python_voice_service/main.py` for conversation/ASR/TTS control and `python_voice_service/desktop_runtime.py` for the browser panel, runtime switching, and local desktop integration.
+
+### Conversation Turn Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Runtime as Desktop Runtime
+    participant Voice as Voice Service
+    participant Route as Intent/Grounding
+    participant Memory as User Memory
+    participant Model as Ollama/OpenAI
+    participant Action as TTS or MQTT Action
+
+    User->>Runtime: Speak or submit text
+    Runtime->>Voice: POST /conversation/turn/stream
+    Voice->>Route: Resolve command vs grounded reply vs open dialog
+    Voice->>Memory: Load speaker context and recent references
+    alt Grounded or deterministic answer
+        Route-->>Voice: Game explain/recommend/list or memory answer
+    else Open-ended reply
+        Voice->>Model: Generate response
+        Model-->>Voice: Reply text
+    end
+    Voice->>Memory: Persist facts, episode, and game context
+    Voice-->>Runtime: Stream chunk/final events
+    Runtime->>Action: TTS playback and optional robot/game commands
+```
 
 ## Repository Layout
 
-```text
-Assets/                   Unity scenes, scripts, prefabs, runtime components
-python_sdk/               Python client SDK for robot/voice controls
-python_voice_service/     FastAPI services (ASR, /respond, Piper/Qwen TTS wrappers)
-scripts/                  Multi-service launcher + helper services
-  intent_service/         MQTT intent router + manifest alias resolver + optional LLM classifier
-  dialog_service/         MQTT dialog relay + speaker-linked persistent memory
-  telemetry_service/      MQTT -> HTTP telemetry aggregation
-docs/                     Integration guides (SDK, integration, and supporting notes)
-tests/                    SDK tests + service smoke tests + userpanel route contract/live smoke
-native/                   Native audio processing helpers
-```
+| Path | Purpose |
+|---|---|
+| `Assets/` | Unity scenes, scripts, prefabs, browser panel assets, and optional shell integration |
+| `python_voice_service/` | FastAPI services for conversation, ASR, desktop runtime, Piper/Qwen wrappers, grounding, and streaming audio tools |
+| `python_sdk/` | Python client SDK for robot controls and runtime APIs |
+| `scripts/` | Local launcher plus helper services (`intent_service`, `dialog_service`, `telemetry_service`, `game_launcher`, packaging) |
+| `runtime/` | Runtime outputs and assets such as eval results, captions, local models, and packaged-service payloads |
+| `docs/` | Deployment, integration, live captions, and benchmark planning notes |
+| `installer/` | Windows installer scripts and launcher entrypoints |
+| `Firmware/` | Hardware-side firmware assets for robot/peripheral integration |
+| `tests/` | Smoke tests, route checks, and regression helpers |
+| `native/` | Native audio processing helpers |
 
 ## Features
 
-- Unity-first voice workflow with wake-word and intent routing.
+- Standalone desktop voice workflow that no longer requires Unity Play Mode for end-to-end speech testing.
+- Direct unified conversation stream with runtime switch between `local` and `cloud`.
 - ASR mode switch at runtime: `whisper-large-v3`, `moonshine-small`, `moonshine-medium`, `api`.
 - MQTT command publish for face/servo/LED and game intents.
 - Intent router with layered strategy: exact alias, fuzzy/phonetic similarity, optional LLM classifier, optional Moonshine embedding matcher.
-- Dialog service speaker identity mapping + persistent user memory (`scripts/dialog_service/user_memory.json`).
+- Structured memory with speaker identity mapping, facts, episodic recall, recent game history, and contextual game references (`scripts/dialog_service/user_memory.json`).
+- Grounded game catalog for explain/recommend/list replies, using local manifest data instead of freeform game descriptions.
+- Contextual launch carryover for commands like `Open it.` after a grounded recommendation.
+- Optional vision-assisted replies through the desktop runtime camera describe endpoint.
 - Telemetry aggregation service for elder-exercise metrics (supports mock seeding).
-- Embedded remote control panel (`UserTestControlPanel`) over HTTP (default port `8787`).
-- Pluggable TTS backend on stable endpoint (`/speak`) with Piper or Qwen wrapper.
+- Browser control panel over HTTP (default port `8787`) with runtime switching, memory/QMD tools, games, camera, and logs.
+- Pluggable TTS backend on stable endpoint (`/speak`) with persistent Piper worker or Qwen wrapper.
 - Python SDK parity with Unity panel actions.
 - SDK Visualizer (`/sdk`) with step-by-step flow building, execution, and JSON import/export.
 - Local multi-process launcher (`scripts/start_local_services.py`).
-- Default full smoke test entrypoint (`scripts/run_smoke_tests.py`) with route coverage checks for User Panel.
+- Launcher can run source services during development or packaged executables when deployed.
+- Repeatable conversation and memory regression entrypoints (`scripts/conversation_eval.py`, `scripts/memory_eval_scenarios.sample.json`).
+- External dialogue benchmark shortlist and rollout plan (`docs/DIALOGUE_BENCHMARK_DATASETS.md`).
 
 ## Quick Start Paths
 
-### Path A (Recommended): Unity + Python Voice Service (Whisper/Moonshine/API)
+```mermaid
+flowchart LR
+    Goal{"What are you doing today?"}
+    Goal --> A["Path A<br/>Fastest end-to-end speech test"]
+    Goal --> B["Path B<br/>Avatar / gameplay / camera shell"]
+    Goal --> C["Path C<br/>Python automation / integration"]
+    A --> A1["Run helper.bat<br/>Open :8787"]
+    B --> B1["Start services first<br/>Then open Unity"]
+    C --> C1["Install SDK deps<br/>Call runtime or MQTT APIs"]
+```
 
-1. Set up `python_voice_service` virtual environment.
-2. Run `uvicorn main:app --host 0.0.0.0 --port 8000`.
-3. In Unity, set Python transcription URL to `http://127.0.0.1:8000/transcribe`.
-4. Keep MQTT broker running if you need robot intents/hardware controls (or use `scripts/start_local_services.py`, which can auto-start local Mosquitto).
-5. Switch ASR mode at runtime from User Panel (`/api/asr`) or `POST /transcribe/config`.
+### Path A (Recommended): Standalone Desktop Runtime
 
-### Path B: Python SDK Only (Automation / Integration)
+1. Configure `scripts/local_services.user.json` if you need custom paths or models.
+2. Run `.\helper.bat` from the repo root.
+3. Open `http://127.0.0.1:8787`.
+4. Use `/runtime` to switch `local` / `cloud`, ASR mode, and model/runtime settings.
+5. Use `/memory`, `/games`, and `/sdk` for memory inspection, manifest editing, and API testing.
+
+`helper.bat` delegates to `scripts/start_local_services.py`, which can launch source services in development or bundled executables when running from a packaged deployment.
+
+### Path B: Optional Unity Shell
+
+1. Start the standalone services first with `.\helper.bat`.
+2. Open the Unity project if you need avatar/gameplay/camera integration.
+3. Treat Unity as a shell around the desktop/runtime services rather than the main speech orchestrator.
+4. Unity voice fallback is intentionally downgraded and disabled by default.
+
+### Path C: Python SDK Only (Automation / Integration)
 
 1. Install SDK dependencies from `python_sdk/requirements.txt`.
 2. Import `voice_agent_sdk` from `python_sdk/`.
@@ -223,6 +293,16 @@ Optional (include Qwen TTS executable):
 powershell -ExecutionPolicy Bypass -File scripts\packaging\build_services_exe.ps1 -IncludeQwen
 ```
 
+The default packaged service set now includes:
+- `voice_service.exe`
+- `piper_http.exe`
+- `desktop_runtime.exe`
+- `intent_service.exe`
+- `dialog_service.exe`
+- `telemetry_service.exe`
+- `game_launcher.exe`
+- `service_launcher.exe`
+
 2. Put your Unity Windows build output into `dist/unity`.
 3. Build the installer (Inno Setup 6 required):
 
@@ -255,7 +335,7 @@ powershell -ExecutionPolicy Bypass -File scripts\packaging\build_release_oneclic
 ```
 
 Installed one-click launcher behavior:
-- double-click desktop icon -> starts services + Unity + health-check wait + auto-open panel page.
+- double-click desktop icon -> starts packaged services + packaged desktop runtime + optional Unity shell + health-check wait + auto-open panel page.
 
 See full deployment notes in [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WINDOWS.md).
 
@@ -265,8 +345,8 @@ See full deployment notes in [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WIND
 
 | Service | Default Port | Key Endpoints |
 |---|---:|---|
-| Unity UserTestControlPanel | `8787` | `/`, `/games`, `/runtime`, `/setup`, `/sdk`, `/api/speak`, `/api/llm/prompt`, `/api/vision/describe`, `/api/face`, `/api/flower`, `/api/led`, `/api/game`, `/api/game/manifest`, `/api/runtime/config`, `/api/runtime/prereq`, `/api/runtime/ollama`, `/api/asr` |
-| Python Voice Service | `8000` | `/healthz`, `/transcribe`, `/transcribe/config`, `/respond`, `/respond/config`, `/respond/metrics` |
+| Desktop Runtime / Panel | `8787` | `/`, `/games`, `/runtime`, `/memory`, `/setup`, `/sdk`, `/api/speak`, `/api/llm/prompt`, `/api/vision/describe`, `/api/face`, `/api/flower`, `/api/led`, `/api/game`, `/api/game/manifest`, `/api/memory`, `/api/qmd`, `/api/runtime/config`, `/api/runtime/prereq`, `/api/runtime/ollama`, `/api/asr`, `/api/logs/stream` |
+| Python Voice Service | `8000` | `/healthz`, `/conversation/config`, `/conversation/turn/stream`, `/transcribe`, `/transcribe/config`, `/respond`, `/respond/config`, `/respond/metrics` |
 | Piper wrapper | `5005` | `/speak` (GET/POST), `/speak_stream` |
 | Qwen wrapper | `5006` | `/speak` (GET/POST), `/metrics` |
 | Telemetry service | `8101` | `/healthz`, `/users`, `/dashboard`, `/metrics/user/{user_id}/weekly`, `/admin/seed-fake`, `/ingest` |
@@ -377,10 +457,10 @@ vision = client.describe_current_camera("Describe what you see in the current ca
 
 ## SDK Visualizer
 
-The SDK Visualizer is served by Unity `UserTestControlPanel` and is designed for rapid integration testing.
+The SDK Visualizer is served by the desktop runtime on port `8787` and is designed for rapid integration testing.
 
 Access:
-- Start Unity with `UserTestControlPanel` listening on port `8787`.
+- Start the desktop runtime with `.\helper.bat`.
 - Open `http://<host-ip>:8787/sdk` (or `/sdk.html`) in a browser.
 
 Core capabilities:
@@ -508,6 +588,9 @@ Service file: `python_voice_service/main.py`
 
 ### Main endpoints
 
+- `POST /conversation/turn/stream` -> unified streaming conversation turn (route, chunk, final)
+- `GET /conversation/config` -> read active conversation profile/runtime
+- `POST /conversation/config` -> switch local/cloud profile, ASR mode, and response provider settings
 - `POST /transcribe` -> ASR output (speech JSON + metadata)
 - `GET /transcribe/config` -> read current ASR mode (`whisper-large-v3`, `moonshine-small`, `moonshine-medium`, or `api`)
 - `POST /transcribe/config` -> switch ASR mode at runtime
@@ -540,7 +623,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
   - `OPENAI_TRANSCRIBE_MODEL`
   - `OPENAI_TRANSCRIBE_PROMPT` (optional; recommended to keep empty)
   - `ASR_API_LANGUAGE` (default `en`)
-  - `ASR_API_FORCE_LANGUAGE` (default `1`, force API requests to English)
+  - `ASR_API_FORCE_LANGUAGE` (default `0`; set to `1` only if you want API mode to force `ASR_API_LANGUAGE`)
 - Wake word normalization:
   - `WAKE_WORD`
   - `WAKE_WORD_ALIASES`
@@ -548,6 +631,10 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 - Ollama:
   - `OLLAMA_BASE_URL`
   - `OLLAMA_MODEL`
+  - `OLLAMA_THINK` (`0` for no-thinking mode, `1` to enable reasoning where supported)
+  - `OLLAMA_TEMPERATURE` (recommended `0.7` for qwen no-thinking dialogue)
+  - `OLLAMA_TOP_P` (recommended `0.8`)
+  - `OLLAMA_TOP_K` (recommended `20`)
   - `OLLAMA_SYSTEM_PROMPT`
 
 ### ASR mode matrix and runtime switch
@@ -638,14 +725,46 @@ Speaker identity key priority:
 2. `speaker_index` + `speaker_id` (Moonshine speaker tags)
 3. fallback `source:default`
 
+Memory model in the current build:
+- Structured facts:
+  - `name`
+  - `favorite_game`
+  - `likes` / `dislikes`
+  - `goals`
+  - `origin`
+  - `preferred_training_day`
+  - `preferred_training_time`
+- Episodic memory:
+  - recent user/assistant turns
+  - `What did I say about ...` style recall
+- Game context memory:
+  - recent launched games
+  - last referenced/recommended/explained game
+  - enables follow-ups like `Open it.`
+- QMD export/import:
+  - available through desktop runtime `/api/qmd`
+  - intended as an editable interchange layer, not the primary runtime store
+
 Persistence behavior:
 - Memory store path defaults to `scripts/dialog_service/user_memory.json`.
 - Identity map + profile memory are saved continuously and reused across service restarts.
-- File is intentionally gitignored as local runtime state.
+- The same store now carries structured facts, episodes, game history, and contextual game references.
+- The file is intentionally gitignored as local runtime state.
 
 Embedding backends for memory retrieval:
 - MiniLM (default): `onnx-models/all-MiniLM-L6-v2-onnx`
 - BGE option: `Qdrant/bge-small-en-v1.5-onnx-Q`
+
+Deterministic memory replies currently cover:
+- `What is my name?`
+- `What do I like?`
+- `What don't I like?`
+- `What is my favorite game?`
+- `What is my goal?`
+- `Where am I from?`
+- `When do I prefer to train?`
+- `What did I say about ... ?`
+- `What do you remember about me?`
 
 Useful dialog memory env vars:
 - `DIALOG_ENABLE_USER_MEMORY`
@@ -654,6 +773,14 @@ Useful dialog memory env vars:
 - `DIALOG_USER_MEMORY_EMBEDDING_REPO_ID`
 - `DIALOG_USER_MEMORY_PATH`
 - `DIALOG_USER_MEMORY_RETRIEVE_TOP_K`
+- `DIALOG_ENABLE_CONTEXT_MEMORY` (short-term multi-turn context + summary)
+- `DIALOG_ENABLE_POLICY` (continue/switch/clarify policy hints to `/respond`)
+- `DIALOG_HISTORY_TURNS`
+- `DIALOG_SUMMARY_MAX_CHARS`
+- `DIALOG_CONTEXT_MAX_CHARS`
+- `DIALOG_MEMORY_QUERY_RULE` (rule-based memory query trigger)
+- `DIALOG_MEMORY_QUERY_SEMANTIC` (embedding semantic fallback trigger)
+- `DIALOG_MEMORY_QUERY_THRESHOLD` (semantic trigger threshold, default `0.42`)
 
 ## Runtime Config: Save vs Apply
 
@@ -690,8 +817,8 @@ If you use Qwen TTS and Faster-Whisper together, keep separate virtual environme
 
 - No speech recognized:
   - Check microphone permission.
-  - Verify Unity is configured to use the expected recognizer endpoint (`/transcribe` or your custom source).
-  - Confirm Unity component references are not null.
+  - Verify the desktop runtime and voice service are both healthy on `8787` and `8000`.
+  - If you are using Unity shell mode, confirm Unity component references are not null.
 - ASR dropdown shows fewer modes than expected:
   - Check `GET /api/asr` or `GET /transcribe/config` and inspect `available_modes`.
   - Ensure `moonshine-voice` is installed in the same venv used by `python_voice_service`.
@@ -699,7 +826,8 @@ If you use Qwen TTS and Faster-Whisper together, keep separate virtual environme
 - OpenAI API ASR returns non-English text or unstable game words:
   - Keep `OPENAI_TRANSCRIBE_PROMPT` empty unless you have a strict reason to set it.
   - Prompt text is a soft bias, not a hard constraint; over-specific prompts can cause leakage/hallucination.
-  - Confirm API mode is active (`/transcribe/config`) and English forcing is enabled (`ASR_API_FORCE_LANGUAGE=1`).
+  - Confirm API mode is active (`/transcribe/config`).
+  - If you need forced English in API mode, explicitly set `ASR_API_FORCE_LANGUAGE=1` and `ASR_API_LANGUAGE=en`.
   - Restart `service_launcher` and `voice_service` after changing runtime config, because env-backed options are loaded at process start.
 - Helper/start script raises WinError 2 (file not found):
   - Validate Python executable paths in `scripts/local_services.user.json` (`python.asr`, `python.tts`).
@@ -709,7 +837,7 @@ If you use Qwen TTS and Faster-Whisper together, keep separate virtual environme
   - Verify broker host/port and credentials.
   - Confirm topic names match your robot-side subscribers.
 - `/api/speak` fails:
-  - Ensure Unity is running and `UserTestControlPanel` server is started on `8787`.
+  - Ensure the desktop runtime is listening on `8787`.
 - `/transcribe` fails:
   - Check `WHISPER_MODEL_PATH` and model availability.
   - Check Python service logs for load/runtime errors.
@@ -723,7 +851,7 @@ If you use Qwen TTS and Faster-Whisper together, keep separate virtual environme
 - No LLM spoken reply from dialog path:
   - Check `dialog_service` subscription topics: `robot/dialog/query` and `robot/tts/options`.
   - Check `/respond` availability on port `8000`.
-  - Verify Unity TTS path is active and not blocked by backend errors.
+  - Verify the desktop TTS path is active and not blocked by backend errors.
 
 ## Development and Tests
 
@@ -749,7 +877,7 @@ Smoke suite composition:
 - `tests/test_smoke_userpanel_contract.py`: validates every `UserTestControlPanel` route has a smoke case.
 - `tests/test_smoke_userpanel_live.py`: executes route smoke calls against live panel endpoint (`8787` by default).
 
-User Panel full API smoke (live integration against running Unity panel):
+User Panel full API smoke (live integration against running desktop runtime panel):
 
 ```powershell
 # Optional explicit panel URL
@@ -764,6 +892,52 @@ Direct pytest target:
 ```powershell
 .\python_voice_service\.venv_asr\Scripts\python.exe -m pytest tests\test_smoke_services.py -q
 ```
+
+Conversation regression:
+
+```powershell
+.\python_voice_service\.venv_asr\Scripts\python.exe scripts\conversation_eval.py
+```
+
+Text-only public benchmark suite:
+
+```powershell
+# First time only
+.\python_voice_service\.venv_asr\Scripts\python.exe -m pip install -r scripts\requirements-benchmarks.txt
+
+# Rebuild benchmark scenarios from public dialogue datasets
+.\python_voice_service\.venv_asr\Scripts\python.exe scripts\build_dialogue_benchmark_suite.py `
+  --output scripts\dialogue_benchmark_scenarios.sample.json
+
+# Run the text-only benchmark suite against the current local agent
+.\python_voice_service\.venv_asr\Scripts\python.exe scripts\conversation_eval.py `
+  --scenarios scripts\dialogue_benchmark_scenarios.sample.json `
+  --output runtime\evals\latest_dialogue_benchmark_eval.json
+```
+
+Dedicated memory regression:
+
+```powershell
+.\python_voice_service\.venv_asr\Scripts\python.exe scripts\conversation_eval.py `
+  --scenarios scripts\memory_eval_scenarios.sample.json `
+  --output runtime\evals\latest_memory_eval.json
+```
+
+Regression artifacts:
+- broad conversation report: `runtime/evals/latest_conversation_eval.json`
+- text-only public benchmark report: `runtime/evals/latest_dialogue_benchmark_eval.json`
+- memory-focused report: `runtime/evals/latest_memory_eval.json`
+
+Current regression coverage includes:
+- command launch / exit
+- local/cloud profile compare
+- grounded game explain / recommend
+- structured memory write + recall
+- episodic recall
+- recommendation carryover (`Open it.` after recommendation)
+
+Recommended public dialogue benchmark shortlist for future eval expansion:
+- [`docs/DIALOGUE_BENCHMARK_DATASETS.md`](docs/DIALOGUE_BENCHMARK_DATASETS.md)
 
 When updating SDK behavior, keep `tests/test_voice_agent_sdk.py` aligned with API expectations.
 When updating local services (`intent_service`, `dialog_service`, `python_voice_service`) or panel APIs, run smoke tests before commit. Default policy in this repo is full smoke first, then optional targeted reruns.

@@ -13,10 +13,10 @@ $StateDir = Join-Path $env:LOCALAPPDATA "VoiceAgent"
 $DefaultConfigPath = Join-Path $ScriptsDir "local_services.default.json"
 $UserConfigPath = Join-Path $StateDir "local_services.user.json"
 $UserConfigSamplePath = Join-Path $ScriptsDir "local_services.user.sample.json"
+$InstalledUserConfigTemplatePath = Join-Path $ScriptsDir "local_services.user.json"
 $InstalledManifestPath = Join-Path $ScriptsDir "intent_service\manifest.json"
 $UserManifestPath = Join-Path $StateDir "manifest.json"
 $ServiceLauncherExe = Join-Path $RuntimeServicesDir "service_launcher.exe"
-$HelperBat = Join-Path $AppRoot "helper.bat"
 $PanelHealthUrl = "http://127.0.0.1:8787/healthz"
 $PanelSetupUrl = "http://127.0.0.1:8787/setup.html"
 $PanelIndexUrl = "http://127.0.0.1:8787/index.html"
@@ -77,6 +77,9 @@ function Initialize-UserWritableConfig {
     if (-not (Test-Path $UserConfigPath)) {
         if (Test-Path $UserConfigSamplePath) {
             Copy-Item -Path $UserConfigSamplePath -Destination $UserConfigPath -Force
+        }
+        elseif (Test-Path $InstalledUserConfigTemplatePath) {
+            Copy-Item -Path $InstalledUserConfigTemplatePath -Destination $UserConfigPath -Force
         }
         else {
             Set-Content -Path $UserConfigPath -Encoding UTF8 -Value "{}"
@@ -177,6 +180,66 @@ function Clear-LauncherOverrides {
     }
 }
 
+function Clear-ExistingServiceProcesses {
+    Write-Host "[oneclick] clearing existing service processes..."
+
+    $imageNames = @(
+        "service_launcher",
+        "voice_service",
+        "piper_http",
+        "qwen_tts_http",
+        "intent_service",
+        "dialog_service",
+        "telemetry_service",
+        "game_launcher"
+    )
+
+    foreach ($name in $imageNames) {
+        try {
+            Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+        }
+    }
+
+    $targets = @(
+        "start_local_services.py",
+        "intent_service\main.py",
+        "dialog_service\main.py",
+        "game_launcher\main.py",
+        "telemetry_service\main.py",
+        "python_voice_service\main.py",
+        "python_voice_service\piper_http.py",
+        "python_voice_service\qwen_tts_http.py"
+    )
+
+    $root = Normalize-PathForCompare $AppRoot
+    if (-not $root) {
+        return
+    }
+
+    try {
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.Name -match '^(python|py)(\.exe)?$' } |
+            ForEach-Object {
+                $cmd = "$($_.CommandLine)".ToLowerInvariant()
+                if (-not $cmd.Contains($root)) {
+                    return
+                }
+                foreach ($target in $targets) {
+                    if ($cmd.Contains($target.ToLowerInvariant())) {
+                        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                        break
+                    }
+                }
+            }
+    }
+    catch {
+    }
+
+    Start-Sleep -Milliseconds 800
+}
+
 function Resolve-MosquittoAvailable {
     if (Get-Command mosquitto -ErrorAction SilentlyContinue) {
         return $true
@@ -274,7 +337,43 @@ function Apply-BundledPiperEnvironment {
     }
 
     if (-not ("$($env:OLLAMA_MODEL)".Trim())) {
-        $env:OLLAMA_MODEL = "gemma3:4b"
+        $env:OLLAMA_MODEL = "qwen3.5:0.8b"
+    }
+
+    if (-not ("$($env:OLLAMA_THINK)".Trim())) {
+        $env:OLLAMA_THINK = "0"
+    }
+
+    if (-not ("$($env:OLLAMA_TEMPERATURE)".Trim())) {
+        $env:OLLAMA_TEMPERATURE = "0.7"
+    }
+
+    if (-not ("$($env:OLLAMA_TOP_P)".Trim())) {
+        $env:OLLAMA_TOP_P = "0.8"
+    }
+
+    if (-not ("$($env:OLLAMA_TOP_K)".Trim())) {
+        $env:OLLAMA_TOP_K = "20"
+    }
+
+    if (-not ("$($env:DIALOG_ENABLE_CONTEXT_MEMORY)".Trim())) {
+        $env:DIALOG_ENABLE_CONTEXT_MEMORY = "1"
+    }
+
+    if (-not ("$($env:DIALOG_ENABLE_POLICY)".Trim())) {
+        $env:DIALOG_ENABLE_POLICY = "1"
+    }
+
+    if (-not ("$($env:DIALOG_HISTORY_TURNS)".Trim())) {
+        $env:DIALOG_HISTORY_TURNS = "8"
+    }
+
+    if (-not ("$($env:DIALOG_SUMMARY_MAX_CHARS)".Trim())) {
+        $env:DIALOG_SUMMARY_MAX_CHARS = "420"
+    }
+
+    if (-not ("$($env:DIALOG_CONTEXT_MAX_CHARS)".Trim())) {
+        $env:DIALOG_CONTEXT_MAX_CHARS = "900"
     }
 
     if (-not ("$($env:PIPER_CONFIG_PATH)".Trim()) -and $resolvedModel) {
@@ -323,6 +422,7 @@ function Resolve-UnityExe {
 function Start-ServiceStack {
     Clear-LauncherOverrides
     $env:VOICE_AGENT_AUTO_BOOTSTRAP_VENV = "0"
+    Clear-ExistingServiceProcesses
 
     $launcherArgs = @("--no-wait")
     $qwenExe = Join-Path $RuntimeServicesDir "qwen_tts_http.exe"
@@ -353,13 +453,7 @@ function Start-ServiceStack {
         return
     }
 
-    if (Test-Path $HelperBat) {
-        Write-Host "[oneclick] packaged launcher missing, falling back to helper.bat..."
-        Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$HelperBat`"" -WorkingDirectory $AppRoot -WindowStyle Hidden | Out-Null
-        return
-    }
-
-    throw "Cannot start services: service_launcher.exe and helper.bat are both missing."
+    throw "Cannot start services: service_launcher.exe is missing from runtime\\services."
 }
 
 function Start-UnityClient {
@@ -412,6 +506,9 @@ function Get-StartupTargetUrl {
 }
 
 Initialize-UserWritableConfig
+$env:VOICE_AGENT_STATE_DIR = $StateDir
+$env:DIALOG_USER_MEMORY_PATH = Join-Path $StateDir "user_memory.json"
+$env:VOICE_AGENT_QMD_ROOT = Join-Path $StateDir "qmd"
 $env:VOICE_AGENT_DEFAULT_CONFIG = $DefaultConfigPath
 $env:VOICE_AGENT_LAUNCHER_CONFIG = $UserConfigPath
 

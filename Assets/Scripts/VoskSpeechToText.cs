@@ -46,6 +46,26 @@ public class VoskSpeechToText : MonoBehaviour
         [Range(0f, 0.8f)]
         public float VadPreRollSeconds = 0.2f;
 
+        [Header("Long Utterance Stability")]
+        [Tooltip("If enabled, auto-raise endpointing minima so long sentences are less likely to be cut and sent too early.")]
+        public bool PreferLongUtteranceStability = true;
+
+        [Tooltip("Minimum sustained silence required before ending a segment when stability mode is enabled.")]
+        [Range(0.3f, 2f)]
+        public float MinStableVadSilenceSeconds = 0.65f;
+
+        [Tooltip("Minimum max segment duration used as a safety cap when stability mode is enabled.")]
+        [Range(3f, 15f)]
+        public float MinStableSegmentSeconds = 6.5f;
+
+        [Tooltip("Once soft max length is reached, require at least this much silence before flushing the segment.")]
+        [Range(0.05f, 0.8f)]
+        public float StableFlushMinSilenceSeconds = 0.18f;
+
+        [Tooltip("Absolute hard cap for one segment when the speaker keeps talking without silence.")]
+        [Range(4f, 20f)]
+        public float StableHardSegmentSeconds = 11f;
+
         [Tooltip("Start threshold multiplier relative to PythonServiceSilenceThreshold.")]
         [Range(1f, 2f)]
         public float VadStartThresholdMultiplier = 1.2f;
@@ -64,7 +84,7 @@ public class VoskSpeechToText : MonoBehaviour
 	public float MaxRecordLength = 5;
 
 	[Tooltip("Should the recognizer start when the application is launched?")]
-	public bool AutoStart = true;
+	public bool AutoStart = false;
 
 	//Called when the the state of the controller changes.
 	public Action<string> OnStatusUpdated;
@@ -112,6 +132,7 @@ public class VoskSpeechToText : MonoBehaviour
         private float _pythonSegmentStartTime;
         private bool _pythonForceFlushRequested;
         private bool _pythonRequestInFlight;
+        private string _pythonPendingFlushReason = "unknown";
         private int _activeRecordingSampleRate = 16000;
         private float _vadSpeechTimerSec;
         private float _vadSilenceTimerSec;
@@ -127,6 +148,16 @@ public class VoskSpeechToText : MonoBehaviour
         public bool IsListening => VoiceProcessor != null && VoiceProcessor.IsRecording;
         public bool IsInitialized => _didInit;
         public bool IsInitializing => _isInitializing;
+        public bool IsSpeechSegmentActiveForDispatch
+        {
+                get
+                {
+                        lock (_pythonBufferLock)
+                        {
+                                return _pythonSegmentActive || _vadSpeechTimerSec > 0.02f;
+                        }
+                }
+        }
         void Awake()
         {
                 if (VoiceProcessor == null)
@@ -143,6 +174,8 @@ public class VoskSpeechToText : MonoBehaviour
                         _defaultMaxRecordLength = MaxRecordLength;
                         _defaultMaxRecordLengthCaptured = true;
                 }
+
+                ApplyEndpointingStabilityDefaults();
 
                 if (AecEngine == null)
                 {
@@ -236,6 +269,8 @@ public class VoskSpeechToText : MonoBehaviour
         {
                 _isInitializing = true;
 
+                ApplyEndpointingStabilityDefaults();
+
                 yield return WaitForMicrophoneInput();
 
                 OnStatusUpdated?.Invoke("Initialising Python speech service");
@@ -258,6 +293,35 @@ public class VoskSpeechToText : MonoBehaviour
                 {
                         ToggleRecording();
                 }
+        }
+
+        private void ApplyEndpointingStabilityDefaults()
+        {
+                if (!PreferLongUtteranceStability)
+                {
+                        return;
+                }
+
+                var minSilence = Mathf.Clamp(MinStableVadSilenceSeconds, 0.3f, 2f);
+                if (UseVadSegmentation && VadSilenceSeconds < minSilence)
+                {
+                        VadSilenceSeconds = minSilence;
+                }
+
+                var minSegment = Mathf.Clamp(MinStableSegmentSeconds, 3f, 15f);
+                if (PythonMaxRecordLength > 0f && PythonMaxRecordLength < minSegment)
+                {
+                        PythonMaxRecordLength = minSegment;
+                }
+
+                if (MaxRecordLength > 0f && MaxRecordLength < minSegment)
+                {
+                        MaxRecordLength = minSegment;
+                }
+
+                var hardSegment = Mathf.Clamp(StableHardSegmentSeconds, 4f, 20f);
+                StableHardSegmentSeconds = Mathf.Max(hardSegment, minSegment + 0.8f);
+                StableFlushMinSilenceSeconds = Mathf.Clamp(StableFlushMinSilenceSeconds, 0.05f, 0.8f);
         }
 
 	//Wait until microphones are initialized
@@ -449,6 +513,7 @@ public class VoskSpeechToText : MonoBehaviour
         private void FlushCurrentSegment()
         {
                 short[] samples = null;
+                var endpointReason = "unknown";
                 lock (_pythonBufferLock)
                 {
                         if (_pythonBuffer.Count > 0)
@@ -460,13 +525,17 @@ public class VoskSpeechToText : MonoBehaviour
                         _pythonSegmentStartTime = 0f;
                         _vadSpeechTimerSec = 0f;
                         _vadSilenceTimerSec = 0f;
+                        endpointReason = string.IsNullOrWhiteSpace(_pythonPendingFlushReason)
+                                ? "unknown"
+                                : _pythonPendingFlushReason;
+                        _pythonPendingFlushReason = "unknown";
                 }
 
                 ApplyWakeWordWindowBoundary();
 
                 if (samples != null && samples.Length > 0)
                 {
-                        StartCoroutine(SendAudioToPython(samples));
+                        StartCoroutine(SendAudioToPython(samples, endpointReason));
                 }
         }
 
@@ -505,6 +574,7 @@ public class VoskSpeechToText : MonoBehaviour
                 bool isSilenceFrame = framePeak < endThreshold && frameRms < (endThreshold * rmsScale);
 
                 bool shouldFlush = false;
+                var flushReason = string.Empty;
 
                 lock (_pythonBufferLock)
                 {
@@ -559,15 +629,37 @@ public class VoskSpeechToText : MonoBehaviour
                                         if (VadSilenceSeconds > 0f && _vadSilenceTimerSec >= VadSilenceSeconds)
                                         {
                                                 shouldFlush = true;
+                                                flushReason = "vad_silence";
                                         }
                                 }
 
                                 if (MaxRecordLength > 0f)
                                 {
                                         var elapsed = Time.realtimeSinceStartup - _pythonSegmentStartTime;
-                                        if (elapsed >= MaxRecordLength)
+                                        if (UseVadSegmentation && PreferLongUtteranceStability)
+                                        {
+                                                var softLimit = Mathf.Max(
+                                                        MaxRecordLength,
+                                                        Mathf.Clamp(MinStableSegmentSeconds, 3f, 15f));
+                                                var hardLimit = Mathf.Max(
+                                                        softLimit + 0.8f,
+                                                        Mathf.Clamp(StableHardSegmentSeconds, 4f, 20f));
+                                                if (elapsed >= softLimit)
+                                                {
+                                                        var minTailSilence = Mathf.Clamp(StableFlushMinSilenceSeconds, 0.05f, 0.8f);
+                                                        if (_vadSilenceTimerSec >= minTailSilence || elapsed >= hardLimit)
+                                                        {
+                                                                shouldFlush = true;
+                                                                flushReason = elapsed >= hardLimit
+                                                                        ? "max_length_hard"
+                                                                        : "max_length_soft";
+                                                        }
+                                                }
+                                        }
+                                        else if (elapsed >= MaxRecordLength)
                                         {
                                                 shouldFlush = true;
+                                                flushReason = "max_length";
                                         }
                                 }
                         }
@@ -577,6 +669,11 @@ public class VoskSpeechToText : MonoBehaviour
 
                 if (shouldFlush)
                 {
+                        if (string.IsNullOrWhiteSpace(flushReason))
+                        {
+                                flushReason = "unknown";
+                        }
+                        _pythonPendingFlushReason = flushReason;
                         _pythonForceFlushRequested = true;
                 }
         }
@@ -644,6 +741,7 @@ public class VoskSpeechToText : MonoBehaviour
                         _vadPreRollBuffer.Clear();
                         _vadSpeechTimerSec = 0f;
                         _vadSilenceTimerSec = 0f;
+                        _pythonPendingFlushReason = "unknown";
                 }
 
                 _pythonSegmentActive = false;
@@ -682,13 +780,13 @@ public class VoskSpeechToText : MonoBehaviour
                 // dead-air gaps and lose words between chunks.
                 if (samples != null && samples.Length > 0)
                 {
-                        StartCoroutine(SendAudioToPython(samples));
+                        StartCoroutine(SendAudioToPython(samples, "recording_stop"));
                 }
 
                 yield break;
         }
 
-        private IEnumerator SendAudioToPython(short[] samples)
+        private IEnumerator SendAudioToPython(short[] samples, string endpointReason = "unknown")
         {
                 if (samples == null || samples.Length == 0)
                 {
@@ -755,7 +853,11 @@ public class VoskSpeechToText : MonoBehaviour
                                 if (!string.IsNullOrEmpty(response))
                                 {
                                         OnStatusUpdated?.Invoke("Python speech service transcription ready");
-                                        var enriched = InjectPythonSegmentMetrics(response, _pythonLastSegmentMaxAmplitude, _pythonLastSegmentRms);
+                                        var enriched = InjectPythonSegmentMetrics(
+                                                response,
+                                                _pythonLastSegmentMaxAmplitude,
+                                                _pythonLastSegmentRms,
+                                                endpointReason);
                                         _threadedResultQueue.Enqueue(enriched);
                                 }
                                 else
@@ -809,7 +911,7 @@ public class VoskSpeechToText : MonoBehaviour
                 _playbackMute = value;
         }
 
-        private string InjectPythonSegmentMetrics(string json, float maxAmplitude, float rms)
+        private string InjectPythonSegmentMetrics(string json, float maxAmplitude, float rms, string endpointReason)
         {
                 if (string.IsNullOrEmpty(json) || !json.TrimStart().StartsWith("{"))
                 {
@@ -827,6 +929,10 @@ public class VoskSpeechToText : MonoBehaviour
 
                         obj["max_amplitude"] = Mathf.Clamp01(maxAmplitude);
                         obj["rms"] = Mathf.Clamp01(rms);
+                        if (!string.IsNullOrWhiteSpace(endpointReason))
+                        {
+                                obj["endpoint_reason"] = endpointReason.Trim().ToLowerInvariant();
+                        }
 
                         return obj.ToString();
                 }

@@ -80,6 +80,9 @@ python_voice_service/.venv/
 python_voice_service/.venv*/
 python_voice_service/__pycache__/
 python_voice_service/.pytest_cache/
+/venv/
+.venv/
+.venv*/
 
 # Python caches (global)
 __pycache__/
@@ -94,6 +97,14 @@ __pycache__/
 /scripts/local_services.user.json
 /scripts/dialog_service/user_memory.json
 /scripts/dialog_service/user_memory.json.tmp
+
+# Runtime-generated local state
+/runtime/eval_assets/
+/runtime/evals/
+/runtime/live_captions/
+/runtime/models/
+/runtime/qmd/
+/runtime/services/
 
 # NuGet for Unity generated assets
 /[Aa]ssets/NuGetEditor/

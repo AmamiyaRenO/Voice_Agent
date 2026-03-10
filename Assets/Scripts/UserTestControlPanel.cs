@@ -150,6 +150,11 @@ namespace RobotVoice
             activeVoiceCode = DetermineInitialVoiceCode();
             activeTtsModel = DetermineInitialTtsModel();
             activeQwenSpeaker = DetermineInitialQwenSpeaker();
+            if (voiceLauncher != null)
+            {
+                voiceLauncher.SetTtsOptionsForTester(activeVoiceCode, activeTtsModel);
+                ApplySavedConversationRuntimeConfig();
+            }
             _hasExternalRawImageBinding = externalCameraRawImage != null;
             _hasExternalRendererBinding = externalCameraRenderer != null;
             if (autoStart)
@@ -704,6 +709,7 @@ namespace RobotVoice
 
     }
 }
+
 
 
 

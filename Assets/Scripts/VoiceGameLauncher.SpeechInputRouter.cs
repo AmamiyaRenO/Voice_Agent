@@ -10,6 +10,11 @@ namespace RobotVoice
     {
         public void HandleSpeechResult(string message)
         {
+            if (!IsUnitySpeechInputFallbackEnabled())
+            {
+                return;
+            }
+
             if (publisher == null)
             {
                 Debug.LogError("[RobotVoice] VoiceGameLauncher missing MqttIntentPublisher reference");
@@ -48,8 +53,6 @@ namespace RobotVoice
             }
 
             var candidateText = SelectCandidateText(rawRecognised, recognised, masked, metadata.Text);
-            var normalizedCandidate = NormalizeTranscript(candidateText);
-
             // Drop very likely hallucinations/noise before any intent/LLM routing.
             if (ShouldIgnoreTranscriptAsNoise(candidateText, metadata))
             {
@@ -71,14 +74,18 @@ namespace RobotVoice
             }
             if (suppressAsrDuringTtsWindow && IsAsrSuppressionWindow())
             {
-                var isCommandLike = MatchesCommand(candidateText);
-                if (!allowCommandBargeInDuringTtsWindow || !isCommandLike)
+                var interruptedByUser = TryInterruptTtsForBargeIn(candidateText, metadata);
+                if (!interruptedByUser)
                 {
-                    if (logDebugMessages && !string.IsNullOrWhiteSpace(candidateText))
+                    var isCommandLike = MatchesCommand(candidateText);
+                    if (!allowCommandBargeInDuringTtsWindow || !isCommandLike)
                     {
-                        Debug.Log($"[RobotVoice] Suppressed ASR during TTS window: \"{candidateText.Trim()}\"");
+                        if (logDebugMessages && !string.IsNullOrWhiteSpace(candidateText))
+                        {
+                            Debug.Log($"[RobotVoice] Suppressed ASR during TTS window: \"{candidateText.Trim()}\"");
+                        }
+                        return;
                     }
-                    return;
                 }
             }
             if (suppressAsrAfterManualTesterSpeak && IsManualTesterSpeakSuppressionWindow())
@@ -98,21 +105,25 @@ namespace RobotVoice
                 return;
             }
 
-            // Bypass wake-word gating and use the selected candidate text directly.
+                        // Bypass wake-word gating and use the selected candidate text directly.
             var processed = string.IsNullOrWhiteSpace(candidateText) ? rawRecognised : candidateText;
+
+            if (UseDirectUnifiedConversationPipeline())
+            {
+                var directText = string.IsNullOrWhiteSpace(processed) ? rawRecognised : processed;
+                if (!string.IsNullOrWhiteSpace(directText))
+                {
+                    QueueOrPublishVoiceText(directText, metadata, "asr");
+                }
+                return;
+            }
 
             if (preferBackendIntentService)
             {
                 var textForBackend = string.IsNullOrWhiteSpace(processed) ? rawRecognised : processed;
                 if (!string.IsNullOrWhiteSpace(textForBackend))
                 {
-                    ConversationLog.AddEntry(
-                        ConversationRole.User,
-                        textForBackend,
-                        BuildUserSpeakerLabel(metadata),
-                        BuildUserMetadataText(metadata),
-                        "asr");
-                    PublishVoiceText(textForBackend, metadata);
+                    QueueOrPublishVoiceText(textForBackend, metadata, "asr");
                 }
                 return;
             }
@@ -121,12 +132,14 @@ namespace RobotVoice
             {
                 if (IsExitIntent(processed))
                 {
+                    CancelPendingSpeechDispatch(clearOnly: true);
                     PublishExit(rawRecognised);
                     return;
                 }
 
                 if (TryExtractGameName(processed, out var gameName))
                 {
+                    CancelPendingSpeechDispatch(clearOnly: true);
                     PublishLaunch(gameName, rawRecognised);
                     return;
                 }
@@ -144,6 +157,7 @@ namespace RobotVoice
                             BuildUserMetadataText(metadata, "no_game_resolved"),
                             "asr");
                     }
+                    CancelPendingSpeechDispatch(clearOnly: true);
                     PublishLaunch(resolved, rawRecognised);
                     return;
                 }
@@ -152,13 +166,7 @@ namespace RobotVoice
             var textForCoach = string.IsNullOrWhiteSpace(processed) ? rawRecognised : processed;
             if (!string.IsNullOrWhiteSpace(textForCoach))
             {
-                ConversationLog.AddEntry(
-                    ConversationRole.User,
-                    textForCoach,
-                    BuildUserSpeakerLabel(metadata),
-                    BuildUserMetadataText(metadata),
-                    "asr");
-                PublishVoiceText(textForCoach, metadata);
+                QueueOrPublishVoiceText(textForCoach, metadata, "asr");
             }
         }
 
@@ -190,7 +198,15 @@ namespace RobotVoice
                 return false;
             }
 
+            if (shouldListen)
+            {
+                SetUnitySpeechInputFallbackEnabled(true);
+            }
             speechToText.SetListeningEnabled(shouldListen);
+            if (!shouldListen)
+            {
+                SetUnitySpeechInputFallbackEnabled(false);
+            }
             return true;
         }
 
@@ -201,7 +217,7 @@ namespace RobotVoice
                 speechToText = GetComponent<VoskSpeechToText>();
             }
 
-            return speechToText != null && speechToText.IsListening;
+            return IsUnitySpeechInputFallbackEnabled() && speechToText != null && speechToText.IsListening;
         }
 
 
@@ -213,6 +229,7 @@ namespace RobotVoice
                 MaxAmplitude = 0f,
                 Rms = 0f,
                 Text = string.Empty,
+                EndpointReason = string.Empty,
                 HasSpeakerTag = false,
                 SpeakerIndex = 0,
                 SpeakerId = 0UL,
@@ -269,6 +286,15 @@ namespace RobotVoice
                     if (amplitudeNode != null && amplitudeNode.IsNumber)
                     {
                         metadata.MaxAmplitude = Mathf.Clamp01(amplitudeNode.AsFloat);
+                    }
+                }
+
+                if (obj.HasKey("endpoint_reason"))
+                {
+                    var endpointReason = (obj["endpoint_reason"]?.Value ?? string.Empty).Trim();
+                    if (!string.IsNullOrWhiteSpace(endpointReason))
+                    {
+                        metadata.EndpointReason = endpointReason.ToLowerInvariant();
                     }
                 }
 
@@ -722,13 +748,16 @@ namespace RobotVoice
             }
 
             var tokens = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            if (tokens.Length <= 1 && trimmed.Length < 3)
+            var normalized = NormalizeForEchoCompare(trimmed);
+            var normalizedTokens = string.IsNullOrWhiteSpace(normalized)
+                ? Array.Empty<string>()
+                : normalized.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length <= 1 && normalizedTokens.Length <= 1 && normalized.Length <= 3)
             {
                 return true;
             }
 
             // Normalize punctuation/whitespace for phrase matching.
-            var normalized = NormalizeForEchoCompare(trimmed);
             var effectiveRms = metadata.Rms > 0f ? metadata.Rms : metadata.MaxAmplitude;
 
             if (NoiseSingles.Contains(normalized) && effectiveRms < speechEnergyNoiseGate)

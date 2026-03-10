@@ -19,6 +19,7 @@ Tip:
 Output:
 - `dist/services/voice_service.exe`
 - `dist/services/piper_http.exe`
+- `dist/services/desktop_runtime.exe`
 - `dist/services/intent_service.exe`
 - `dist/services/dialog_service.exe`
 - `dist/services/telemetry_service.exe`
@@ -33,7 +34,7 @@ powershell -ExecutionPolicy Bypass -File scripts\packaging\build_services_exe.ps
 
 Notes:
 - `service_launcher.exe` is built from `scripts/start_local_services.py`.
-- Launcher now prefers packaged EXEs first, then Python fallback.
+- Installed one-click mode should not require system Python when the packaged services are present.
 
 ## 2) Prepare Unity Build
 
@@ -108,7 +109,7 @@ After installation:
 3. Configure:
    - Prerequisites page shows Piper/Ollama status
    - `Install Ollama` button (winget)
-   - `Pull Ollama Model` button (default `gemma3:4b`)
+   - `Pull Ollama Model` button (default `qwen3.5:0.8b`)
    - ASR mode (`offline` / `api`)
    - Agent listening start/pause
    - OpenAI API Key / model
@@ -119,6 +120,7 @@ After installation:
 
 One-click behavior:
 - Starts packaged service launcher (`runtime/services/service_launcher.exe`).
+- Starts packaged desktop runtime (`runtime/services/desktop_runtime.exe`) for the panel/audio shell.
 - Waits for voice service health (`http://127.0.0.1:8000/healthz`).
 - Starts Unity client executable under `app/`.
 - Waits for User Panel health (`http://127.0.0.1:8787/healthz`).
@@ -144,6 +146,7 @@ Resolution priority:
 - Installer build fails with missing services dir:
   - Run `build_services_exe.ps1` first or pass `-ServicesDir`.
 - Runtime still asks for Python:
-  - Confirm `runtime/services/service_launcher.exe` exists in installed folder.
+  - Confirm both `runtime/services/service_launcher.exe` and `runtime/services/desktop_runtime.exe` exist in the installed folder.
 - Setup page not reachable:
-  - Ensure Unity app is running and `UserTestControlPanel` is active on port `8787`.
+  - Confirm the packaged desktop runtime is listening on `127.0.0.1:8787`.
+  - Unity is no longer the primary owner of the setup panel in packaged installs.

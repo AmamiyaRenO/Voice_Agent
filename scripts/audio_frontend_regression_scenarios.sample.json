@@ -1,0 +1,107 @@
+{
+  "frontend": [
+    {
+      "name": "silence_idle_floor",
+      "segments": [
+        { "kind": "silence", "duration_ms": 320 }
+      ],
+      "expect": {
+        "speech_active": false,
+        "speech_frames_min": 0,
+        "input_level_dbfs_max": -60.0,
+        "noise_floor_dbfs_max": -60.0
+      }
+    },
+    {
+      "name": "voiced_speech_activation",
+      "segments": [
+        { "kind": "voiced", "duration_ms": 420, "gain": 0.09, "freq_hz": 190.0 }
+      ],
+      "expect": {
+        "speech_active": true,
+        "speech_frames_min": 12,
+        "input_level_dbfs_min": -32.0,
+        "frontend_gain_db_min": 3.0
+      }
+    },
+    {
+      "name": "clipped_input_detected",
+      "segments": [
+        { "kind": "tone", "duration_ms": 260, "gain": 1.05, "freq_hz": 230.0 }
+      ],
+      "expect": {
+        "speech_active": true,
+        "clip_events_min": 1,
+        "input_peak_dbfs_min": -1.0
+      }
+    }
+  ],
+  "buffer": [
+    {
+      "name": "fixed_frame_split",
+      "frame_size": 160,
+      "max_frames": 4,
+      "push_sizes": [80, 80, 160],
+      "pop_count": 2,
+      "expect": {
+        "queued_frames": 0,
+        "dropped_frames": 0,
+        "pop_sizes": [160, 160]
+      }
+    },
+    {
+      "name": "queue_drop_tracking",
+      "frame_size": 160,
+      "max_frames": 2,
+      "push_sizes": [160, 160, 160, 160],
+      "expect": {
+        "queued_frames": 2,
+        "dropped_frames": 2
+      }
+    }
+  ],
+  "pipeline": [
+    {
+      "name": "pipeline_clean_open_cornhole",
+      "source": "tts",
+      "text": "open cornhole",
+      "expect": {
+        "expect_contains": ["open", "bean bag toss"],
+        "speech_frames_min": 6
+      }
+    },
+    {
+      "name": "pipeline_low_level_noisy_back_home",
+      "source": "tts",
+      "text": "back home",
+      "gain": 0.42,
+      "white_noise_std": 0.006,
+      "append_silence_ms": 180,
+      "expect": {
+        "expect_exact": "back home",
+        "speech_frames_min": 2
+      }
+    },
+    {
+      "name": "pipeline_clipped_disc_golf",
+      "source": "tts",
+      "text": "open disc golf",
+      "gain": 2.6,
+      "hard_clip": 0.72,
+      "expect": {
+        "expect_contains": ["open", "disc golf"],
+        "clip_events_min": 1
+      }
+    },
+    {
+      "name": "pipeline_aec_render_bleed",
+      "source": "tts",
+      "text": "open cornhole",
+      "render_bleed": 0.45,
+      "use_aec": true,
+      "expect": {
+        "expect_contains": ["open", "bean bag toss"]
+      }
+    }
+  ]
+}

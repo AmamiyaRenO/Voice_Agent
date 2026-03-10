@@ -1,0 +1,91 @@
+[
+  {
+    "name": "official_wav_0",
+    "source": "model_wav",
+    "wav_path": "test_wavs/0.wav",
+    "expect_contains": [
+      "after early nightfall",
+      "yellow lamps",
+      "squalid quarter"
+    ]
+  },
+  {
+    "name": "official_wav_8k",
+    "source": "model_wav",
+    "wav_path": "test_wavs/8k.wav",
+    "expect_contains": [
+      "these thoughts",
+      "hester prynne",
+      "hope"
+    ]
+  },
+  {
+    "name": "command_open_cornhole",
+    "source": "tts",
+    "text": "open cornhole",
+    "expect_contains": [
+      "open",
+      "bean bag toss"
+    ],
+    "reject_contains": [
+      "call hold"
+    ]
+  },
+  {
+    "name": "command_open_disc_golf",
+    "source": "tts",
+    "text": "open disc golf",
+    "expect_contains": [
+      "open",
+      "disc golf"
+    ]
+  },
+  {
+    "name": "command_open_corn_hole",
+    "source": "tts",
+    "text": "open corn hole",
+    "expect_contains": [
+      "open",
+      "bean bag toss"
+    ]
+  },
+  {
+    "name": "command_start_disc_golf",
+    "source": "tts",
+    "text": "start disc golf",
+    "expect_contains": [
+      "start",
+      "disc golf"
+    ]
+  },
+  {
+    "name": "command_back_home",
+    "source": "tts",
+    "text": "back home",
+    "expect_exact": "back home"
+  },
+  {
+    "name": "command_go_home",
+    "source": "tts",
+    "text": "go home",
+    "expect_exact": "go home"
+  },
+  {
+    "name": "game_name_bean_bag_toss",
+    "source": "tts",
+    "text": "bean bag toss",
+    "expect_exact": "bean bag toss"
+  },
+  {
+    "name": "game_name_corn_hole",
+    "source": "tts",
+    "text": "corn hole",
+    "expect_exact": "bean bag toss"
+  },
+  {
+    "name": "game_name_disc_golf",
+    "source": "tts",
+    "text": "disc golf",
+    "expect_exact": "disc golf"
+  }
+]

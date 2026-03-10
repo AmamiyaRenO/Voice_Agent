@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
@@ -28,6 +28,18 @@ namespace RobotVoice
             {
                 return;
             }
+
+            var effectiveVoiceCode = string.IsNullOrWhiteSpace(voiceCode)
+                ? testerPanelVoiceCodeOverride
+                : voiceCode.Trim();
+            var effectiveModelPath = string.IsNullOrWhiteSpace(modelPath)
+                ? testerPanelModelPathOverride
+                : modelPath.Trim();
+            if (IsLikelyQwenVoiceCode(effectiveVoiceCode))
+            {
+                effectiveModelPath = string.Empty;
+            }
+
             if (fromTesterPanel)
             {
                 pendingTtsCorrId = string.Empty;
@@ -48,7 +60,7 @@ namespace RobotVoice
                 _ = piHub.SendLedBreathAsync();
             }
 
-            var selectedSpeakUrl = ResolveSpeakUrlForVoice(voiceCode);
+            var selectedSpeakUrl = ResolveSpeakUrlForVoice(effectiveVoiceCode);
             if (!string.IsNullOrWhiteSpace(selectedSpeakUrl))
             {
                 if (activeTtsCoroutine != null)
@@ -60,8 +72,8 @@ namespace RobotVoice
                         queuedSpeakAfterCurrent = new PendingSpeakRequest
                         {
                             Text = trimmed,
-                            VoiceCode = voiceCode,
-                            ModelPath = modelPath,
+                            VoiceCode = effectiveVoiceCode,
+                            ModelPath = effectiveModelPath,
                             TtsInstruct = ttsInstruct,
                             FromTesterPanel = false
                         };
@@ -76,7 +88,7 @@ namespace RobotVoice
                     StopCoroutine(activeTtsCoroutine);
                     activeTtsCoroutine = null;
                 }
-                StartTtsCoroutine(trimmed, voiceCode, modelPath, ttsInstruct, selectedSpeakUrl);
+                StartTtsCoroutine(trimmed, effectiveVoiceCode, effectiveModelPath, ttsInstruct, selectedSpeakUrl);
             }
         }
 
@@ -158,16 +170,473 @@ namespace RobotVoice
             return Time.realtimeSinceStartup - lastIntentTime < Mathf.Max(0.1f, intentCooldownSeconds);
         }
 
+        private bool IsCandidateEligibleForBargeIn(string candidateText, RecognitionMetadata metadata)
+        {
+            if (!enableUserBargeInDuringTts || !IsAsrSuppressionWindow())
+            {
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(candidateText))
+            {
+                return false;
+            }
+
+            if (dropTtsEchoWhileSpeaking && IsLikelyTtsEcho(candidateText, metadata))
+            {
+                return false;
+            }
+
+            var normalized = NormalizeForEchoCompare(candidateText);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return false;
+            }
+
+            var words = normalized.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var minWords = Mathf.Max(1, bargeInMinWords);
+            if (words.Length >= minWords)
+            {
+                return true;
+            }
+
+            var effectiveEnergy = metadata.Rms > 0f ? metadata.Rms : metadata.MaxAmplitude;
+            var minChars = Mathf.Max(2, bargeInMinChars);
+            if (normalized.Length >= minChars && effectiveEnergy >= Mathf.Clamp01(bargeInMinEnergy))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool TryInterruptTtsForBargeIn(string candidateText, RecognitionMetadata metadata)
+        {
+            if (!IsCandidateEligibleForBargeIn(candidateText, metadata))
+            {
+                return false;
+            }
+
+            var interruptedText = lastTtsText;
+            var interruptedCorrId = pendingTtsCorrId;
+
+            if (activeTtsCoroutine != null)
+            {
+                StopCoroutine(activeTtsCoroutine);
+                activeTtsCoroutine = null;
+            }
+
+            queuedSpeakAfterCurrent = null;
+            if (wakeWordPromptSource != null)
+            {
+                wakeWordPromptSource.Stop();
+            }
+            if (ttsFallbackSource != null)
+            {
+                ttsFallbackSource.Stop();
+            }
+
+            CancelActiveDirectConversationTurn(clearQueuedAudio: true, reason: "barge_in");
+            EndTtsPlaybackSession(ttsSessionMuteApplied);
+            pendingBargeInForNextUserTurn = true;
+            pendingBargeInInterruptedText = string.IsNullOrWhiteSpace(interruptedText) ? string.Empty : interruptedText.Trim();
+            pendingBargeInInterruptedCorrId = string.IsNullOrWhiteSpace(interruptedCorrId) ? string.Empty : interruptedCorrId.Trim();
+
+            if (logDebugMessages)
+            {
+                Debug.Log($"[RobotVoice] User barge-in interrupted TTS. user=\"{TruncateForLog(candidateText, 80)}\"");
+            }
+            return true;
+        }
+
+        private void QueueOrPublishVoiceText(string text, RecognitionMetadata metadata, string sourceTag)
+        {
+            var trimmed = string.IsNullOrWhiteSpace(text) ? string.Empty : text.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return;
+            }
+
+            var immediate = !deferBackendSpeechDispatch;
+            if (!immediate && backendSpeechDispatchCommandsImmediately && MatchesCommand(trimmed))
+            {
+                immediate = true;
+            }
+
+            if (immediate)
+            {
+                FlushPendingSpeechDispatchIfAny();
+                PublishVoiceTextNow(trimmed, metadata, sourceTag);
+                return;
+            }
+
+            var speakerKey = BuildSpeakerDispatchKey(metadata);
+            if (pendingSpeechSegments.Count > 0 &&
+                !string.Equals(pendingSpeechSpeakerKey, speakerKey, StringComparison.Ordinal))
+            {
+                FlushPendingSpeechDispatchIfAny();
+            }
+
+            if (!AppendPendingSpeechSegment(trimmed))
+            {
+                pendingSpeechLastTs = Time.realtimeSinceStartup;
+                return;
+            }
+
+            if (pendingSpeechSegments.Count == 1)
+            {
+                pendingSpeechFirstTs = Time.realtimeSinceStartup;
+                pendingSpeechMetadata = metadata;
+                pendingSpeechSource = string.IsNullOrWhiteSpace(sourceTag) ? "asr" : sourceTag.Trim();
+                pendingSpeechSpeakerKey = speakerKey;
+            }
+            else
+            {
+                pendingSpeechMetadata = MergeRecognitionMetadata(pendingSpeechMetadata, metadata);
+            }
+            pendingSpeechLastTs = Time.realtimeSinceStartup;
+
+            if (pendingSpeechDispatchCoroutine == null)
+            {
+                pendingSpeechDispatchCoroutine = StartCoroutine(DispatchPendingSpeechWhenQuiet());
+            }
+        }
+
+        private static string BuildSpeakerDispatchKey(RecognitionMetadata metadata)
+        {
+            if (!metadata.HasSpeakerTag)
+            {
+                return "default";
+            }
+
+            return $"spk:{Mathf.Max(0, metadata.SpeakerIndex)}:{metadata.SpeakerId.ToString(CultureInfo.InvariantCulture)}";
+        }
+
+        private bool AppendPendingSpeechSegment(string segment)
+        {
+            var normalized = NormalizeTranscript(segment);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return false;
+            }
+
+            if (string.Equals(normalized, pendingSpeechLastNormalized, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (pendingSpeechSegments.Count > 0)
+            {
+                var lastIndex = pendingSpeechSegments.Count - 1;
+                var lastSegment = pendingSpeechSegments[lastIndex];
+                var lastNormalized = NormalizeTranscript(lastSegment);
+                if (!string.IsNullOrWhiteSpace(lastNormalized))
+                {
+                    if (lastNormalized.Contains(normalized))
+                    {
+                        return false;
+                    }
+
+                    if (normalized.Contains(lastNormalized))
+                    {
+                        pendingSpeechSegments[lastIndex] = segment;
+                        pendingSpeechLastNormalized = normalized;
+                        return true;
+                    }
+                }
+            }
+
+            pendingSpeechSegments.Add(segment);
+            pendingSpeechLastNormalized = normalized;
+            return true;
+        }
+
+        private float ResolveSpeechDispatchQuietWindowSeconds()
+        {
+            var baseQuiet = Mathf.Clamp(backendSpeechQuietWindowSeconds, 0.15f, 2.5f);
+            if (pendingSpeechSegments.Count <= 0)
+            {
+                return baseQuiet;
+            }
+
+            var merged = string.Join(" ", pendingSpeechSegments).Trim();
+            if (string.IsNullOrWhiteSpace(merged))
+            {
+                return baseQuiet;
+            }
+
+            var tokens = merged.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var tokenCount = tokens.Length;
+            var endpointReason = (pendingSpeechMetadata.EndpointReason ?? string.Empty).Trim().ToLowerInvariant();
+            if (tokenCount <= 2)
+            {
+                return Mathf.Clamp(baseQuiet * 1.3f, 0.8f, 2.5f);
+            }
+
+            var trimmed = merged.TrimEnd();
+            var endsWithTerminal = trimmed.EndsWith(".") || trimmed.EndsWith("!") || trimmed.EndsWith("?")
+                || trimmed.EndsWith("銆?) || trimmed.EndsWith("锛?) || trimmed.EndsWith("锛?);
+            var endsWithContinuationPunct = trimmed.EndsWith(",") || trimmed.EndsWith("锛?)
+                || trimmed.EndsWith(";") || trimmed.EndsWith("锛?)
+                || trimmed.EndsWith(":") || trimmed.EndsWith("锛?)
+                || trimmed.EndsWith("-") || trimmed.EndsWith("鈥?);
+            if (pendingSpeechSegments.Count == 1 &&
+                (endpointReason.StartsWith("max_length", StringComparison.Ordinal) || endsWithContinuationPunct))
+            {
+                // ASR likely cut mid-thought; wait longer to merge the continuation.
+                return Mathf.Clamp(Mathf.Max(baseQuiet, 5.6f), 0.15f, 8f);
+            }
+            if (endsWithTerminal && tokenCount >= 8)
+            {
+                return Mathf.Clamp(baseQuiet * 0.6f, 0.45f, 1.2f);
+            }
+
+            var normalized = NormalizeTranscript(merged);
+            if (!string.IsNullOrWhiteSpace(normalized))
+            {
+                var continuationSuffixes = new[]
+                {
+                    " and",
+                    " or",
+                    " but",
+                    " so",
+                    " because",
+                    " then",
+                    " that",
+                    " which",
+                    " to",
+                    " for",
+                    " with",
+                    " if",
+                    " when",
+                    " while",
+                };
+                for (var i = 0; i < continuationSuffixes.Length; i++)
+                {
+                    if (normalized.EndsWith(continuationSuffixes[i], StringComparison.Ordinal))
+                    {
+                        if (pendingSpeechSegments.Count == 1)
+                        {
+                            return Mathf.Clamp(Mathf.Max(baseQuiet, 4.8f), 0.9f, 8f);
+                        }
+                        return Mathf.Clamp(baseQuiet * 1.2f, 0.9f, 2.5f);
+                    }
+                }
+            }
+
+            return baseQuiet;
+        }
+
+        private float ResolveSpeechDispatchMaxWaitSeconds(float quietWindow)
+        {
+            var maxWait = Mathf.Clamp(backendSpeechMaxWaitSeconds, 0.5f, 8f);
+            var endpointReason = (pendingSpeechMetadata.EndpointReason ?? string.Empty).Trim().ToLowerInvariant();
+            if (pendingSpeechSegments.Count >= 2)
+            {
+                var merged = string.Join(" ", pendingSpeechSegments).Trim();
+                var hasTerminal = merged.EndsWith(".") || merged.EndsWith("!") || merged.EndsWith("?")
+                    || merged.EndsWith("銆?) || merged.EndsWith("锛?) || merged.EndsWith("锛?);
+                if (hasTerminal)
+                {
+                    return Mathf.Clamp(Mathf.Min(maxWait, quietWindow + 0.9f), quietWindow, 8f);
+                }
+            }
+            if (pendingSpeechSegments.Count == 1 &&
+                endpointReason.StartsWith("max_length", StringComparison.Ordinal))
+            {
+                return Mathf.Clamp(Mathf.Max(maxWait, quietWindow + 1.4f), quietWindow, 8f);
+            }
+            return Mathf.Max(quietWindow, maxWait);
+        }
+
+        private IEnumerator DispatchPendingSpeechWhenQuiet()
+        {
+            while (true)
+            {
+                if (pendingSpeechSegments.Count == 0)
+                {
+                    pendingSpeechDispatchCoroutine = null;
+                    yield break;
+                }
+
+                var quietWindow = ResolveSpeechDispatchQuietWindowSeconds();
+                var maxWait = ResolveSpeechDispatchMaxWaitSeconds(quietWindow);
+                var now = Time.realtimeSinceStartup;
+                var speechStillActive = speechToText != null && speechToText.IsSpeechSegmentActiveForDispatch;
+                if (speechStillActive)
+                {
+                    yield return null;
+                    continue;
+                }
+                var quietElapsed = now - pendingSpeechLastTs;
+                var totalElapsed = now - pendingSpeechFirstTs;
+                if (quietElapsed >= quietWindow || totalElapsed >= maxWait)
+                {
+                    FlushPendingSpeechDispatchIfAny();
+                    pendingSpeechDispatchCoroutine = null;
+                    yield break;
+                }
+
+                yield return null;
+            }
+        }
+
+        private void FlushPendingSpeechDispatchIfAny()
+        {
+            if (pendingSpeechSegments.Count == 0)
+            {
+                return;
+            }
+
+            var merged = string.Join(" ", pendingSpeechSegments).Trim();
+            var metadata = pendingSpeechMetadata;
+            var source = pendingSpeechSource;
+            pendingSpeechSegments.Clear();
+            pendingSpeechSource = "asr";
+            pendingSpeechSpeakerKey = string.Empty;
+            pendingSpeechLastNormalized = string.Empty;
+            pendingSpeechFirstTs = -1f;
+            pendingSpeechLastTs = -1f;
+            pendingSpeechMetadata = new RecognitionMetadata
+            {
+                AvgLogProb = float.NaN,
+                MaxAmplitude = 0f,
+                Rms = 0f,
+                Text = string.Empty,
+                EndpointReason = string.Empty,
+                HasSpeakerTag = false,
+                SpeakerIndex = 0,
+                SpeakerId = 0UL,
+            };
+
+            if (string.IsNullOrWhiteSpace(merged))
+            {
+                return;
+            }
+
+            PublishVoiceTextNow(merged, metadata, source);
+        }
+
+        private void CancelPendingSpeechDispatch(bool clearOnly)
+        {
+            if (!clearOnly)
+            {
+                FlushPendingSpeechDispatchIfAny();
+                return;
+            }
+
+            if (pendingSpeechDispatchCoroutine != null)
+            {
+                StopCoroutine(pendingSpeechDispatchCoroutine);
+                pendingSpeechDispatchCoroutine = null;
+            }
+
+            pendingSpeechSegments.Clear();
+            pendingSpeechSource = "asr";
+            pendingSpeechSpeakerKey = string.Empty;
+            pendingSpeechLastNormalized = string.Empty;
+            pendingSpeechFirstTs = -1f;
+            pendingSpeechLastTs = -1f;
+            pendingSpeechMetadata = new RecognitionMetadata
+            {
+                AvgLogProb = float.NaN,
+                MaxAmplitude = 0f,
+                Rms = 0f,
+                Text = string.Empty,
+                EndpointReason = string.Empty,
+                HasSpeakerTag = false,
+                SpeakerIndex = 0,
+                SpeakerId = 0UL,
+            };
+        }
+
+        private static RecognitionMetadata MergeRecognitionMetadata(RecognitionMetadata baseline, RecognitionMetadata candidate)
+        {
+            var merged = baseline;
+            if (!float.IsNaN(candidate.AvgLogProb))
+            {
+                if (float.IsNaN(merged.AvgLogProb))
+                {
+                    merged.AvgLogProb = candidate.AvgLogProb;
+                }
+                else
+                {
+                    merged.AvgLogProb = Mathf.Max(merged.AvgLogProb, candidate.AvgLogProb);
+                }
+            }
+            merged.MaxAmplitude = Mathf.Max(merged.MaxAmplitude, candidate.MaxAmplitude);
+            merged.Rms = Mathf.Max(merged.Rms, candidate.Rms);
+            if (candidate.HasSpeakerTag)
+            {
+                merged.HasSpeakerTag = true;
+                merged.SpeakerIndex = candidate.SpeakerIndex;
+                merged.SpeakerId = candidate.SpeakerId;
+            }
+            if (!string.IsNullOrWhiteSpace(candidate.Text))
+            {
+                merged.Text = candidate.Text;
+            }
+            if (!string.IsNullOrWhiteSpace(candidate.EndpointReason))
+            {
+                merged.EndpointReason = candidate.EndpointReason;
+            }
+            return merged;
+        }
+
+        private void PublishVoiceTextNow(string text, RecognitionMetadata metadata, string sourceTag)
+        {
+            var normalized = NormalizeTranscript(text);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                return;
+            }
+
+            if (IsDuplicateTranscript(normalized))
+            {
+                return;
+            }
+
+            ConversationLog.AddEntry(
+                ConversationRole.User,
+                text,
+                BuildUserSpeakerLabel(metadata),
+                BuildUserMetadataText(metadata),
+                string.IsNullOrWhiteSpace(sourceTag) ? "asr" : sourceTag.Trim());
+            PublishVoiceText(text, metadata);
+            RegisterTranscriptUsage(normalized);
+        }
+
         private void PublishVoiceText(string text, RecognitionMetadata metadata)
         {
-            if (publisher == null) return;
             if (string.IsNullOrWhiteSpace(text)) return;
 
+            var trimmed = text.Trim();
             var corrId = Guid.NewGuid().ToString("N");
-            TrackCorrId(corrId, text.Trim());
+            TrackCorrId(corrId, trimmed);
+
+            var bargeIn = pendingBargeInForNextUserTurn;
+            var interruptedText = pendingBargeInInterruptedText;
+            var interruptedCorrId = pendingBargeInInterruptedCorrId;
+            pendingBargeInForNextUserTurn = false;
+            pendingBargeInInterruptedText = string.Empty;
+            pendingBargeInInterruptedCorrId = string.Empty;
+
+            if (UseDirectUnifiedConversationPipeline())
+            {
+                DispatchVoiceTextDirectConversation(
+                    trimmed,
+                    metadata,
+                    corrId,
+                    bargeIn,
+                    interruptedText,
+                    interruptedCorrId);
+                return;
+            }
+
+            if (publisher == null) return;
 
             var payload = new StringBuilder(256)
-                .Append("{\"text\":\"").Append(EscapeJson(text.Trim())).Append('"')
+                .Append("{\"text\":\"").Append(EscapeJson(trimmed)).Append('"')
                 .Append(",\"source\":\"unity_voice\"")
                 .Append(",\"corr_id\":\"").Append(corrId).Append('"')
                 .Append(",\"ts\":").Append(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
@@ -193,6 +662,25 @@ namespace RobotVoice
                 payload.Append(",\"speaker_id\":")
                     .Append(metadata.SpeakerId.ToString(CultureInfo.InvariantCulture));
             }
+            if (bargeIn)
+            {
+                payload.Append(",\"barge_in\":true");
+                if (!string.IsNullOrWhiteSpace(interruptedText))
+                {
+                    var interrupted = interruptedText.Length > 240
+                        ? interruptedText.Substring(0, 240)
+                        : interruptedText;
+                    payload.Append(",\"interrupted_tts_text\":\"")
+                        .Append(EscapeJson(interrupted))
+                        .Append('"');
+                }
+                if (!string.IsNullOrWhiteSpace(interruptedCorrId))
+                {
+                    payload.Append(",\"interrupted_tts_corr_id\":\"")
+                        .Append(EscapeJson(interruptedCorrId))
+                        .Append('"');
+                }
+            }
             payload.Append('}');
 
             if (logDebugMessages && publisher.DisablePublishing)
@@ -210,8 +698,11 @@ namespace RobotVoice
                 return;
             }
 
-            recentCorrToUserText[corrId] = (userText, Time.realtimeSinceStartup);
+            var now = Time.realtimeSinceStartup;
+            recentCorrToUserText[corrId] = (userText, now);
             recentCorrOrder.Enqueue(corrId);
+            latestPublishedUserCorrId = corrId;
+            latestPublishedUserCorrTs = now;
             while (recentCorrOrder.Count > Mathf.Max(4, corrHistorySize))
             {
                 var old = recentCorrOrder.Dequeue();
@@ -220,6 +711,34 @@ namespace RobotVoice
                     recentCorrToUserText.Remove(old);
                 }
             }
+        }
+
+        public bool ShouldAcceptDialogAnswer(string corrId)
+        {
+            if (string.IsNullOrWhiteSpace(corrId))
+            {
+                return true;
+            }
+
+            if (!recentCorrToUserText.TryGetValue(corrId, out var entry))
+            {
+                return true;
+            }
+
+            if (latestPublishedUserCorrTs <= 0f)
+            {
+                return true;
+            }
+
+            var isLatestCorr = string.Equals(latestPublishedUserCorrId, corrId, StringComparison.Ordinal);
+            if (isLatestCorr)
+            {
+                return true;
+            }
+
+            // If a newer user utterance has already been published, this answer is stale.
+            // Skipping stale replies avoids duplicate/contradicting coach answers for a split long utterance.
+            return latestPublishedUserCorrTs <= entry.ts + 0.15f;
         }
 
         private bool MarkAnswerPlayed(string corrId)
@@ -391,6 +910,8 @@ namespace RobotVoice
         {
             var voice = string.IsNullOrWhiteSpace(voiceCode) ? string.Empty : voiceCode.Trim();
             var model = string.IsNullOrWhiteSpace(modelPath) ? string.Empty : modelPath.Trim();
+            testerPanelVoiceCodeOverride = voice;
+            testerPanelModelPathOverride = IsLikelyQwenVoiceCode(voice) ? string.Empty : model;
             if (publisher != null)
             {
                 var sb = new StringBuilder(128);
@@ -407,7 +928,10 @@ namespace RobotVoice
                 sb.Append('}');
                 _ = publisher.PublishRawAsync("robot/tts/options", sb.ToString());
             }
-            ConversationLog.AddEntry(ConversationRole.System, $"TTS options updated (voice={voice}, model={model})", "tester_panel");
+            ConversationLog.AddEntry(
+                ConversationRole.System,
+                $"TTS options updated (voice={voice}, model={testerPanelModelPathOverride})",
+                "tester_panel");
         }
 
         private void PresentWakeWordPrompt() { }
@@ -527,23 +1051,77 @@ namespace RobotVoice
                 speechToText.SetPlaybackMute(true);
             }
 
+            ttsSessionActive = true;
+            ttsSessionMuteApplied = shouldMute;
             return shouldMute;
         }
 
         private void EndTtsPlaybackSession(bool shouldMute)
         {
-            if (shouldMute && speechToText != null)
+            var muteApplied = ttsSessionMuteApplied || shouldMute;
+            if (muteApplied && speechToText != null)
             {
                 speechToText.SetPlaybackMute(false);
             }
 
-            if (publisher != null)
+            if (ttsSessionActive && publisher != null)
             {
                 _ = publisher.PublishRawAsync("robot/tts/state", "{\"speaking\":false}");
             }
 
+            ttsSessionActive = false;
+            ttsSessionMuteApplied = false;
             lastTtsEndTime = Time.realtimeSinceStartup;
             pendingTtsCorrId = string.Empty;
+        }
+
+        private static float EstimateOutputBufferTailSeconds(int sampleRate)
+        {
+            try
+            {
+                AudioSettings.GetDSPBufferSize(out var dspBufferLength, out var dspNumBuffers);
+                if (dspBufferLength > 0 && dspNumBuffers > 0)
+                {
+                    var sr = Mathf.Max(8000, sampleRate);
+                    var dspSeconds = (dspBufferLength * Mathf.Max(1, dspNumBuffers)) / (float)sr;
+                    return Mathf.Clamp(dspSeconds * 2.2f, 0.08f, 0.6f);
+                }
+            }
+            catch
+            {
+                // Ignore and use conservative fallback below.
+            }
+
+            return 0.12f;
+        }
+
+        private float ResolveStreamDrainTailSeconds(int sampleRate)
+        {
+            var configured = Mathf.Clamp(ttsStreamDrainTailSeconds, 0f, 1.2f);
+            var estimated = EstimateOutputBufferTailSeconds(sampleRate);
+            return Mathf.Clamp(Mathf.Max(configured, estimated), 0.05f, 1.2f);
+        }
+
+        private IEnumerator WaitForCurrentClipToFinish(AudioClip fallbackClip = null)
+        {
+            if (wakeWordPromptSource != null)
+            {
+                yield return new WaitWhile(() => wakeWordPromptSource.isPlaying);
+            }
+            else if (ttsFallbackSource != null)
+            {
+                yield return new WaitWhile(() => ttsFallbackSource.isPlaying);
+            }
+            else if (fallbackClip != null)
+            {
+                yield return new WaitForSeconds(Mathf.Max(0.05f, fallbackClip.length));
+            }
+
+            var tailPadding = Mathf.Clamp(ttsClipEndPaddingSeconds, 0f, 0.25f);
+            if (tailPadding > 0f)
+            {
+                yield return new WaitForSecondsRealtime(tailPadding);
+            }
         }
 
         private AudioSource GetOrCreateTtsOutputSource()
@@ -732,7 +1310,7 @@ namespace RobotVoice
                         yield return null;
                     }
 
-                    var drainTailSeconds = Mathf.Clamp(ttsStreamDrainTailSeconds, 0f, 0.5f);
+                    var drainTailSeconds = ResolveStreamDrainTailSeconds(sampleRate);
                     if (drainTailSeconds > 0f)
                     {
                         yield return new WaitForSecondsRealtime(drainTailSeconds);
@@ -890,18 +1468,7 @@ namespace RobotVoice
                                                     $"remainingChars={remainingText.Length}");
                                             }
                                             PlayClipOnSource(fallbackClip);
-                                            if (wakeWordPromptSource != null)
-                                            {
-                                                yield return new WaitWhile(() => wakeWordPromptSource.isPlaying);
-                                            }
-                                            else if (ttsFallbackSource != null)
-                                            {
-                                                yield return new WaitWhile(() => ttsFallbackSource.isPlaying);
-                                            }
-                                            else
-                                            {
-                                                yield return new WaitForSeconds(Mathf.Max(0.05f, fallbackClip.length));
-                                            }
+                                            yield return WaitForCurrentClipToFinish(fallbackClip);
                                             break;
                                         }
                                     }
@@ -970,18 +1537,7 @@ namespace RobotVoice
                                                     $"remainingChars={remainingText.Length}");
                                             }
                                             PlayClipOnSource(fallbackClip);
-                                            if (wakeWordPromptSource != null)
-                                            {
-                                                yield return new WaitWhile(() => wakeWordPromptSource.isPlaying);
-                                            }
-                                            else if (ttsFallbackSource != null)
-                                            {
-                                                yield return new WaitWhile(() => ttsFallbackSource.isPlaying);
-                                            }
-                                            else
-                                            {
-                                                yield return new WaitForSeconds(Mathf.Max(0.05f, fallbackClip.length));
-                                            }
+                                            yield return WaitForCurrentClipToFinish(fallbackClip);
                                             break;
                                         }
                                     }
@@ -1004,18 +1560,7 @@ namespace RobotVoice
                         // Wait for playback to end before continuing to the next segment.
                         if (clip != null)
                         {
-                            if (wakeWordPromptSource != null)
-                            {
-                                yield return new WaitWhile(() => wakeWordPromptSource.isPlaying);
-                            }
-                            else if (ttsFallbackSource != null)
-                            {
-                                yield return new WaitWhile(() => ttsFallbackSource.isPlaying);
-                            }
-                            else
-                            {
-                                yield return new WaitForSeconds(Mathf.Max(0.05f, clip.length));
-                            }
+                            yield return WaitForCurrentClipToFinish(clip);
                         }
                     }
                 }
@@ -1574,4 +2119,3 @@ namespace RobotVoice
 
     }
 }
-

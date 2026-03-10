@@ -47,17 +47,15 @@ Source: "{#UnityBuildDir}\UnityPlayer.dll"; DestDir: "{app}\app"; Flags: ignorev
 Source: "{#UnityBuildDir}\UnityCrashHandler64.exe"; DestDir: "{app}\app"; Flags: ignoreversion
 Source: "{#UnityBuildDir}\MonoBleedingEdge\*"; DestDir: "{app}\app\MonoBleedingEdge"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#UnityBuildDir}\VoiceAgent_Data\*"; DestDir: "{app}\app\VoiceAgent_Data"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#UnityBuildDir}\VoiceAgent_BurstDebugInformation_DoNotShip\*"; DestDir: "{app}\app\VoiceAgent_BurstDebugInformation_DoNotShip"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#ServiceExeDir}\*"; DestDir: "{app}\runtime\services"; Flags: ignoreversion recursesubdirs createallsubdirs
 #if Len(PiperRuntimeDir) > 0
 Source: "{#PiperRuntimeDir}\*"; DestDir: "{app}\runtime\piper"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
 Source: "..\scripts\local_services.default.json"; DestDir: "{app}\scripts"; Flags: ignoreversion
-Source: "..\scripts\local_services.user.sample.json"; DestDir: "{app}\scripts"; DestName: "local_services.user.json"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "..\scripts\local_services.user.sample.json"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\scripts\intent_service\manifest.json"; DestDir: "{app}\scripts\intent_service"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "..\installer\start_voice_agent.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\installer\start_voice_agent.ps1"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\helper.bat"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Start Voice Agent"; Filename: "{app}\start_voice_agent.bat"

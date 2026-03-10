@@ -1,4 +1,4 @@
-﻿"""Python voice service using Faster-Whisper for speech recognition.
+"""Python voice service using Faster-Whisper for speech recognition.
 
 This module exposes a FastAPI application that accepts raw PCM audio
 from the Unity client, performs transcription with Faster-Whisper and
@@ -10,22 +10,35 @@ from __future__ import annotations
 import math
 import os
 import re
+import difflib
 import asyncio
 import logging
 import time
 import io
 import json
+import sys
 import wave
 from collections import deque
 from functools import lru_cache
-from typing import Dict, Iterable, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from faster_whisper import WhisperModel
 from pydantic import BaseModel, Field
+
+try:
+    from .game_grounding import GameCatalog
+except Exception:
+    from game_grounding import GameCatalog
+
+try:
+    import paho.mqtt.publish as mqtt_publish
+except Exception:  # pragma: no cover - MQTT publish is optional at runtime.
+    mqtt_publish = None
 
 try:  # Optional dependency used to improve resampling quality when available.
     from scipy.signal import resample_poly
@@ -52,10 +65,49 @@ except Exception:  # pragma: no cover - moonshine is optional at runtime.
     MoonshineModelArch = None
     moonshine_model_arch_to_string = None
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_ROOT = REPO_ROOT / "scripts"
+INTENT_SERVICE_DIR = SCRIPT_ROOT / "intent_service"
+DIALOG_SERVICE_DIR = SCRIPT_ROOT / "dialog_service"
+for _module_dir in (SCRIPT_ROOT, INTENT_SERVICE_DIR, DIALOG_SERVICE_DIR):
+    _module_dir_str = str(_module_dir)
+    if _module_dir_str not in sys.path:
+        sys.path.insert(0, _module_dir_str)
+
+try:
+    from intent_config import load_config as load_intent_config
+    from intent_routing import IntentRouterEngine, ManifestAliasResolver
+    from dialog_config import load_config as load_dialog_config
+    from dialog_service_impl import DialogService
+    from text_utils import (
+        compress_reply_by_words,
+        compress_reply_for_latency,
+        sanitize_tts_text,
+        trim_trailing_connectors,
+    )
+    from user_memory import speaker_identity_key
+except Exception:  # pragma: no cover - dialog/intent helpers are optional at runtime.
+    load_intent_config = None
+    IntentRouterEngine = None
+    ManifestAliasResolver = None
+    load_dialog_config = None
+    DialogService = None
+    compress_reply_by_words = None
+    compress_reply_for_latency = None
+    sanitize_tts_text = None
+    trim_trailing_connectors = None
+    speaker_identity_key = None
+
 APP_TITLE = "Coach Voice Agent - Python Voice Service"
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-DEFAULT_OLLAMA_MODEL = "gemma3:4b"
+DEFAULT_OLLAMA_MODEL = "qwen3.5:0.8b"
+DEFAULT_OPENAI_RESPONSE_MODEL = "gpt-4o-mini"
+DEFAULT_OLLAMA_THINK = False
+PIPELINE_MODE_DIRECT_UNIFIED = "direct_unified"
+PIPELINE_MODE_LEGACY_MQTT = "legacy_mqtt"
+CONVERSATION_PROFILE_LOCAL = "local"
+CONVERSATION_PROFILE_CLOUD = "cloud"
 DEFAULT_SYSTEM_PROMPT = (
     "You are Rachel, a warm voice companion in a rehabilitation and exercise game system.\n"
     "Priorities:\n"
@@ -63,15 +115,31 @@ DEFAULT_SYSTEM_PROMPT = (
     "- Keep interactions supportive and safe during exercise.\n"
     "- Keep spoken replies concise and clear.\n"
     "Behavior rules:\n"
+    "- Treat each user turn as part of an ongoing conversation, not an isolated request.\n"
     "- Do not force every topic back to exercise.\n"
     "- If the user asks a casual or general question, answer it directly first.\n"
     "- Only guide back to exercise when relevant: training, progress, fatigue, pain, goals, or game actions.\n"
     "- When you do guide back, use at most one gentle bridge sentence.\n"
     "- Confirm explicit action intents clearly (start/stop/switch game, back home).\n"
     "- If intent is unclear, ask one short clarification question instead of guessing.\n"
+    "- Do not append a generic follow-up question after a complete answer unless it is genuinely needed.\n"
+    "- Do not repeat or restate the user's question unless you are asking for clarification.\n"
+    "- Do not address the user by name unless they explicitly gave it and using it is clearly helpful.\n"
+    "- If the user shares a personal event, setback, or feeling, acknowledge that content briefly instead of turning it into generic coaching.\n"
+    "- If the user asks about live real-world information you cannot verify here, say that limitation plainly instead of guessing.\n"
+    "- Do not claim you can see, check, track, monitor, or verify real-world conditions unless tool or vision context actually provides that information.\n"
+    "- When explaining a game or activity, describe what it actually is; do not invent benefits or training claims.\n"
     "- Avoid repetitive motivational slogans.\n"
-    "- Default length is 1-2 sentences (up to 3 only when needed for clarity).\n"
+    "- Default length is 1-2 sentences.\n"
     "- Match the user's language when possible."
+)
+_SYSTEM_PROMPT_LEAK_MARKERS = (
+    "understand the user's intent and answer naturally",
+    "keep interactions supportive and safe during exercise",
+    "conversation protocol",
+    "treat each turn as part of an ongoing dialogue",
+    "do not force every topic back to exercise",
+    "keep spoken replies concise and clear",
 )
 
 DEFAULT_HTTP_TIMEOUT = httpx.Timeout(30.0)
@@ -361,7 +429,7 @@ WAKE_WORD_ALIASES = [
     s.strip().lower()
     for s in os.getenv(
         "WAKE_WORD_ALIASES",
-        "rachel, rachael, richel, richelle, rachal, raychel, ra chel, rach el",
+        "rachel, rachael, richel, richelle, rachal, raychel, ra chel, rach el, rita, ritu",
     ).split(",")
     if s.strip()
 ]
@@ -389,7 +457,7 @@ ASR_ENGLISH_ONLY = (
 )
 ASR_API_LANGUAGE = ((os.getenv("ASR_API_LANGUAGE", "en") or "").strip() or "en")
 ASR_API_FORCE_LANGUAGE = (
-    (os.getenv("ASR_API_FORCE_LANGUAGE", "1") or "1").strip().lower()
+    (os.getenv("ASR_API_FORCE_LANGUAGE", "0") or "0").strip().lower()
     in {"1", "true", "t", "yes", "y", "on"}
 )
 
@@ -480,6 +548,7 @@ def _canonicalize_wake_words(text: str) -> str:
 
 _GAME_TERM_PATTERNS = [
     (re.compile(r"(?<!\w)corn[\s\-]*hole(?!\w)", re.IGNORECASE), "cornhole"),
+    (re.compile(r"(?<!\w)kong[\s\-]*ho(?:u)?(?!\w)", re.IGNORECASE), "cornhole"),
     (re.compile(r"(?<!\w)disc[\s\-]*golf(?!\w)", re.IGNORECASE), "disc golf"),
     (re.compile(r"(?<!\w)pickle[\s\-]*ball(?!\w)", re.IGNORECASE), "pickleball"),
 ]
@@ -494,8 +563,23 @@ def _canonicalize_game_terms(text: str) -> str:
     return normalized
 
 
+_COMMON_AGENT_PHRASE_PATTERNS = [
+    (re.compile(r"(?<!\w)holstein\s+screen(?!\w)", re.IGNORECASE), "how's things going"),
+    (re.compile(r"(?<!\w)recommend(?:ed)?\s+game\s+to\s+me(?!\w)", re.IGNORECASE), "recommend a game to me"),
+]
+
+
+def _canonicalize_common_agent_phrases(text: str) -> str:
+    if not text:
+        return text
+    normalized = text
+    for pattern, replacement in _COMMON_AGENT_PHRASE_PATTERNS:
+        normalized = pattern.sub(replacement, normalized)
+    return normalized
+
+
 def _canonicalize_asr_text(text: str) -> str:
-    return _canonicalize_game_terms(_canonicalize_wake_words(text))
+    return _canonicalize_common_agent_phrases(_canonicalize_game_terms(_canonicalize_wake_words(text)))
 
 
 def _environment_int(key: str, default: int) -> int:
@@ -844,6 +928,30 @@ class RespondRequest(BaseModel):
         default=None,
         description="Optional stable user identifier for logging/debugging.",
     )
+    dialog_context: Optional[str] = Field(
+        default=None,
+        description="Optional short-term multi-turn dialogue context (recent turns + summary).",
+    )
+    dialog_policy: Optional[str] = Field(
+        default=None,
+        description="Dialogue routing hint: continue_topic, switch_topic, or ask_clarify.",
+    )
+    current_topic: Optional[str] = Field(
+        default=None,
+        description="Optional current topic slot from dialogue manager.",
+    )
+    open_question: Optional[str] = Field(
+        default=None,
+        description="Optional pending question from previous assistant turn.",
+    )
+    barge_in: bool = Field(
+        default=False,
+        description="True when user interrupted ongoing TTS playback (barge-in).",
+    )
+    interrupted_tts_text: Optional[str] = Field(
+        default=None,
+        description="Optional interrupted assistant text snippet for context only.",
+    )
 
 
 class RespondResponse(BaseModel):
@@ -881,6 +989,86 @@ class TranscribeConfigResponse(BaseModel):
     openai_model: str
 
 
+class ConversationConfigRequest(BaseModel):
+    pipeline_mode: Optional[str] = Field(
+        default=None,
+        description="Conversation pipeline mode: direct_unified or legacy_mqtt.",
+    )
+    profile: Optional[str] = Field(
+        default=None,
+        description="Conversation profile: local or cloud.",
+    )
+    local_asr_mode: Optional[str] = Field(
+        default=None,
+        description="Preferred ASR mode when profile=local.",
+    )
+    cloud_asr_mode: Optional[str] = Field(
+        default=None,
+        description="Preferred ASR mode when profile=cloud.",
+    )
+    cloud_response_provider: Optional[str] = Field(
+        default=None,
+        description="Cloud response provider. Currently only openai is supported.",
+    )
+    openai_api_key: Optional[str] = Field(
+        default=None,
+        description="OpenAI API key used for cloud response and API ASR.",
+    )
+    openai_base_url: Optional[str] = Field(
+        default=None,
+        description="Optional OpenAI-compatible base URL.",
+    )
+    openai_transcribe_model: Optional[str] = Field(
+        default=None,
+        description="OpenAI ASR model used when api transcription is selected.",
+    )
+    openai_transcribe_prompt: Optional[str] = Field(
+        default=None,
+        description="Optional OpenAI ASR prompt override.",
+    )
+    openai_response_model: Optional[str] = Field(
+        default=None,
+        description="OpenAI chat model used when profile=cloud.",
+    )
+    local_response_model: Optional[str] = Field(
+        default=None,
+        description="Ollama model used when profile=local.",
+    )
+    reset: bool = Field(default=False, description="Reset runtime overrides back to env defaults.")
+
+
+class ConversationConfigResponse(BaseModel):
+    status: str = "ok"
+    pipeline_mode: str
+    profile: str
+    local_asr_mode: str
+    cloud_asr_mode: str
+    preferred_asr_mode: str
+    cloud_response_provider: str
+    openai_response_model: str
+    local_response_model: str
+    openai_configured: bool
+    cloud_ready: bool
+    effective_response_provider: str
+
+
+class ConversationTurnRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="User transcript to route through the unified conversation pipeline.")
+    corr_id: Optional[str] = Field(default=None, description="Stable corr_id from Unity for de-dupe and cancelation.")
+    user_id: Optional[str] = Field(default=None, description="Optional stable user identifier.")
+    source: Optional[str] = Field(default=None, description="Source label for diagnostics.")
+    avg_logprob: Optional[float] = Field(default=None)
+    rms: Optional[float] = Field(default=None)
+    max_amplitude: Optional[float] = Field(default=None)
+    speaker_index: Optional[int] = Field(default=None)
+    speaker_id: Optional[int] = Field(default=None)
+    barge_in: bool = Field(default=False)
+    interrupted_tts_text: Optional[str] = Field(default=None)
+    interrupted_tts_corr_id: Optional[str] = Field(default=None)
+    transcript_source: Optional[str] = Field(default=None)
+    transcript_confidence: Optional[str] = Field(default=None)
+
+
 class OllamaError(RuntimeError):
     pass
 
@@ -891,6 +1079,10 @@ def _ollama_base_url() -> str:
 
 def _ollama_model() -> str:
     return _environment("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+
+
+def _ollama_think_enabled() -> bool:
+    return _environment_bool("OLLAMA_THINK", DEFAULT_OLLAMA_THINK)
 
 
 def _ollama_system_prompt() -> str:
@@ -945,6 +1137,601 @@ async def _get_effective_transcribe_mode() -> tuple[str, str]:
     if runtime_mode:
         return runtime_mode, "runtime"
     return TRANSCRIBE_MODE_DEFAULT, "env_or_default"
+
+
+def _normalize_pipeline_mode(mode: Optional[str]) -> str:
+    normalized = (mode or "").strip().lower()
+    if normalized in {"direct", PIPELINE_MODE_DIRECT_UNIFIED, "unified", "best"}:
+        return PIPELINE_MODE_DIRECT_UNIFIED
+    if normalized in {"legacy", PIPELINE_MODE_LEGACY_MQTT, "mqtt"}:
+        return PIPELINE_MODE_LEGACY_MQTT
+    return PIPELINE_MODE_DIRECT_UNIFIED
+
+
+def _normalize_conversation_profile(profile: Optional[str]) -> str:
+    normalized = (profile or "").strip().lower()
+    if normalized in {CONVERSATION_PROFILE_CLOUD, "online", "openai"}:
+        return CONVERSATION_PROFILE_CLOUD
+    return CONVERSATION_PROFILE_LOCAL
+
+
+def _normalize_cloud_response_provider(provider: Optional[str]) -> str:
+    normalized = (provider or "").strip().lower()
+    if normalized in {"openai", "api", "cloud"}:
+        return "openai"
+    return "openai"
+
+
+def _conversation_pipeline_mode() -> str:
+    return _normalize_pipeline_mode(os.getenv("VOICE_PIPELINE_MODE", PIPELINE_MODE_DIRECT_UNIFIED))
+
+
+def _conversation_profile() -> str:
+    return _normalize_conversation_profile(os.getenv("VOICE_CONVERSATION_PROFILE", CONVERSATION_PROFILE_LOCAL))
+
+
+def _conversation_local_asr_mode() -> str:
+    return _normalize_transcribe_mode(os.getenv("VOICE_LOCAL_ASR_MODE")) or TRANSCRIBE_MODE_MOONSHINE_MEDIUM
+
+
+def _conversation_cloud_asr_mode() -> str:
+    return _normalize_transcribe_mode(os.getenv("VOICE_CLOUD_ASR_MODE")) or TRANSCRIBE_MODE_API
+
+
+def _conversation_preferred_asr_mode(profile: Optional[str] = None) -> str:
+    effective_profile = _normalize_conversation_profile(profile or _conversation_profile())
+    if effective_profile == CONVERSATION_PROFILE_CLOUD:
+        return _conversation_cloud_asr_mode()
+    return _conversation_local_asr_mode()
+
+
+def _conversation_cloud_response_provider() -> str:
+    return _normalize_cloud_response_provider(os.getenv("VOICE_CLOUD_RESPONSE_PROVIDER", "openai"))
+
+
+def _openai_response_model() -> str:
+    return (os.getenv("OPENAI_RESPONSE_MODEL", DEFAULT_OPENAI_RESPONSE_MODEL) or DEFAULT_OPENAI_RESPONSE_MODEL).strip()
+
+
+def _conversation_local_response_model() -> str:
+    return _ollama_model()
+
+
+def _conversation_effective_response_provider(profile: Optional[str] = None) -> str:
+    effective_profile = _normalize_conversation_profile(profile or _conversation_profile())
+    if effective_profile == CONVERSATION_PROFILE_CLOUD and _openai_configured():
+        return _conversation_cloud_response_provider()
+    return "ollama"
+
+
+_CONVERSATION_ENV_DEFAULTS: Dict[str, Optional[str]] = {
+    "VOICE_PIPELINE_MODE": os.getenv("VOICE_PIPELINE_MODE"),
+    "VOICE_CONVERSATION_PROFILE": os.getenv("VOICE_CONVERSATION_PROFILE"),
+    "VOICE_LOCAL_ASR_MODE": os.getenv("VOICE_LOCAL_ASR_MODE"),
+    "VOICE_CLOUD_ASR_MODE": os.getenv("VOICE_CLOUD_ASR_MODE"),
+    "VOICE_CLOUD_RESPONSE_PROVIDER": os.getenv("VOICE_CLOUD_RESPONSE_PROVIDER"),
+    "OPENAI_RESPONSE_MODEL": os.getenv("OPENAI_RESPONSE_MODEL"),
+    "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL"),
+}
+
+
+def _restore_conversation_env_defaults() -> None:
+    for key, value in _CONVERSATION_ENV_DEFAULTS.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+def _conversation_config_snapshot() -> Dict[str, Any]:
+    profile = _conversation_profile()
+    effective_provider = _conversation_effective_response_provider(profile)
+    return {
+        "pipeline_mode": _conversation_pipeline_mode(),
+        "profile": profile,
+        "local_asr_mode": _conversation_local_asr_mode(),
+        "cloud_asr_mode": _conversation_cloud_asr_mode(),
+        "preferred_asr_mode": _conversation_preferred_asr_mode(profile),
+        "cloud_response_provider": _conversation_cloud_response_provider(),
+        "openai_response_model": _openai_response_model(),
+        "local_response_model": _conversation_local_response_model(),
+        "openai_configured": _openai_configured(),
+        "cloud_ready": _openai_configured(),
+        "effective_response_provider": effective_provider,
+    }
+
+
+class OpenAIResponseError(RuntimeError):
+    pass
+
+
+class _UnifiedConversationRuntime:
+    def __init__(self) -> None:
+        self.intent_cfg = None
+        self.intent_resolver = None
+        self.intent_router = None
+        self.game_catalog = None
+        self.dialog_cfg = None
+        self.dialog_helper = None
+        self.ready = False
+        self.error = ""
+        self.reload_from_env()
+
+    def close(self) -> None:
+        if self.intent_router is not None:
+            try:
+                self.intent_router.close()
+            except Exception:
+                pass
+        self.intent_router = None
+        self.intent_resolver = None
+        self.game_catalog = None
+        if self.dialog_helper is not None:
+            try:
+                self.dialog_helper.http.close()
+            except Exception:
+                pass
+        self.dialog_helper = None
+        self.ready = False
+
+    def reload_from_env(self) -> None:
+        self.close()
+        if load_intent_config is None or IntentRouterEngine is None or ManifestAliasResolver is None:
+            self.error = "intent routing helpers are unavailable"
+            return
+        if load_dialog_config is None or DialogService is None:
+            self.error = "dialog helpers are unavailable"
+            return
+
+        try:
+            self.intent_cfg = load_intent_config()
+            self.intent_resolver = ManifestAliasResolver(self.intent_cfg.manifest_path)
+            self.intent_router = IntentRouterEngine(self.intent_cfg, self.intent_resolver)
+            self.game_catalog = GameCatalog(Path(self.intent_cfg.manifest_path))
+        except Exception as exc:
+            self.error = f"intent router init failed: {exc}"
+            self.intent_router = None
+            self.game_catalog = None
+            return
+
+        try:
+            self.dialog_cfg = load_dialog_config()
+            self.dialog_helper = DialogService(self.dialog_cfg)
+        except Exception as exc:
+            self.error = f"dialog helper init failed: {exc}"
+            if self.intent_router is not None:
+                try:
+                    self.intent_router.close()
+                except Exception:
+                    pass
+            self.intent_router = None
+            self.dialog_helper = None
+            return
+
+        self.error = ""
+        self.ready = True
+
+    def ensure_ready(self) -> None:
+        if not self.ready or self.intent_router is None or self.dialog_helper is None:
+            raise RuntimeError(self.error or "unified conversation runtime is not ready")
+
+    def resolve_user_id(self, *, payload: Dict[str, Any], user_id: Optional[str]) -> Optional[str]:
+        self.ensure_ready()
+        helper = self.dialog_helper
+        assert helper is not None
+        resolved_user_id = (user_id or "").strip() or None
+        if helper.user_memory is None:
+            return resolved_user_id
+        try:
+            identity_payload = dict(payload)
+            if resolved_user_id:
+                identity_payload["speaker_profile_id"] = resolved_user_id
+            if speaker_identity_key is None:
+                identity_key = "source:default"
+            else:
+                identity_key = speaker_identity_key(identity_payload)
+            return helper.user_memory.resolve_user(identity_key)
+        except Exception as exc:
+            logger.warning("user identity resolve failed: %s", exc)
+            return resolved_user_id
+
+    def route_text(
+        self,
+        text: str,
+        corr_id: str,
+        *,
+        payload: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
+    ):
+        self.ensure_ready()
+        helper = self.dialog_helper
+        assert helper is not None
+        resolved_user_id = self.resolve_user_id(payload=payload or {}, user_id=user_id)
+        context_game_name = ""
+        if resolved_user_id and helper.user_memory is not None:
+            try:
+                context_game_name = helper.user_memory.get_game_reference(resolved_user_id)
+            except Exception as exc:
+                logger.warning("game reference resolve failed: %s", exc)
+        return self.intent_router.route(text, corr_id, context_game_name=context_game_name)
+
+    def build_turn_context(
+        self,
+        *,
+        payload: Dict[str, Any],
+        text: str,
+        user_id: Optional[str],
+        resolved_user_id: Optional[str] = None,
+    ) -> Tuple[Optional[str], str, Dict[str, str], Dict[str, Any]]:
+        self.ensure_ready()
+        helper = self.dialog_helper
+        assert helper is not None
+
+        resolved_user_id = (resolved_user_id or user_id or "").strip() or None
+        memory_context = ""
+        dialog_request_ctx: Dict[str, str] = {
+            "dialog_context": "",
+            "dialog_policy": "switch_topic",
+            "current_topic": "",
+            "open_question": "",
+        }
+        memory_update: Dict[str, Any] = {
+            "explicit_memory": False,
+            "facts_written": [],
+            "facts_removed": [],
+            "ack_text": "",
+            "utterance": "",
+        }
+        if helper.user_memory is None:
+            return resolved_user_id, memory_context, dialog_request_ctx, memory_update
+
+        try:
+            resolved_user_id = self.resolve_user_id(payload=payload, user_id=resolved_user_id)
+            memory_update = helper.user_memory.remember_utterance(resolved_user_id, text)
+            memory_context = helper.user_memory.build_memory_context(resolved_user_id, query_text=text)
+            dialog_request_ctx = helper._build_dialog_request_context(user_id=resolved_user_id, user_text=text)
+            if dialog_request_ctx.get("dialog_policy") == "switch_topic":
+                memory_context = ""
+        except Exception as exc:
+            logger.warning("dialog context build failed: %s", exc)
+            resolved_user_id = (user_id or "").strip() or None
+            memory_context = ""
+            dialog_request_ctx = {
+                "dialog_context": "",
+                "dialog_policy": "switch_topic",
+                "current_topic": "",
+                "open_question": "",
+            }
+            memory_update = {
+                "explicit_memory": False,
+                "facts_written": [],
+                "facts_removed": [],
+                "ack_text": "",
+                "utterance": "",
+            }
+        return resolved_user_id, memory_context, dialog_request_ctx, memory_update
+
+    def finalize_assistant_turn(
+        self,
+        *,
+        user_id: Optional[str],
+        user_text: str,
+        answer_text: str,
+        dialog_request_ctx: Dict[str, str],
+    ) -> None:
+        self.ensure_ready()
+        helper = self.dialog_helper
+        assert helper is not None
+        if not user_id or helper.user_memory is None or not helper.cfg.enable_dialog_context:
+            return
+
+        try:
+            helper.user_memory.remember_dialog_turn(
+                user_id,
+                "assistant",
+                answer_text,
+                max_turns=helper.cfg.dialog_history_turns,
+                summary_max_chars=helper.cfg.dialog_summary_max_chars,
+            )
+            helper._update_dialog_slots_after_reply(
+                user_id=user_id,
+                user_text=user_text,
+                answer_text=answer_text,
+                dialog_policy=dialog_request_ctx.get("dialog_policy", "switch_topic"),
+                previous_topic=dialog_request_ctx.get("current_topic", ""),
+            )
+        except Exception as exc:
+            logger.warning("dialog slot update failed: %s", exc)
+
+    def try_memory_reply(
+        self,
+        *,
+        user_id: Optional[str],
+        text: str,
+        dialog_request_ctx: Dict[str, str],
+    ) -> str:
+        self.ensure_ready()
+        helper = self.dialog_helper
+        assert helper is not None
+        if not user_id or helper.user_memory is None or not helper._is_memory_query(text):
+            return ""
+
+        try:
+            reply = (helper.user_memory.answer_memory_query(user_id, text) or "").strip()
+        except Exception as exc:
+            logger.warning("user memory reply failed: %s", exc)
+            return ""
+        reply = _finalize_static_tts_reply(helper, reply)
+        if reply:
+            self.finalize_assistant_turn(
+                user_id=user_id,
+                user_text=text,
+                answer_text=reply,
+                dialog_request_ctx=dialog_request_ctx,
+            )
+        return reply
+
+    def try_memory_write_reply(
+        self,
+        *,
+        user_id: Optional[str],
+        text: str,
+        memory_update: Dict[str, Any],
+        dialog_request_ctx: Dict[str, str],
+    ) -> str:
+        self.ensure_ready()
+        helper = self.dialog_helper
+        assert helper is not None
+        if not user_id or helper.user_memory is None:
+            return ""
+        reply = str(memory_update.get("ack_text") or "").strip()
+        if not reply:
+            return ""
+        reply = _finalize_static_tts_reply(helper, reply)
+        if reply:
+            self.finalize_assistant_turn(
+                user_id=user_id,
+                user_text=text,
+                answer_text=reply,
+                dialog_request_ctx=dialog_request_ctx,
+            )
+        return reply
+
+    def try_game_reply(
+        self,
+        *,
+        user_id: Optional[str],
+        text: str,
+        dialog_request_ctx: Dict[str, str],
+    ) -> str:
+        self.ensure_ready()
+        helper = self.dialog_helper
+        assert helper is not None
+        if self.game_catalog is None:
+            return ""
+        user_profile: Dict[str, Any] = {}
+        if user_id and helper.user_memory is not None:
+            try:
+                user_profile = helper.user_memory.profile_snapshot(user_id)
+            except Exception:
+                user_profile = {}
+        try:
+            grounded = self.game_catalog.grounded_reply(text, user_profile=user_profile)
+        except Exception as exc:
+            logger.warning("game grounding failed: %s", exc)
+            return ""
+        reply = str(grounded.get("text") or "").strip()
+        if not reply:
+            return ""
+        grounded_game_name = str(grounded.get("game_name") or "").strip()
+        reply = _finalize_static_tts_reply(helper, reply)
+        if user_id and helper.user_memory is not None and grounded_game_name:
+            try:
+                helper.user_memory.set_game_reference(
+                    user_id,
+                    game_name=grounded_game_name,
+                    reference_kind=str(grounded.get("type") or "game_reply").strip() or "game_reply",
+                    source="game_catalog",
+                )
+            except Exception as exc:
+                logger.warning("game reference update failed: %s", exc)
+        if reply:
+            self.finalize_assistant_turn(
+                user_id=user_id,
+                user_text=text,
+                answer_text=reply,
+                dialog_request_ctx=dialog_request_ctx,
+            )
+        return reply
+
+    def record_game_event(
+        self,
+        *,
+        user_id: Optional[str],
+        game_name: str,
+        action: str = "launch",
+        source: str = "conversation",
+    ) -> None:
+        self.ensure_ready()
+        helper = self.dialog_helper
+        assert helper is not None
+        if not user_id or helper.user_memory is None:
+            return
+        try:
+            helper.user_memory.record_game_event(
+                user_id,
+                game_name=game_name,
+                action=action,
+                source=source,
+            )
+        except Exception as exc:
+            logger.warning("game event record failed: %s", exc)
+
+    def try_vision_reply(
+        self,
+        *,
+        user_id: Optional[str],
+        text: str,
+        dialog_request_ctx: Dict[str, str],
+    ) -> str:
+        self.ensure_ready()
+        helper = self.dialog_helper
+        assert helper is not None
+        if not helper.cfg.enable_vision_query or not helper._is_vision_query(text):
+            return ""
+
+        reply = helper._request_vision_description()
+        reply = _finalize_static_tts_reply(helper, reply)
+        if reply:
+            self.finalize_assistant_turn(
+                user_id=user_id,
+                user_text=text,
+                answer_text=reply,
+                dialog_request_ctx=dialog_request_ctx,
+            )
+        return reply
+
+    def try_general_query_reply(
+        self,
+        *,
+        user_id: Optional[str],
+        text: str,
+        dialog_request_ctx: Dict[str, str],
+    ) -> str:
+        self.ensure_ready()
+        helper = self.dialog_helper
+        assert helper is not None
+        reply = _try_general_query_reply_text(text)
+        if not reply:
+            return ""
+        reply = _finalize_static_tts_reply(helper, reply)
+        if reply:
+            self.finalize_assistant_turn(
+                user_id=user_id,
+                user_text=text,
+                answer_text=reply,
+                dialog_request_ctx=dialog_request_ctx,
+            )
+        return reply
+
+
+_UNIFIED_CONVERSATION_RUNTIME: Optional[_UnifiedConversationRuntime] = None
+_UNIFIED_CONVERSATION_RUNTIME_LOCK = asyncio.Lock()
+
+
+async def _get_unified_conversation_runtime(*, force_reload: bool = False) -> _UnifiedConversationRuntime:
+    global _UNIFIED_CONVERSATION_RUNTIME
+    async with _UNIFIED_CONVERSATION_RUNTIME_LOCK:
+        if force_reload or _UNIFIED_CONVERSATION_RUNTIME is None:
+            if _UNIFIED_CONVERSATION_RUNTIME is not None:
+                _UNIFIED_CONVERSATION_RUNTIME.close()
+            _UNIFIED_CONVERSATION_RUNTIME = _UnifiedConversationRuntime()
+        return _UNIFIED_CONVERSATION_RUNTIME
+
+
+def _finalize_static_tts_reply(dialog_helper: Any, reply_text: str) -> str:
+    text = (reply_text or "").strip()
+    if not text:
+        return ""
+    if sanitize_tts_text is not None:
+        text = sanitize_tts_text(text)
+    if not text:
+        return ""
+    if getattr(dialog_helper, "reply_compress", False):
+        if compress_reply_for_latency is not None:
+            text = compress_reply_for_latency(
+                text,
+                max_sentences=getattr(dialog_helper, "reply_max_sentences", 0),
+                max_chars=getattr(dialog_helper, "reply_max_chars", 0),
+            )
+        if compress_reply_by_words is not None:
+            text = compress_reply_by_words(text, getattr(dialog_helper, "reply_max_words", 0))
+        if trim_trailing_connectors is not None:
+            text = trim_trailing_connectors(text)
+        if text and text[-1] not in ".!?。！？":
+            text = f"{text}."
+    return text.strip()
+
+
+def _json_line(payload: Dict[str, Any]) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _normalize_transcript_confidence(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"high", "medium", "low"}:
+        return normalized
+    return ""
+
+
+def _should_clarify_uncertain_turn(payload: ConversationTurnRequest, route_type: str) -> bool:
+    if str(route_type or "").strip().upper() != "QUERY":
+        return False
+    confidence = _normalize_transcript_confidence(payload.transcript_confidence)
+    source = str(payload.transcript_source or "").strip().lower()
+    if confidence == "low":
+        return True
+    return source == "stable_partial_fallback"
+
+
+def _uncertain_turn_reply(payload: ConversationTurnRequest) -> str:
+    source = str(payload.transcript_source or "").strip().lower()
+    if source == "stable_partial_fallback":
+        return "I may have misheard that. Please say it again."
+    return "I may have heard that incorrectly. Please repeat it."
+
+
+class _ReplyChunkAccumulator:
+    def __init__(self) -> None:
+        self.buffer = ""
+
+    def push(self, delta: str) -> List[str]:
+        if delta:
+            self.buffer += delta
+        return self._drain(final=False)
+
+    def finish(self) -> List[str]:
+        return self._drain(final=True)
+
+    def _drain(self, *, final: bool) -> List[str]:
+        chunks: List[str] = []
+        while True:
+            boundary = _find_reply_boundary(self.buffer, final=final)
+            if boundary <= 0:
+                break
+            chunk = self.buffer[:boundary].strip()
+            self.buffer = self.buffer[boundary:].lstrip()
+            if chunk:
+                chunks.append(chunk)
+            if not final and not self.buffer:
+                break
+            if not final and len(chunks) >= 2:
+                break
+        if final and self.buffer.strip():
+            chunks.append(self.buffer.strip())
+            self.buffer = ""
+        return chunks
+
+
+def _find_reply_boundary(text: str, *, final: bool) -> int:
+    current = (text or "")
+    if not current:
+        return 0
+
+    hard_boundaries = ".!?銆傦紒锛焅n"
+    soft_boundaries = ",锛?锛?锛?"
+    minimum_chunk_chars = 18
+    for idx in range(len(current) - 1, minimum_chunk_chars - 1, -1):
+        if current[idx] in hard_boundaries:
+            return idx + 1
+
+    if len(current) >= 72:
+        for idx in range(min(len(current) - 1, 120), minimum_chunk_chars - 1, -1):
+            if current[idx] in soft_boundaries:
+                return idx + 1
+    if final:
+        return len(current)
+    return 0
 
 
 def _duration_seconds(audio: np.ndarray, sample_rate: int) -> Optional[float]:
@@ -1005,15 +1792,116 @@ def _piper_http_base_url() -> str:
     return _environment("PIPER_HTTP_URL", "http://127.0.0.1:5005").rstrip("/")
 
 
-async def _generate_coach_reply(
+def _compose_dialog_system_prompt(
+    *,
+    base_system_prompt: str,
+    dialog_policy: Optional[str],
+    has_dialog_context: bool,
+    barge_in: bool,
+    user_text: str,
+) -> str:
+    lowered_user_text = (user_text or "").strip().lower()
+
+    def requests_single_sentence_reply() -> bool:
+        markers = (
+            "one short sentence",
+            "one sentence",
+            "single sentence",
+            "in one short sentence",
+            "briefly in one sentence",
+            "一句话",
+        )
+        return any(marker in lowered_user_text for marker in markers)
+
+    def requests_brief_reply() -> bool:
+        if requests_single_sentence_reply():
+            return True
+        markers = (
+            "brief",
+            "briefly",
+            "short answer",
+            "keep it short",
+            "concise",
+            "简短",
+            "简洁",
+        )
+        return any(marker in lowered_user_text for marker in markers)
+
+    policy = (dialog_policy or "").strip().lower()
+    instructions: List[str] = [
+        "Conversation protocol:",
+        "- Treat each turn as part of an ongoing dialogue, not a single-turn Q&A.",
+        "- Keep the reply natural for speech output; no lists, no labels, no meta commentary.",
+        "- Start with one short contextual bridge only when it truly helps continuity.",
+        "- Then answer directly and concretely based on the latest user message.",
+        "- Keep default length to 1-2 concise sentences unless clarification is required.",
+        "- Do not add a generic follow-up question after a complete answer.",
+        "- Do not invent emotions, symptoms, or user states that were not explicitly stated.",
+        "- Do not repeat old advice when the user asks for a topic switch.",
+        "- When explaining a game, define the game plainly instead of inventing benefits.",
+        "- Use literal, practical language; avoid poetic or metaphorical phrasing.",
+        "- Treat simple preferences (for example morning/evening) as scheduling input, not emotional signals.",
+        "- Do not address the user by name unless they clearly asked for that or the current turn makes it genuinely useful.",
+        "- If the user shares a personal event or disappointment, respond to that content directly instead of converting it into coaching language.",
+        "- For real-world or out-of-scope questions, give a brief honest limitation or a cautious general answer.",
+        "- Do not say you can see, check, monitor, track, or find something unless tool or vision context explicitly provides it.",
+    ]
+    if requests_single_sentence_reply():
+        instructions.append("- The user explicitly asked for one short sentence. Reply with exactly one short sentence.")
+        instructions.append("- Do not add a second sentence, disclaimer, or follow-up question.")
+    elif requests_brief_reply():
+        instructions.append("- The user asked for a brief answer. Use one concise sentence if possible, at most two.")
+        instructions.append("- Do not add a generic follow-up question.")
+    if policy == "continue_topic":
+        instructions.append(
+            "- Assume the user is continuing the current topic unless they explicitly switch."
+        )
+        instructions.append("- Reuse relevant prior details, but avoid repeating the previous answer verbatim.")
+    elif policy == "switch_topic":
+        instructions.append(
+            "- Treat this as a topic switch. Acknowledge the switch briefly, then focus on the new topic."
+        )
+        instructions.append("- Ignore old topic details unless the user explicitly asks to reuse them.")
+    elif policy == "ask_clarify":
+        instructions.append("- Ask exactly one concise clarification question first.")
+        instructions.append("- Do not provide a full plan before the clarification is answered.")
+    else:
+        instructions.append("- If user intent is ambiguous, ask one concise clarification question.")
+
+    if has_dialog_context:
+        instructions.append("- Reuse relevant facts from dialogue context when they improve coherence.")
+    if barge_in:
+        instructions.append("- The user interrupted playback. Treat any unfinished assistant sentence as canceled.")
+        instructions.append("- Prioritize the latest user message and respond to that directly.")
+
+    merged = (base_system_prompt or "").strip()
+    if merged:
+        merged += "\n\n"
+    merged += "\n".join(instructions)
+    return merged
+
+
+async def _build_coach_prompt_package(
     user_text: str,
     system_override: Optional[str] = None,
     memory_context: Optional[str] = None,
     user_id: Optional[str] = None,
-) -> str:
-    keep_alive = _environment("OLLAMA_KEEP_ALIVE", "30m")
+    dialog_context: Optional[str] = None,
+    dialog_policy: Optional[str] = None,
+    current_topic: Optional[str] = None,
+    open_question: Optional[str] = None,
+    barge_in: bool = False,
+    interrupted_tts_text: Optional[str] = None,
+) -> tuple[str, str]:
     effective_system_prompt, _, _ = await _get_effective_ollama_system_prompt()
     prompt_parts: List[str] = []
+
+    dialog_context_text = (dialog_context or "").strip()
+    if dialog_context_text:
+        if len(dialog_context_text) > 1200:
+            dialog_context_text = dialog_context_text[:1200].rstrip()
+        prompt_parts.append("Dialogue context (summary + recent turns):\n" + dialog_context_text)
+
     context_text = (memory_context or "").strip()
     if context_text:
         if len(context_text) > 600:
@@ -1022,26 +1910,217 @@ async def _generate_coach_reply(
             "User memory context (may be partial, use only when relevant):\n"
             f"{context_text}"
         )
+
     if user_id:
         prompt_parts.append(f"Active user id: {str(user_id).strip()}.")
-    prompt_parts.append(f"User: {user_text}\nCoach:")
+    if current_topic and current_topic.strip():
+        prompt_parts.append(f"Current topic hint: {current_topic.strip()}.")
+    if open_question and open_question.strip():
+        prompt_parts.append(f"Pending follow-up question: {open_question.strip()}")
+    if dialog_policy and dialog_policy.strip():
+        prompt_parts.append(f"Dialogue policy hint: {dialog_policy.strip().lower()}.")
+    if barge_in:
+        prompt_parts.append("Barge-in hint: user interrupted assistant playback.")
+    interrupted_text = (interrupted_tts_text or "").strip()
+    if barge_in and interrupted_text:
+        if len(interrupted_text) > 260:
+            interrupted_text = interrupted_text[:260].rstrip()
+        prompt_parts.append(
+            "Interrupted assistant text (may be incomplete; do not continue blindly): "
+            + interrupted_text
+        )
 
-    payload = {
-        "model": _ollama_model(),
-        "system": (system_override or "").strip() or effective_system_prompt,
-        "prompt": "\n\n".join(prompt_parts),
-        "stream": False,
+    prompt_parts.append("Latest user message:")
+    prompt_parts.append(f"User: {user_text}")
+    prompt_parts.append("Coach:")
+
+    merged_system = _compose_dialog_system_prompt(
+        base_system_prompt=(system_override or "").strip() or effective_system_prompt,
+        dialog_policy=dialog_policy,
+        has_dialog_context=bool(dialog_context_text),
+        barge_in=bool(barge_in),
+        user_text=user_text,
+    )
+    return merged_system, "\n\n".join(prompt_parts)
+
+
+async def _build_ollama_generate_payload(
+    user_text: str,
+    *,
+    system_override: Optional[str] = None,
+    memory_context: Optional[str] = None,
+    user_id: Optional[str] = None,
+    dialog_context: Optional[str] = None,
+    dialog_policy: Optional[str] = None,
+    current_topic: Optional[str] = None,
+    open_question: Optional[str] = None,
+    barge_in: bool = False,
+    interrupted_tts_text: Optional[str] = None,
+    stream: bool = False,
+    model_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    keep_alive = _environment("OLLAMA_KEEP_ALIVE", "30m")
+    merged_system, prompt = await _build_coach_prompt_package(
+        user_text,
+        system_override=system_override,
+        memory_context=memory_context,
+        user_id=user_id,
+        dialog_context=dialog_context,
+        dialog_policy=dialog_policy,
+        current_topic=current_topic,
+        open_question=open_question,
+        barge_in=barge_in,
+        interrupted_tts_text=interrupted_tts_text,
+    )
+    payload: Dict[str, Any] = {
+        "model": (model_override or _ollama_model()).strip() or _ollama_model(),
+        "think": _ollama_think_enabled(),
+        "system": merged_system,
+        "prompt": prompt,
+        "stream": bool(stream),
         "options": {
-            "temperature": _environment_float("OLLAMA_TEMPERATURE", 0.6),
-            "top_p": _environment_float("OLLAMA_TOP_P", 0.9),
-            "top_k": _environment_int("OLLAMA_TOP_K", 40),
+            "temperature": _environment_float("OLLAMA_TEMPERATURE", 0.7),
+            "top_p": _environment_float("OLLAMA_TOP_P", 0.8),
+            "top_k": _environment_int("OLLAMA_TOP_K", 20),
             "num_predict": _environment_int("OLLAMA_MAX_TOKENS", 120),
             "repeat_penalty": _environment_float("OLLAMA_REPEAT_PENALTY", 1.1),
         },
     }
     if keep_alive:
         payload["keep_alive"] = keep_alive
+    return payload
 
+
+async def _stream_ollama_reply(
+    user_text: str,
+    *,
+    system_override: Optional[str] = None,
+    memory_context: Optional[str] = None,
+    user_id: Optional[str] = None,
+    dialog_context: Optional[str] = None,
+    dialog_policy: Optional[str] = None,
+    current_topic: Optional[str] = None,
+    open_question: Optional[str] = None,
+    barge_in: bool = False,
+    interrupted_tts_text: Optional[str] = None,
+    model_override: Optional[str] = None,
+) -> AsyncIterator[str]:
+    payload = await _build_ollama_generate_payload(
+        user_text,
+        system_override=system_override,
+        memory_context=memory_context,
+        user_id=user_id,
+        dialog_context=dialog_context,
+        dialog_policy=dialog_policy,
+        current_topic=current_topic,
+        open_question=open_question,
+        barge_in=barge_in,
+        interrupted_tts_text=interrupted_tts_text,
+        stream=True,
+        model_override=model_override,
+    )
+    url = f"{_ollama_base_url()}/api/generate"
+    client = _AsyncHttpClient.get()
+    try:
+        async with client.stream("POST", url, json=payload, timeout=None) as response:
+            if response.status_code != 200:
+                detail = (await response.aread()).decode("utf-8", errors="ignore").strip()
+                raise OllamaError(f"Ollama returned status {response.status_code}: {detail}")
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except Exception:
+                    continue
+                token = str(data.get("response") or "")
+                if token:
+                    yield token
+                if data.get("done"):
+                    break
+    except httpx.HTTPError as exc:
+        raise OllamaError(f"Failed to contact Ollama at {url}: {exc}") from exc
+
+
+async def _stream_openai_reply(
+    user_text: str,
+    *,
+    system_override: Optional[str] = None,
+    memory_context: Optional[str] = None,
+    user_id: Optional[str] = None,
+    dialog_context: Optional[str] = None,
+    dialog_policy: Optional[str] = None,
+    current_topic: Optional[str] = None,
+    open_question: Optional[str] = None,
+    barge_in: bool = False,
+    interrupted_tts_text: Optional[str] = None,
+    model_override: Optional[str] = None,
+) -> AsyncIterator[str]:
+    client = _AsyncOpenAIClient.get()
+    merged_system, prompt = await _build_coach_prompt_package(
+        user_text,
+        system_override=system_override,
+        memory_context=memory_context,
+        user_id=user_id,
+        dialog_context=dialog_context,
+        dialog_policy=dialog_policy,
+        current_topic=current_topic,
+        open_question=open_question,
+        barge_in=barge_in,
+        interrupted_tts_text=interrupted_tts_text,
+    )
+    model = (model_override or _openai_response_model()).strip() or _openai_response_model()
+    try:
+        stream = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": merged_system},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=_environment_float("OPENAI_RESPONSE_TEMPERATURE", 0.6),
+            top_p=_environment_float("OPENAI_RESPONSE_TOP_P", 0.9),
+            max_tokens=_environment_int("OPENAI_RESPONSE_MAX_TOKENS", 180),
+            stream=True,
+        )
+    except Exception as exc:
+        raise OpenAIResponseError(f"OpenAI response request failed: {exc}") from exc
+
+    async for chunk in stream:
+        try:
+            choice = chunk.choices[0] if chunk.choices else None
+            delta = getattr(choice, "delta", None)
+            content = getattr(delta, "content", None) if delta is not None else None
+        except Exception:
+            content = None
+        if isinstance(content, str) and content:
+            yield content
+
+
+async def _generate_coach_reply(
+    user_text: str,
+    system_override: Optional[str] = None,
+    memory_context: Optional[str] = None,
+    user_id: Optional[str] = None,
+    dialog_context: Optional[str] = None,
+    dialog_policy: Optional[str] = None,
+    current_topic: Optional[str] = None,
+    open_question: Optional[str] = None,
+    barge_in: bool = False,
+    interrupted_tts_text: Optional[str] = None,
+) -> str:
+    payload = await _build_ollama_generate_payload(
+        user_text,
+        system_override=system_override,
+        memory_context=memory_context,
+        user_id=user_id,
+        dialog_context=dialog_context,
+        dialog_policy=dialog_policy,
+        current_topic=current_topic,
+        open_question=open_question,
+        barge_in=barge_in,
+        interrupted_tts_text=interrupted_tts_text,
+        stream=False,
+    )
     url = f"{_ollama_base_url()}/api/generate"
 
     try:
@@ -1075,10 +2154,22 @@ async def _startup_event() -> None:
         logger.info("ASR startup mode is '%s'; skipping local model preload.", TRANSCRIBE_MODE_DEFAULT)
     # Warm the shared HTTP client so the first request can reuse an existing connection.
     _AsyncHttpClient.get()
+    if _conversation_pipeline_mode() == PIPELINE_MODE_DIRECT_UNIFIED:
+        try:
+            await _get_unified_conversation_runtime(force_reload=True)
+        except Exception as exc:
+            logger.warning("Unified conversation runtime warmup failed: %s", exc)
 
 
 @app.on_event("shutdown")
 async def _shutdown_event() -> None:
+    global _UNIFIED_CONVERSATION_RUNTIME
+    if _UNIFIED_CONVERSATION_RUNTIME is not None:
+        try:
+            _UNIFIED_CONVERSATION_RUNTIME.close()
+        except Exception:
+            pass
+        _UNIFIED_CONVERSATION_RUNTIME = None
     await _AsyncHttpClient.aclose()
     await _AsyncOpenAIClient.aclose()
     _load_moonshine_transcriber.cache_clear()
@@ -1434,7 +2525,7 @@ def _collapse_repetitive_output(text: str, words: List[dict]) -> tuple[str, List
 def _limit_repeated_sequence_indices(tokens: List[str]) -> List[int]:
     """Return indices that keep only the first occurrence of repeated sequences.
 
-    Whisper can occasionally emit the same 1鈥? token sequence multiple times in
+    Whisper can occasionally emit the same 1閳? token sequence multiple times in
     a row.  When that happens we keep the first instance of the repeated block
     and discard the subsequent duplicates so the Unity client does not surface
     "echoed" words to the player.
@@ -1682,6 +2773,77 @@ def _build_legacy_word_result(words: Iterable[dict]) -> List[dict]:
     return list(words)
 
 
+def _normalize_transcribe_words(words: Iterable[dict]) -> List[dict]:
+    normalized_words: List[dict] = []
+    for item in words:
+        if not isinstance(item, dict):
+            continue
+        original_word = str(item.get("word", "") or "").strip()
+        if not original_word:
+            continue
+        canonical_word = _canonicalize_asr_text(original_word)
+        if not canonical_word:
+            continue
+        normalized_item = dict(item)
+        normalized_item["word"] = canonical_word
+        normalized_words.append(normalized_item)
+    return normalized_words
+
+
+def _build_non_whisper_response(
+    *,
+    text: str,
+    words: Iterable[dict],
+    language: Optional[str],
+    audio: np.ndarray,
+    rms: float,
+    max_amplitude: float,
+    speech_fraction: float,
+    provider: str,
+    mode: str,
+    start_time: float,
+    duration: Optional[float] = None,
+    language_probability: Optional[float] = None,
+    speaker_meta: Optional[dict] = None,
+) -> dict:
+    normalized_text = _canonicalize_asr_text(text or "")
+    normalized_words = _normalize_transcribe_words(words)
+    if not normalized_text and normalized_words:
+        normalized_text = _canonicalize_asr_text(
+            " ".join(word["word"] for word in normalized_words if word.get("word")).strip()
+        )
+
+    normalized_text, normalized_words = _maybe_enforce_english_only(
+        text=normalized_text,
+        words=normalized_words,
+        language=language,
+    )
+
+    response = {
+        "text": normalized_text,
+        "result": _build_legacy_word_result(normalized_words),
+        "language": language,
+        "duration": duration if duration is not None else _duration_seconds(audio, DEFAULT_SAMPLE_RATE),
+        "language_probability": language_probability,
+        "translation": False,
+        "rms": rms,
+        "max_amplitude": max_amplitude,
+        "speech_fraction": speech_fraction,
+        "provider": provider,
+        "mode": mode,
+        "processing_seconds": round(time.perf_counter() - start_time, 4),
+    }
+    if isinstance(speaker_meta, dict):
+        if speaker_meta.get("speaker_index") is not None:
+            response["speaker_index"] = int(speaker_meta["speaker_index"])
+        if speaker_meta.get("speaker_id") is not None:
+            response["speaker_id"] = int(speaker_meta["speaker_id"])
+        speakers_payload = speaker_meta.get("speakers")
+        if isinstance(speakers_payload, list) and speakers_payload:
+            response["speakers"] = speakers_payload
+    return response
+
+
 def _run_transcription(
     model: WhisperModel,
     audio: np.ndarray,
@@ -1884,7 +3046,7 @@ def _extract_openai_words(data: dict) -> List[dict]:
             confidence = None
         words_out.append(
             {
-                "word": _canonicalize_wake_words(word_text),
+                "word": word_text,
                 "start": max(0.0, float(item.get("start", 0.0) or 0.0)),
                 "end": max(0.0, float(item.get("end", 0.0) or 0.0)),
                 "confidence": round(confidence, 4) if confidence is not None else None,
@@ -1897,10 +3059,6 @@ async def _transcribe_with_openai(
     *,
     audio: np.ndarray,
     language: Optional[str],
-    rms: float,
-    max_amplitude: float,
-    speech_fraction: float,
-    start_time: float,
 ) -> dict:
     client = _AsyncOpenAIClient.get()
     model = _openai_transcribe_model()
@@ -1916,7 +3074,6 @@ async def _transcribe_with_openai(
 
     payload = _to_plain_dict(result)
     text = str(payload.get("text", "") or getattr(result, "text", "") or "").strip()
-    text = _canonicalize_asr_text(text)
     words: List[dict] = _extract_openai_words(payload)
 
     language_out = payload.get("language")
@@ -1927,20 +3084,13 @@ async def _transcribe_with_openai(
     if ASR_API_FORCE_LANGUAGE:
         language_out = _normalize_language(ASR_API_LANGUAGE) or "en"
 
-    response = {
+    return {
         "text": text,
-        "result": _build_legacy_word_result(words),
+        "words": words,
         "language": language_out,
-        "duration": payload.get("duration", _duration_seconds(audio, DEFAULT_SAMPLE_RATE)),
+        "duration": payload.get("duration"),
         "language_probability": payload.get("language_probability"),
-        "translation": False,
-        "rms": rms,
-        "max_amplitude": max_amplitude,
-        "speech_fraction": speech_fraction,
-        "provider": "openai",
-        "processing_seconds": round(time.perf_counter() - start_time, 4),
     }
-    return response
 
 
 @app.post("/transcribe")
@@ -1998,10 +3148,8 @@ async def transcribe(
     if effective_mode is None:
         effective_mode, _ = await _get_effective_transcribe_mode()
 
-    # Recent-speech extraction is useful for offline decoding but can clip leading
-    # words for API mode when phrase boundaries are noisy.
-    if effective_mode != TRANSCRIBE_MODE_API:
-        audio = _extract_recent_speech_window(audio, DEFAULT_SAMPLE_RATE)
+    # Keep segmentation behavior consistent across ASR backends.
+    audio = _extract_recent_speech_window(audio, DEFAULT_SAMPLE_RATE)
 
     rms, max_amplitude = _audio_energy_metrics(audio)
     speech_fraction = _energy_speech_fraction(audio, DEFAULT_SAMPLE_RATE)
@@ -2013,13 +3161,9 @@ async def transcribe(
         normalized_language = _effective_request_language(request_language)
     if effective_mode == TRANSCRIBE_MODE_API:
         try:
-            response = await _transcribe_with_openai(
+            openai_result = await _transcribe_with_openai(
                 audio=audio,
                 language=normalized_language,
-                rms=rms,
-                max_amplitude=max_amplitude,
-                speech_fraction=speech_fraction,
-                start_time=start_time,
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -2027,14 +3171,20 @@ async def transcribe(
             logger.exception("OpenAI transcription failed")
             raise HTTPException(status_code=502, detail=f"OpenAI transcription failed: {exc}") from exc
 
-        api_text, api_words = _maybe_enforce_english_only(
-            text=str(response.get("text", "") or ""),
-            words=list(response.get("result", []) or []),
-            language=str(response.get("language", normalized_language) or normalized_language),
+        response = _build_non_whisper_response(
+            text=str(openai_result.get("text", "") or ""),
+            words=list(openai_result.get("words", []) or []),
+            language=normalized_language,
+            audio=audio,
+            rms=rms,
+            max_amplitude=max_amplitude,
+            speech_fraction=speech_fraction,
+            provider="openai",
+            mode=TRANSCRIBE_MODE_API,
+            start_time=start_time,
+            duration=_duration_seconds(audio, DEFAULT_SAMPLE_RATE),
+            language_probability=None,
         )
-        response["text"] = api_text
-        response["result"] = api_words
-        response["mode"] = TRANSCRIBE_MODE_API
         _update_transcribe_session_state(
             state=state,
             now=now,
@@ -2063,38 +3213,26 @@ async def transcribe(
             logger.exception("Moonshine transcription failed")
             raise HTTPException(status_code=502, detail=f"Moonshine transcription failed: {exc}") from exc
 
-        full_text, words = _maybe_enforce_english_only(
+        response = _build_non_whisper_response(
             text=full_text,
             words=words,
             language=normalized_language,
+            audio=audio,
+            rms=rms,
+            max_amplitude=max_amplitude,
+            speech_fraction=speech_fraction,
+            provider="moonshine",
+            mode=effective_mode,
+            start_time=start_time,
+            duration=_duration_seconds(audio, DEFAULT_SAMPLE_RATE),
+            language_probability=None,
+            speaker_meta=speaker_meta,
         )
-
-        response = {
-            "text": full_text,
-            "result": _build_legacy_word_result(words),
-            "language": normalized_language,
-            "duration": _duration_seconds(audio, DEFAULT_SAMPLE_RATE),
-            "language_probability": None,
-            "translation": False,
-            "rms": rms,
-            "max_amplitude": max_amplitude,
-            "speech_fraction": speech_fraction,
-            "provider": "moonshine",
-            "mode": effective_mode,
-            "processing_seconds": round(time.perf_counter() - start_time, 4),
-        }
-        if speaker_meta.get("speaker_index") is not None:
-            response["speaker_index"] = int(speaker_meta["speaker_index"])
-        if speaker_meta.get("speaker_id") is not None:
-            response["speaker_id"] = int(speaker_meta["speaker_id"])
-        speakers_payload = speaker_meta.get("speakers")
-        if isinstance(speakers_payload, list) and speakers_payload:
-            response["speakers"] = speakers_payload
         _update_transcribe_session_state(
             state=state,
             now=now,
             audio=audio,
-            full_text=full_text,
+            full_text=str(response.get("text", "") or ""),
         )
         return JSONResponse(response)
 
@@ -2412,6 +3550,12 @@ async def respond(payload: RespondRequest) -> RespondResponse:
             system_override=(payload.system or None),
             memory_context=(payload.memory_context or None),
             user_id=(payload.user_id or None),
+            dialog_context=(payload.dialog_context or None),
+            dialog_policy=(payload.dialog_policy or None),
+            current_topic=(payload.current_topic or None),
+            open_question=(payload.open_question or None),
+            barge_in=bool(payload.barge_in),
+            interrupted_tts_text=(payload.interrupted_tts_text or None),
         )
     except OllamaError as exc:
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
@@ -2513,6 +3657,527 @@ async def respond_metrics() -> dict:
 
 
 
+
+
+@app.get("/conversation/config", response_model=ConversationConfigResponse)
+async def get_conversation_config() -> ConversationConfigResponse:
+    snapshot = _conversation_config_snapshot()
+    return ConversationConfigResponse(status="ok", **snapshot)
+
+
+@app.post("/conversation/config", response_model=ConversationConfigResponse)
+async def set_conversation_config(payload: ConversationConfigRequest) -> ConversationConfigResponse:
+    if payload.reset:
+        _restore_conversation_env_defaults()
+        await _AsyncOpenAIClient.aclose()
+        await _get_unified_conversation_runtime(force_reload=True)
+        snapshot = _conversation_config_snapshot()
+        return ConversationConfigResponse(status="ok", **snapshot)
+
+    if payload.pipeline_mode is not None:
+        os.environ["VOICE_PIPELINE_MODE"] = _normalize_pipeline_mode(payload.pipeline_mode)
+    if payload.profile is not None:
+        os.environ["VOICE_CONVERSATION_PROFILE"] = _normalize_conversation_profile(payload.profile)
+    if payload.local_asr_mode is not None:
+        normalized = _normalize_transcribe_mode(payload.local_asr_mode)
+        if normalized is None:
+            raise HTTPException(status_code=400, detail="invalid local_asr_mode")
+        os.environ["VOICE_LOCAL_ASR_MODE"] = normalized
+    if payload.cloud_asr_mode is not None:
+        normalized = _normalize_transcribe_mode(payload.cloud_asr_mode)
+        if normalized is None:
+            raise HTTPException(status_code=400, detail="invalid cloud_asr_mode")
+        os.environ["VOICE_CLOUD_ASR_MODE"] = normalized
+    if payload.cloud_response_provider is not None:
+        os.environ["VOICE_CLOUD_RESPONSE_PROVIDER"] = _normalize_cloud_response_provider(payload.cloud_response_provider)
+    if payload.openai_api_key is not None:
+        candidate = (payload.openai_api_key or "").strip()
+        if candidate:
+            os.environ["OPENAI_API_KEY"] = candidate
+        else:
+            os.environ.pop("OPENAI_API_KEY", None)
+    if payload.openai_base_url is not None:
+        candidate = (payload.openai_base_url or "").strip()
+        if candidate:
+            os.environ["OPENAI_BASE_URL"] = candidate
+        else:
+            os.environ.pop("OPENAI_BASE_URL", None)
+    if payload.openai_transcribe_model is not None:
+        candidate = (payload.openai_transcribe_model or "").strip()
+        if candidate:
+            os.environ["OPENAI_TRANSCRIBE_MODEL"] = candidate
+        else:
+            os.environ.pop("OPENAI_TRANSCRIBE_MODEL", None)
+    if payload.openai_transcribe_prompt is not None:
+        candidate = payload.openai_transcribe_prompt or ""
+        if candidate.strip():
+            os.environ["OPENAI_TRANSCRIBE_PROMPT"] = candidate
+        else:
+            os.environ.pop("OPENAI_TRANSCRIBE_PROMPT", None)
+    if payload.openai_response_model is not None:
+        candidate = (payload.openai_response_model or "").strip()
+        if candidate:
+            os.environ["OPENAI_RESPONSE_MODEL"] = candidate
+        else:
+            os.environ.pop("OPENAI_RESPONSE_MODEL", None)
+    if payload.local_response_model is not None:
+        candidate = (payload.local_response_model or "").strip()
+        if candidate:
+            os.environ["OLLAMA_MODEL"] = candidate
+        else:
+            os.environ.pop("OLLAMA_MODEL", None)
+
+    await _AsyncOpenAIClient.aclose()
+    await _get_unified_conversation_runtime(force_reload=True)
+    snapshot = _conversation_config_snapshot()
+    return ConversationConfigResponse(status="ok", **snapshot)
+
+
+def _command_ack_text(route_type: str, game_name: str) -> str:
+    if route_type == "LAUNCH_GAME":
+        name = (game_name or "game").strip() or "game"
+        return f"Opening {name}."
+    if route_type == "BACK_HOME":
+        return "Going back home."
+    return ""
+
+
+def _mqtt_intent_host() -> str:
+    return _environment("MQTT_HOST", "127.0.0.1").strip() or "127.0.0.1"
+
+
+def _mqtt_intent_port() -> int:
+    raw = _environment("MQTT_PORT", "1883").strip() or "1883"
+    try:
+        return max(1, int(raw))
+    except Exception:
+        return 1883
+
+
+def _mqtt_intent_topic() -> str:
+    return _environment("INTENT_TOPIC", "robot/intent").strip() or "robot/intent"
+
+
+def _publish_command_intent_sync(route_type: str, *, game_name: str, corr_id: str, user_text: str) -> None:
+    if mqtt_publish is None:
+        raise RuntimeError("paho-mqtt publish support is unavailable")
+
+    payload: Dict[str, Any] = {
+        "type": route_type,
+        "source": "conversation_service",
+        "corr_id": corr_id,
+        "ts": int(time.time() * 1000),
+    }
+    if user_text:
+        payload["text"] = user_text
+    if route_type == "LAUNCH_GAME":
+        normalized_game_name = (game_name or "").strip()
+        if not normalized_game_name:
+            raise RuntimeError("launch route missing game_name")
+        payload["game_name"] = normalized_game_name
+
+    mqtt_publish.single(
+        _mqtt_intent_topic(),
+        json.dumps(payload, ensure_ascii=False),
+        hostname=_mqtt_intent_host(),
+        port=_mqtt_intent_port(),
+    )
+
+
+async def _dispatch_command_intent(route_type: str, *, game_name: str, corr_id: str, user_text: str) -> None:
+    await asyncio.to_thread(
+        _publish_command_intent_sync,
+        route_type,
+        game_name=game_name,
+        corr_id=corr_id,
+        user_text=user_text,
+    )
+
+
+def _normalize_final_reply_text(text: str) -> str:
+    value = (text or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"\s+", " ", value).strip()
+    if sanitize_tts_text is not None:
+        cleaned = sanitize_tts_text(value)
+        if cleaned:
+            value = cleaned.strip()
+    return value
+
+
+def _looks_like_system_prompt_leak(text: str) -> bool:
+    normalized = " ".join((text or "").strip().lower().split())
+    if not normalized:
+        return False
+    hits = sum(1 for marker in _SYSTEM_PROMPT_LEAK_MARKERS if marker in normalized)
+    return hits >= 2
+
+
+def _normalize_compare_text(value: str) -> str:
+    text = str(value or "").casefold()
+    text = re.sub(r"[^0-9a-z\u4e00-\u9fff\s]+", " ", text)
+    return " ".join(text.split())
+
+
+def _text_similarity(left: str, right: str) -> float:
+    lhs = _normalize_compare_text(left)
+    rhs = _normalize_compare_text(right)
+    if not lhs or not rhs:
+        return 0.0
+    if lhs == rhs:
+        return 1.0
+    return difflib.SequenceMatcher(None, lhs, rhs).ratio()
+
+
+def _token_overlap_ratio(left: str, right: str) -> float:
+    lhs_tokens = _normalize_compare_text(left).split()
+    rhs_tokens = _normalize_compare_text(right).split()
+    if not lhs_tokens or not rhs_tokens:
+        return 0.0
+    lhs_set = set(lhs_tokens)
+    rhs_set = set(rhs_tokens)
+    overlap = len(lhs_set & rhs_set)
+    return overlap / float(max(1, min(len(lhs_set), len(rhs_set))))
+
+
+def _looks_like_question_text_for_guard(text: str) -> bool:
+    raw = " ".join((text or "").strip().lower().split())
+    if not raw:
+        return False
+    if "?" in text:
+        return True
+    return bool(re.match(r"^(who|what|when|where|why|how|do|does|did|can|could|would|will|should|is|are|am|was|were)\b", raw))
+
+
+def _looks_like_question_echo(user_text: str, answer_text: str) -> bool:
+    user_norm = _normalize_compare_text(user_text)
+    answer_norm = _normalize_compare_text(answer_text)
+    if not user_norm or not answer_norm:
+        return False
+    if not _looks_like_question_text_for_guard(user_text):
+        return False
+    if len(user_norm) < 12:
+        return False
+    if user_norm in answer_norm:
+        return True
+    similarity = _text_similarity(user_text, answer_text)
+    overlap = _token_overlap_ratio(user_text, answer_text)
+    return similarity >= 0.78 or overlap >= 0.85
+
+
+def _try_general_query_reply_text(text: str) -> str:
+    normalized = " ".join((text or "").strip().lower().split())
+    if not normalized:
+        return ""
+
+    if "median" in normalized and any(token in normalized for token in ("numbers", "number set", "set of numbers", "dataset", "data set")):
+        return "Sort the numbers and take the middle value. If there are two middle values, average them."
+
+    if "android" in normalized and "iphone" in normalized and "better than" in normalized:
+        return "It depends on what you want: iPhone is usually simpler and more tightly integrated, while Android gives you more customization."
+
+    if "weather" in normalized and any(token in normalized for token in ("today", "right now", "currently", "outside", "forecast")):
+        return "I can't check live weather from here."
+
+    if "recent activity" in normalized and any(token in normalized for token in ("backyard", "yard", "garden", "driveway", "front yard", "back yard")):
+        return "I can't check live activity in your backyard from here."
+
+    live_topic_match = re.search(
+        r"\bwhat(?:'s| is)\s+happening\s+with\s+(.+?)(?:\s+right\s+now\w*|\s+currently|\s+today|\?|$)",
+        normalized,
+    )
+    if live_topic_match:
+        topic = (live_topic_match.group(1) or "").strip(" .,!?:;\"'")
+        if topic:
+            return f"I can't give live updates on {topic} from here, but I can give a brief general summary."
+        return "I can't give live updates from here, but I can give a brief general summary."
+
+    return ""
+
+
+async def _stream_unified_conversation_events(
+    runtime: _UnifiedConversationRuntime,
+    payload: ConversationTurnRequest,
+) -> AsyncIterator[bytes]:
+    corr_id = (payload.corr_id or "").strip() or f"turn-{int(time.time() * 1000)}-{os.getpid()}"
+    text = payload.text.strip()
+    request_payload = payload.dict(exclude_none=True)
+    resolved_user_id = runtime.resolve_user_id(payload=request_payload, user_id=payload.user_id)
+    route = runtime.route_text(text, corr_id, payload=request_payload, user_id=resolved_user_id)
+    route_payload = route.payload or {}
+    route_type = str(route_payload.get("type") or "QUERY").strip().upper() or "QUERY"
+    route_game_name = str(route_payload.get("game_name") or "").strip()
+    provider = _conversation_effective_response_provider(_conversation_profile())
+
+    yield _json_line(
+        {
+            "type": "route",
+            "corr_id": corr_id,
+            "route": route_type,
+            "game_name": route_game_name,
+            "provider": provider,
+        }
+    )
+
+    if _should_clarify_uncertain_turn(payload, route_type):
+        clarification = _uncertain_turn_reply(payload)
+        yield _json_line(
+            {
+                "type": "chunk",
+                "corr_id": corr_id,
+                "route": route_type,
+                "text": clarification,
+                "provider": "asr_guard",
+            }
+        )
+        yield _json_line(
+            {
+                "type": "final",
+                "corr_id": corr_id,
+                "route": route_type,
+                "text": clarification,
+                "provider": "asr_guard",
+                "user_id": resolved_user_id or "",
+            }
+        )
+        return
+
+    user_id, memory_context, dialog_request_ctx, memory_update = runtime.build_turn_context(
+        payload=request_payload,
+        text=text,
+        user_id=payload.user_id,
+        resolved_user_id=resolved_user_id,
+    )
+
+    if route_type in {"LAUNCH_GAME", "BACK_HOME"}:
+        try:
+            await _dispatch_command_intent(
+                route_type,
+                game_name=route_game_name,
+                corr_id=corr_id,
+                user_text=text,
+            )
+        except RuntimeError as exc:
+            yield _json_line(
+                {
+                    "type": "error",
+                    "corr_id": corr_id,
+                    "route": route_type,
+                    "provider": "command",
+                    "message": str(exc),
+                }
+            )
+            return
+        if route_type == "LAUNCH_GAME" and route_game_name:
+            runtime.record_game_event(
+                user_id=user_id,
+                game_name=route_game_name,
+                action="launch",
+                source="conversation",
+            )
+        reply_text = _command_ack_text(route_type, route_game_name)
+        if reply_text:
+            yield _json_line(
+                {
+                    "type": "chunk",
+                    "corr_id": corr_id,
+                    "route": route_type,
+                    "text": reply_text,
+                    "provider": "command",
+                }
+            )
+        yield _json_line(
+            {
+                "type": "final",
+                "corr_id": corr_id,
+                "route": route_type,
+                "text": reply_text,
+                "game_name": route_game_name,
+                "provider": "command",
+            }
+        )
+        return
+
+    memory_write_reply = runtime.try_memory_write_reply(
+        user_id=user_id,
+        text=text,
+        memory_update=memory_update,
+        dialog_request_ctx=dialog_request_ctx,
+    )
+    if memory_write_reply:
+        yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": memory_write_reply, "provider": "memory_write"})
+        yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": memory_write_reply, "provider": "memory_write", "user_id": user_id or ""})
+        return
+
+    memory_reply = runtime.try_memory_reply(
+        user_id=user_id,
+        text=text,
+        dialog_request_ctx=dialog_request_ctx,
+    )
+    if memory_reply:
+        yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": memory_reply, "provider": "memory"})
+        yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": memory_reply, "provider": "memory", "user_id": user_id or ""})
+        return
+
+    game_reply = runtime.try_game_reply(
+        user_id=user_id,
+        text=text,
+        dialog_request_ctx=dialog_request_ctx,
+    )
+    if game_reply:
+        yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": game_reply, "provider": "game_catalog"})
+        yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": game_reply, "provider": "game_catalog", "user_id": user_id or ""})
+        return
+
+    vision_reply = runtime.try_vision_reply(
+        user_id=user_id,
+        text=text,
+        dialog_request_ctx=dialog_request_ctx,
+    )
+    if vision_reply:
+        yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": vision_reply, "provider": "vision"})
+        yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": vision_reply, "provider": "vision", "user_id": user_id or ""})
+        return
+
+    general_reply = runtime.try_general_query_reply(
+        user_id=user_id,
+        text=text,
+        dialog_request_ctx=dialog_request_ctx,
+    )
+    if general_reply:
+        yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": general_reply, "provider": "general_guard"})
+        yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": general_reply, "provider": "general_guard", "user_id": user_id or ""})
+        return
+
+    stream_provider = _conversation_effective_response_provider(_conversation_profile())
+    accumulator = _ReplyChunkAccumulator()
+    full_parts: List[str] = []
+    try:
+        if stream_provider == "openai":
+            stream_iter = _stream_openai_reply(
+                text,
+                memory_context=memory_context or None,
+                user_id=user_id,
+                dialog_context=dialog_request_ctx.get("dialog_context") or None,
+                dialog_policy=dialog_request_ctx.get("dialog_policy") or None,
+                current_topic=dialog_request_ctx.get("current_topic") or None,
+                open_question=dialog_request_ctx.get("open_question") or None,
+                barge_in=bool(payload.barge_in),
+                interrupted_tts_text=payload.interrupted_tts_text,
+                model_override=_openai_response_model(),
+            )
+        else:
+            stream_iter = _stream_ollama_reply(
+                text,
+                memory_context=memory_context or None,
+                user_id=user_id,
+                dialog_context=dialog_request_ctx.get("dialog_context") or None,
+                dialog_policy=dialog_request_ctx.get("dialog_policy") or None,
+                current_topic=dialog_request_ctx.get("current_topic") or None,
+                open_question=dialog_request_ctx.get("open_question") or None,
+                barge_in=bool(payload.barge_in),
+                interrupted_tts_text=payload.interrupted_tts_text,
+                model_override=_conversation_local_response_model(),
+            )
+
+        async for delta in stream_iter:
+            if not delta:
+                continue
+            full_parts.append(delta)
+            for chunk in accumulator.push(delta):
+                yield _json_line(
+                    {
+                        "type": "chunk",
+                        "corr_id": corr_id,
+                        "route": route_type,
+                        "text": chunk,
+                        "provider": stream_provider,
+                    }
+                )
+    except (OllamaError, OpenAIResponseError, RuntimeError) as exc:
+        yield _json_line(
+            {
+                "type": "error",
+                "corr_id": corr_id,
+                "route": route_type,
+                "provider": stream_provider,
+                "message": str(exc),
+            }
+        )
+        return
+
+    final_text = _normalize_final_reply_text("".join(full_parts))
+    if _looks_like_system_prompt_leak(final_text):
+        fallback_text = _normalize_final_reply_text(
+            _try_general_query_reply_text(text) or "I want to answer that more clearly. Please ask it again in one short sentence."
+        )
+        if fallback_text:
+            final_text = fallback_text
+    dialog_helper = getattr(runtime, "dialog_helper", None)
+    if dialog_helper is not None:
+        final_text = _finalize_static_tts_reply(dialog_helper, final_text)
+    if _looks_like_question_echo(text, final_text):
+        fallback_text = _normalize_final_reply_text(
+            _try_general_query_reply_text(text) or "I don't want to just repeat your question. Please ask it again and I'll answer it more directly."
+        )
+        if dialog_helper is not None:
+            fallback_text = _finalize_static_tts_reply(dialog_helper, fallback_text)
+        if fallback_text:
+            final_text = fallback_text
+    if not final_text:
+        yield _json_line(
+            {
+                "type": "error",
+                "corr_id": corr_id,
+                "route": route_type,
+                "provider": stream_provider,
+                "message": "empty reply from responder",
+            }
+        )
+        return
+
+    for chunk in accumulator.finish():
+        yield _json_line(
+            {
+                "type": "chunk",
+                "corr_id": corr_id,
+                "route": route_type,
+                "text": chunk,
+                "provider": stream_provider,
+            }
+        )
+
+    runtime.finalize_assistant_turn(
+        user_id=user_id,
+        user_text=text,
+        answer_text=final_text,
+        dialog_request_ctx=dialog_request_ctx,
+    )
+    yield _json_line(
+        {
+            "type": "final",
+            "corr_id": corr_id,
+            "route": route_type,
+            "text": final_text,
+            "provider": stream_provider,
+            "user_id": user_id or "",
+        }
+    )
+
+
+@app.post("/conversation/turn/stream")
+async def conversation_turn_stream(payload: ConversationTurnRequest):
+    runtime = await _get_unified_conversation_runtime()
+    try:
+        runtime.ensure_ready()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return StreamingResponse(
+        _stream_unified_conversation_events(runtime, payload),
+        media_type="application/x-ndjson",
+    )
 if __name__ == "__main__":
     import uvicorn
 

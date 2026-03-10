@@ -77,6 +77,19 @@ def _service_specs() -> Dict[str, ServiceSpec]:
             required_modules=["uvicorn", "fastapi"],
         ),
         ServiceSpec(
+            name="desktop_runtime",
+            entry=SCRIPTS_DIR / "packaging" / "entrypoints" / "desktop_runtime_entry.py",
+            python_paths=[VOICE_DIR],
+            hidden_imports=_uvicorn_hidden_imports(),
+            add_data=[
+                (REPO_ROOT / "Assets" / "StreamingAssets" / "panel", "Assets/StreamingAssets/panel"),
+                (SCRIPTS_DIR / "local_services.default.json", "scripts"),
+                (SCRIPTS_DIR / "local_services.user.sample.json", "scripts"),
+                (SCRIPTS_DIR / "intent_service" / "manifest.json", "scripts/intent_service"),
+            ],
+            required_modules=["uvicorn", "fastapi", "httpx", "numpy"],
+        ),
+        ServiceSpec(
             name="qwen_tts_http",
             entry=SCRIPTS_DIR / "packaging" / "entrypoints" / "qwen_tts_http_entry.py",
             python_paths=[VOICE_DIR],

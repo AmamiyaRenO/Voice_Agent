@@ -1,0 +1,256 @@
+[
+  {
+    "name": "memory_implicit_fact_ack_and_invalid_name_guard",
+    "category": "memory",
+    "user_id": "eval_memory_guard_user",
+    "steps": [
+      {
+        "name": "implicit_origin_share",
+        "text": "I live in Bradford.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["got it"],
+        "reject_contains": ["what would you like to explore next", "i live in bradford"]
+      },
+      {
+        "name": "assistant_like_phrase_should_not_become_name",
+        "text": "Hello, I'm ready to help you explore the game mechanics.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["ollama", "openai", "memory_write", "asr_guard", "game_catalog"],
+        "reject_contains": ["your name is ready to help"]
+      },
+      {
+        "name": "summary_should_use_structured_facts",
+        "text": "What do you know about me?",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory"],
+        "expect_contains": ["Bradford"],
+        "reject_contains": ["Ready To Help", "ready to help"]
+      }
+    ]
+  },
+  {
+    "name": "memory_name_correction_and_episode",
+    "category": "memory",
+    "user_id": "eval_memory_name_correction_user",
+    "steps": [
+      {
+        "name": "store_name_tom",
+        "text": "Please remember that my name is Tom. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "store_name_taylor",
+        "text": "Please remember that my name is Taylor. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "recall_name",
+        "text": "What is my name?",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory"],
+        "expect_contains": ["Taylor"],
+        "reject_contains": ["Tom"]
+      },
+      {
+        "name": "episodic_name_recall",
+        "text": "What did I say about my name?",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory"],
+        "expect_contains": ["Taylor"]
+      }
+    ]
+  },
+  {
+    "name": "memory_likes_dislikes_and_recommendation",
+    "category": "memory",
+    "user_id": "eval_memory_preferences_user",
+    "steps": [
+      {
+        "name": "store_like",
+        "text": "Please remember that I like disc golf. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "store_dislike",
+        "text": "Please remember that I don't like bean bag toss. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "recall_likes",
+        "text": "What do I like?",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory"],
+        "expect_contains": ["disc golf"]
+      },
+      {
+        "name": "recall_dislikes",
+        "text": "What don't I like?",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory"],
+        "expect_contains": ["bean bag toss"]
+      },
+      {
+        "name": "recommend_from_preferences",
+        "text": "Recommend a local game in one short sentence.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["game_catalog"],
+        "expect_contains": ["Disc Golf"]
+      }
+    ]
+  },
+  {
+    "name": "memory_origin_schedule_goal_and_episode",
+    "category": "memory",
+    "user_id": "eval_memory_schedule_user",
+    "steps": [
+      {
+        "name": "store_origin",
+        "text": "Please remember that I am from Toronto. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "store_schedule",
+        "text": "Please remember that I prefer training on Friday evening. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "store_goal",
+        "text": "Please remember that my goal is improve balance. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "recall_origin",
+        "text": "Where am I from?",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory"],
+        "expect_contains": ["toronto"]
+      },
+      {
+        "name": "recall_schedule",
+        "text": "When do I prefer to train?",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory"],
+        "expect_contains": ["Friday", "evening"]
+      },
+      {
+        "name": "recall_goal",
+        "text": "What is my goal?",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory"],
+        "expect_contains": ["improve balance"]
+      },
+      {
+        "name": "episodic_origin_recall",
+        "text": "What did I say about where I am from?",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory"],
+        "expect_contains": ["Toronto"]
+      }
+    ]
+  },
+  {
+    "name": "memory_profile_summary",
+    "category": "memory",
+    "user_id": "eval_memory_summary_user",
+    "steps": [
+      {
+        "name": "store_name",
+        "text": "Please remember that my name is Taylor. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "store_origin",
+        "text": "Please remember that I am from Toronto. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "store_goal",
+        "text": "Please remember that my goal is improve balance. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "summary_query",
+        "text": "What do you remember about me?",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory"],
+        "expect_contains": ["Taylor", "toronto", "improve balance"]
+      }
+    ]
+  },
+  {
+    "name": "memory_favorite_game_recall_and_recommendation",
+    "category": "memory",
+    "user_id": "eval_memory_favorite_game_user",
+    "steps": [
+      {
+        "name": "store_favorite_game",
+        "text": "Please remember that my favorite game is cornhole. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "recall_favorite_game",
+        "text": "What is my favorite game?",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory"],
+        "expect_contains": ["cornhole"]
+      },
+      {
+        "name": "recommend_from_favorite_game",
+        "text": "Recommend a local game in one short sentence.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["game_catalog"],
+        "expect_contains": ["Bean Bag Toss"]
+      }
+    ]
+  },
+  {
+    "name": "memory_contextual_recommend_then_open",
+    "category": "memory",
+    "user_id": "eval_memory_context_user",
+    "steps": [
+      {
+        "name": "store_walking_goal",
+        "text": "Please remember that my goal is improve walking endurance. Reply with only ok.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["memory_write"],
+        "expect_contains": ["ok"]
+      },
+      {
+        "name": "recommend_game",
+        "text": "recommend a game to me.",
+        "expect_route": "QUERY",
+        "allowed_providers": ["game_catalog"],
+        "expect_contains": ["Disc Golf"]
+      },
+      {
+        "name": "open_recommended_game",
+        "text": "Open it.",
+        "expect_route": "LAUNCH_GAME",
+        "expect_contains": ["Opening Disc Golf"]
+      }
+    ]
+  }
+]

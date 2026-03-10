@@ -424,17 +424,39 @@ namespace RobotVoice
             {
                 return model;
             }
-            model = (defaultVisionModel ?? string.Empty).Trim();
+            model = NormalizeVisionModelDefault(defaultVisionModel);
             if (!string.IsNullOrWhiteSpace(model))
             {
                 return model;
             }
-            model = (Environment.GetEnvironmentVariable("OLLAMA_MODEL") ?? string.Empty).Trim();
+            model = NormalizeVisionModelDefault(Environment.GetEnvironmentVariable("OLLAMA_VISION_MODEL"));
+            if (!string.IsNullOrWhiteSpace(model))
+            {
+                return model;
+            }
+            model = NormalizeVisionModelDefault(Environment.GetEnvironmentVariable("OLLAMA_MODEL"));
             if (!string.IsNullOrWhiteSpace(model))
             {
                 return model;
             }
             return VoiceAgentDefaults.DefaultVisionModel;
+        }
+
+        private static string NormalizeVisionModelDefault(string candidate)
+        {
+            var model = (candidate ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(model))
+            {
+                return string.Empty;
+            }
+
+            if (string.Equals(model, "gemma3:4b", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(model, "qwen2.5vl:7b", StringComparison.OrdinalIgnoreCase))
+            {
+                return VoiceAgentDefaults.DefaultVisionModel;
+            }
+
+            return model;
         }
 
         private bool TryGetLatestCameraJpegCopy(out byte[] jpeg)
@@ -507,7 +529,16 @@ namespace RobotVoice
                 return;
             }
 
-            TouchCameraClientHeartbeat();
+            if (!IsCameraClientActive())
+            {
+                await WriteJsonAsync(
+                    context.Response,
+                    503,
+                    "error",
+                    "camera preview is not active. Click Start Preview and wait 1-2 seconds.")
+                    .ConfigureAwait(false);
+                return;
+            }
 
             var jpeg = await TryGetLatestCameraJpegWithWaitAsync(1500).ConfigureAwait(false);
             if (jpeg == null || jpeg.Length <= 0)
@@ -552,6 +583,7 @@ namespace RobotVoice
             var payload = new StringBuilder(imageBase64.Length + prompt.Length + model.Length + 256)
                 .Append("{\"model\":\"").Append(EscapeJson(model)).Append('"')
                 .Append(",\"prompt\":\"").Append(EscapeJson(prompt)).Append('"')
+                .Append(",\"think\":false")
                 .Append(",\"stream\":false")
                 .Append(",\"images\":[\"").Append(imageBase64).Append("\"]}")
                 .ToString();

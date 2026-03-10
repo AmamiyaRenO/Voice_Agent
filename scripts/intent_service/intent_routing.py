@@ -134,6 +134,58 @@ class IntentRouterEngine:
         self.resolver = resolver
         self.llm_classifier = LlmIntentClassifier(cfg, resolver)
         self.moonshine_matcher = MoonshineIntentMatcher(cfg, resolver)
+        self._query_hint_tokens = {
+            "what",
+            "why",
+            "how",
+            "who",
+            "where",
+            "when",
+            "tell",
+            "explain",
+            "describe",
+            "remember",
+            "favorite",
+            "sentence",
+            "say",
+        }
+        self._launcher_filler_tokens = {
+            "please",
+            "now",
+            "right",
+            "away",
+            "up",
+            "the",
+            "a",
+            "an",
+            "game",
+        }
+        self._context_game_tokens = {
+            "it",
+            "that",
+            "this",
+            "one",
+            "recommended",
+            "recommend",
+            "suggested",
+            "mentioned",
+            "last",
+        }
+        self._exit_command_tokens = {
+            "back",
+            "home",
+            "go",
+            "return",
+            "quit",
+            "exit",
+            "stop",
+            "cancel",
+            "close",
+            "game",
+            "the",
+            "please",
+            "now",
+        }
 
     def close(self) -> None:
         self.moonshine_matcher.close()
@@ -151,7 +203,58 @@ class IntentRouterEngine:
                 return True
         return False
 
-    def route(self, text: str, corr_id: str) -> RouteDecision:
+    def _tokens(self, text: str) -> list[str]:
+        return [token for token in normalize_match_text(text).split(" ") if token]
+
+    def _looks_like_query_or_statement(self, text: str) -> bool:
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        if "?" in raw:
+            return True
+        tokens = set(self._tokens(raw))
+        return bool(tokens & self._query_hint_tokens)
+
+    def _is_direct_game_request(self, text: str) -> bool:
+        tokens = self._tokens(text)
+        if not tokens:
+            return False
+        if self._has_launch_signal(text):
+            return True
+        if self._looks_like_query_or_statement(text):
+            return False
+        meaningful = [token for token in tokens if token not in self._launcher_filler_tokens]
+        return 0 < len(meaningful) <= 3
+
+    def _is_direct_exit_command(self, text: str) -> bool:
+        tokens = self._tokens(text)
+        if not tokens:
+            return False
+        if self._looks_like_query_or_statement(text):
+            return False
+        unexpected = [token for token in tokens if token not in self._exit_command_tokens]
+        return len(unexpected) == 0
+
+    def _is_contextual_game_request(self, text: str) -> bool:
+        tokens = self._tokens(text)
+        if not tokens or not self._has_launch_signal(text):
+            return False
+        if self._looks_like_query_or_statement(text):
+            return False
+        launch_tokens = set()
+        for raw_trigger in self.cfg.launch_triggers or []:
+            launch_tokens.update(token for token in normalize_match_text(str(raw_trigger)).split(" ") if token)
+        meaningful = [
+            token
+            for token in tokens
+            if token not in self._launcher_filler_tokens and token not in launch_tokens
+        ]
+        if not meaningful:
+            return False
+        return all(token in self._context_game_tokens for token in meaningful)
+
+    def route(self, text: str, corr_id: str, *, context_game_name: str = "") -> RouteDecision:
+        context_game_name = (context_game_name or "").strip()
         if self.cfg.require_wake_word and not has_wake_word(text, self.cfg.wake_words):
             return RouteDecision(topic=None, payload=None, log_line=f"[intent] no wake word: {text}")
 
@@ -176,6 +279,8 @@ class IntentRouterEngine:
 
             if llm_decision.intent == "LAUNCH_GAME":
                 game_name = llm_decision.game_name
+                if not game_name and context_game_name and self._is_contextual_game_request(text):
+                    game_name = context_game_name
                 if not game_name:
                     # LLM says "launch", but ASR/LLM may still output noisy target text
                     # (e.g. "core hog"). Under this branch only, allow a softer threshold
@@ -212,7 +317,7 @@ class IntentRouterEngine:
 
         # Curated manifest aliases should win over generic BACK_HOME matching.
         exact_game = self.resolver.canonical_name(text)
-        if exact_game:
+        if exact_game and self._is_direct_game_request(text):
             payload = {
                 "type": "LAUNCH_GAME",
                 "game_name": exact_game,
@@ -226,12 +331,29 @@ class IntentRouterEngine:
                 log_line=f"[intent] -> LAUNCH_GAME '{exact_game}' {self.cfg.topics.intent} (exact alias)",
             )
 
+        if context_game_name and self._is_contextual_game_request(text):
+            payload = {
+                "type": "LAUNCH_GAME",
+                "game_name": context_game_name,
+                "source": self.cfg.source_label,
+                "raw": {"text": text},
+                "corr_id": corr_id,
+            }
+            return RouteDecision(
+                topic=self.cfg.topics.intent,
+                payload=payload,
+                log_line=(
+                    f"[intent] -> LAUNCH_GAME '{context_game_name}' {self.cfg.topics.intent} "
+                    "(context reference)"
+                ),
+            )
+
         # Semantic/phonetic fallback for BACK_HOME (no exact keyword hard-match).
         # This keeps "back", "go back", "return home" stable even when LLM is off
         # or confidence is below threshold.
         exit_score = best_exit_similarity(text, self.cfg.exit_keywords)
         exit_threshold = max(50.0, min(95.0, float(self.cfg.back_home_similarity_threshold)))
-        if exit_score >= exit_threshold:
+        if exit_score >= exit_threshold and self._is_direct_exit_command(text):
             payload = {
                 "type": "BACK_HOME",
                 "source": self.cfg.source_label,
@@ -268,7 +390,7 @@ class IntentRouterEngine:
 
         # Soft fallback without hard keyword rules: relevance + phonetic similarity only.
         game = self.resolver.resolve_best_name(text, self.cfg.fuzzy_threshold)
-        if game:
+        if game and self._is_direct_game_request(text):
             payload = {
                 "type": "LAUNCH_GAME",
                 "game_name": game,

@@ -46,6 +46,8 @@ class LauncherDefaults:
     default_piper_http_dir: str
     default_qwen_http_cmd: str
     default_qwen_http_dir: str
+    default_desktop_runtime_cmd: str
+    default_desktop_runtime_dir: str
     default_intent_cmd: str
     default_intent_dir: str
     default_dialog_cmd: str
@@ -63,6 +65,7 @@ class CommandSet:
     orchestrator: Optional[List[str]]
     piper_http: Optional[List[str]]
     qwen_http: Optional[List[str]]
+    desktop_runtime: Optional[List[str]]
     intent: Optional[List[str]]
     dialog: Optional[List[str]]
     telemetry: Optional[List[str]]
@@ -76,6 +79,7 @@ class DirectorySet:
     orchestrator: Path
     piper_http: Path
     qwen_http: Path
+    desktop_runtime: Path
     intent: Path
     dialog: Path
     telemetry: Path
@@ -106,6 +110,10 @@ def parse_command(value: str, *, windows: bool) -> List[str]:
 
 def _normalize_string(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+CORE_EXIT_KEYWORDS = ["back home", "go home", "return home", "go back"]
+DEFAULT_EXIT_KEYWORDS = [*CORE_EXIT_KEYWORDS, "quit", "exit", "stop", "cancel", "close", "close game"]
 
 
 def _env_or_default(name: str, default: Optional[str]) -> Optional[str]:
@@ -152,6 +160,27 @@ def _config_get_string_list(data: Dict[str, object], *path: str) -> List[str]:
         return [value for value in values if value]
 
     return []
+
+
+def _merge_unique_strings(*groups: List[str]) -> List[str]:
+    merged: List[str] = []
+    seen = set()
+    for group in groups:
+        for item in group:
+            text = _normalize_string(item)
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(text)
+    return merged
+
+
+def _normalize_exit_keywords(values: List[str]) -> List[str]:
+    merged = _merge_unique_strings(values, DEFAULT_EXIT_KEYWORDS)
+    return merged or list(DEFAULT_EXIT_KEYWORDS)
 
 
 def _config_get_bool(data: Dict[str, object], *path: str) -> Optional[bool]:
@@ -269,6 +298,11 @@ def _load_launcher_config(repo_root: Path) -> Tuple[Path, Path, Dict[str, object
     default_cfg = _load_json_object(default_config_path)
     user_cfg = _load_json_object(user_config_path)
     merged = _deep_merge_dict(default_cfg, user_cfg)
+    intent_cfg = merged.get("intent")
+    if isinstance(intent_cfg, dict):
+        intent_cfg["exit_keywords"] = _normalize_exit_keywords(
+            _config_get_string_list(merged, "intent", "exit_keywords")
+        )
     return user_config_path, default_config_path, merged
 
 
@@ -540,7 +574,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         asr_ok = _ensure_python_venv(
             venv_dir=service_dir / ".venv_asr",
             requirements_files=[service_dir / "requirements.txt"],
-            import_checks=["fastapi", "uvicorn", "numpy", "httpx", "paho.mqtt.client", "yaml"],
+            import_checks=["fastapi", "uvicorn", "numpy", "httpx", "paho.mqtt.client", "yaml", "sounddevice", "cv2"],
             bootstrap_python=sys.executable,
             cwd=service_dir,
         )
@@ -626,6 +660,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
     intent_exit_keywords = _config_get_string_list(
         intent_cfg, "exit_keywords"
     ) or _config_get_string_list(launcher_config, "exit_keywords")
+    intent_exit_keywords = _normalize_exit_keywords(intent_exit_keywords)
     intent_use_llm_classifier = _config_get_bool(intent_cfg, "use_llm_classifier")
     if intent_use_llm_classifier is None:
         intent_use_llm_classifier = False
@@ -647,6 +682,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         voice_exe = _find_packaged_service_executable(repo_root, "voice_service")
         piper_exe = _find_packaged_service_executable(repo_root, "piper_http")
         qwen_exe = _find_packaged_service_executable(repo_root, "qwen_tts_http")
+        desktop_runtime_exe = _find_packaged_service_executable(repo_root, "desktop_runtime")
         intent_exe = _find_packaged_service_executable(repo_root, "intent_service")
         dialog_exe = _find_packaged_service_executable(repo_root, "dialog_service")
         telemetry_exe = _find_packaged_service_executable(repo_root, "telemetry_service")
@@ -655,6 +691,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         voice_exe = ""
         piper_exe = ""
         qwen_exe = ""
+        desktop_runtime_exe = ""
         intent_exe = ""
         dialog_exe = ""
         telemetry_exe = ""
@@ -685,6 +722,16 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         # validation by default.
         default_qwen_http_cmd = ""
         default_qwen_http_dir = str(repo_root)
+    default_desktop_runtime_cmd = (
+        _quote_command_token(desktop_runtime_exe)
+        if desktop_runtime_exe
+        else f"{asr_python_cmd} -m uvicorn desktop_runtime:app --host 0.0.0.0 --port 8787"
+    )
+    default_desktop_runtime_dir = (
+        str(Path(desktop_runtime_exe).resolve().parent)
+        if desktop_runtime_exe
+        else str(service_dir)
+    )
     default_telemetry_cmd = (
         _quote_command_token(telemetry_exe)
         if telemetry_exe
@@ -761,6 +808,8 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         default_piper_http_dir=default_piper_http_dir,
         default_qwen_http_cmd=default_qwen_http_cmd,
         default_qwen_http_dir=default_qwen_http_dir,
+        default_desktop_runtime_cmd=default_desktop_runtime_cmd,
+        default_desktop_runtime_dir=default_desktop_runtime_dir,
         default_intent_cmd=default_intent_cmd,
         default_intent_dir=default_intent_dir,
         default_dialog_cmd=default_dialog_cmd,
@@ -844,6 +893,19 @@ def _build_parser(defaults: LauncherDefaults) -> argparse.ArgumentParser:
         "--qwen-http-dir",
         default=_env_or_default("VOICE_AGENT_QWEN_HTTP_CWD", defaults.default_qwen_http_dir),
         help="Working directory for the Qwen HTTP wrapper service.",
+    )
+    parser.add_argument(
+        "--desktop-runtime-cmd",
+        default=_env_or_default("VOICE_AGENT_DESKTOP_RUNTIME_CMD", defaults.default_desktop_runtime_cmd),
+        help=(
+            "Optional command used to start the standalone desktop runtime panel "
+            "(userpanel + audio agent outside Unity)."
+        ),
+    )
+    parser.add_argument(
+        "--desktop-runtime-dir",
+        default=_env_or_default("VOICE_AGENT_DESKTOP_RUNTIME_CWD", defaults.default_desktop_runtime_dir),
+        help="Working directory for the desktop runtime service.",
     )
     parser.add_argument(
         "--intent-cmd",
@@ -944,6 +1006,11 @@ def _parse_commands(
                 if args.qwen_http_cmd
                 else None
             ),
+            desktop_runtime=(
+                parse_command(args.desktop_runtime_cmd, windows=windows)
+                if args.desktop_runtime_cmd
+                else None
+            ),
             intent=(
                 parse_command(args.intent_cmd, windows=windows)
                 if args.intent_cmd
@@ -981,6 +1048,7 @@ def _resolve_directories(args: argparse.Namespace) -> DirectorySet:
         orchestrator=Path(args.orchestrator_dir).resolve(),
         piper_http=Path(args.piper_http_dir).resolve(),
         qwen_http=Path(args.qwen_http_dir).resolve(),
+        desktop_runtime=Path(args.desktop_runtime_dir).resolve(),
         intent=Path(args.intent_dir).resolve(),
         dialog=Path(args.dialog_dir).resolve(),
         telemetry=Path(args.telemetry_dir).resolve(),
@@ -1010,6 +1078,8 @@ def _validate_paths(
         parser.error(f"Piper HTTP directory does not exist: {dirs.piper_http}")
     if commands.qwen_http is not None and not dirs.qwen_http.exists():
         parser.error(f"Qwen HTTP directory does not exist: {dirs.qwen_http}")
+    if commands.desktop_runtime is not None and not dirs.desktop_runtime.exists():
+        parser.error(f"Desktop runtime directory does not exist: {dirs.desktop_runtime}")
     if commands.intent is not None and not dirs.intent.exists():
         parser.error(f"Intent service directory does not exist: {dirs.intent}")
     if commands.dialog is not None and not dirs.dialog.exists():
@@ -1055,16 +1125,35 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     # Latency-first defaults (can still be overridden by user env/.env).
     env.setdefault("OLLAMA_MAX_TOKENS", "180")
     env.setdefault("OLLAMA_KEEP_ALIVE", "30m")
-    env.setdefault("OLLAMA_MODEL", "gemma3:4b")
+    env.setdefault("OLLAMA_MODEL", "qwen3.5:0.8b")
+    env.setdefault("OLLAMA_THINK", "0")
+    env.setdefault("OLLAMA_TEMPERATURE", "0.7")
+    env.setdefault("OLLAMA_TOP_P", "0.8")
+    env.setdefault("OLLAMA_TOP_K", "20")
+    env.setdefault("DIALOG_ENABLE_CONTEXT_MEMORY", "1")
+    env.setdefault("DIALOG_ENABLE_POLICY", "1")
+    env.setdefault("DIALOG_HISTORY_TURNS", "8")
+    env.setdefault("DIALOG_SUMMARY_MAX_CHARS", "420")
+    env.setdefault("DIALOG_CONTEXT_MAX_CHARS", "900")
+    env.setdefault("DIALOG_MEMORY_QUERY_RULE", "1")
+    env.setdefault("DIALOG_MEMORY_QUERY_SEMANTIC", "1")
+    env.setdefault("DIALOG_MEMORY_QUERY_THRESHOLD", "0.58")
+    env.setdefault("DIALOG_ENABLE_VISION_QUERY", "1")
+    env.setdefault("DIALOG_VISION_DESCRIBE_URL", "http://127.0.0.1:8787/api/vision/describe")
+    env.setdefault(
+        "DIALOG_VISION_QUERY_PROMPT",
+        "Describe what you see in this camera frame in 2-4 concise sentences.",
+    )
+    env.setdefault("DIALOG_VISION_TIMEOUT_SECONDS", "12")
     # ASR defaults for NucBox M6 (no NVIDIA GPU): CPU-only faster-whisper tuning.
     env.setdefault("WHISPER_DEVICE", "cpu")
     env.setdefault("WHISPER_COMPUTE_TYPE", "int8")
     env.setdefault("WHISPER_MODEL_PATH", "Systran/faster-distil-whisper-large-v3")
     env.setdefault("WHISPER_CPU_THREADS", "6")
-    env.setdefault("WHISPER_VAD_SILENCE_MS", "220")
-    env.setdefault("WHISPER_VAD_MIN_SPEECH_MS", "120")
-    env.setdefault("WHISPER_STREAM_OVERLAP_SECONDS", "0.4")
-    env.setdefault("WHISPER_STREAM_CONTEXT_CHARS", "120")
+    env.setdefault("WHISPER_VAD_SILENCE_MS", "280")
+    env.setdefault("WHISPER_VAD_MIN_SPEECH_MS", "140")
+    env.setdefault("WHISPER_STREAM_OVERLAP_SECONDS", "0.6")
+    env.setdefault("WHISPER_STREAM_CONTEXT_CHARS", "180")
     env.setdefault("WHISPER_LOW_CONFIDENCE_THRESHOLD", "-0.8")
     env.setdefault("WHISPER_RETRY_BEAM_BONUS", "1")
     env.setdefault("WHISPER_RETRY_MAX_BEAM", "6")
@@ -1072,7 +1161,24 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     env.setdefault("ASR_DEFAULT_LANGUAGE", "en")
     env.setdefault("ASR_FORCE_LANGUAGE", "en")
     env.setdefault("ASR_ENGLISH_ONLY", "1")
-    env.setdefault("TRANSCRIBE_MODE", "moonshine-medium")
+    explicit_transcribe_mode = _normalize_string(env.get("TRANSCRIBE_MODE"))
+    env.setdefault("VOICE_PIPELINE_MODE", "direct_unified")
+    env.setdefault("VOICE_CONVERSATION_PROFILE", "local")
+    env.setdefault("VOICE_LOCAL_ASR_MODE", "moonshine-medium")
+    env.setdefault("VOICE_CLOUD_ASR_MODE", "api")
+    env.setdefault("VOICE_LOCAL_STREAMING_ASR_MODE", env.get("VOICE_LOCAL_ASR_MODE", "moonshine-medium"))
+    env.setdefault("VOICE_CLOUD_STREAMING_ASR_MODE", env.get("VOICE_LOCAL_STREAMING_ASR_MODE", "moonshine-medium"))
+    env.setdefault("VOICE_ASR_HOTWORD_STRATEGY", "commands_games_memory")
+    env.setdefault("VOICE_ASR_STABLE_PARTIAL_REPEATS", "2")
+    env.setdefault("VOICE_CLOUD_RESPONSE_PROVIDER", "openai")
+    env.setdefault("OPENAI_RESPONSE_MODEL", "gpt-4o-mini")
+    if explicit_transcribe_mode:
+        env["TRANSCRIBE_MODE"] = explicit_transcribe_mode
+    else:
+        profile = (env.get("VOICE_CONVERSATION_PROFILE", "local") or "local").strip().lower()
+        preferred_mode_key = "VOICE_CLOUD_ASR_MODE" if profile == "cloud" else "VOICE_LOCAL_ASR_MODE"
+        preferred_mode_default = "api" if profile == "cloud" else "moonshine-medium"
+        env["TRANSCRIBE_MODE"] = (env.get(preferred_mode_key, preferred_mode_default) or preferred_mode_default).strip() or preferred_mode_default
     env.setdefault("DIALOG_REPLY_COMPRESS", "1")
     env.setdefault("DIALOG_MAX_REPLY_SENTENCES", "3")
     env.setdefault("DIALOG_MAX_REPLY_CHARS", "0")
@@ -1088,6 +1194,8 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     env.setdefault("QWEN_TTS_WARMUP_TEXT", "Hello. I am ready.")
     env.setdefault("MQTT_HOST", "127.0.0.1")
     env.setdefault("MQTT_PORT", "1883")
+    env.setdefault("PANEL_PORT", "8787")
+    env.setdefault("VOICE_AGENT_PANEL_URL", "http://127.0.0.1:8787")
     env.setdefault(
         "DIALOG_USER_MEMORY_PATH",
         str(defaults.script_dir / "dialog_service" / "user_memory.json"),
@@ -1130,6 +1238,8 @@ def _is_tcp_port_in_use(host: str, port: int, timeout_sec: float = 0.25) -> bool
 
 def _build_handles(commands: CommandSet, dirs: DirectorySet, env: Dict[str, str]) -> List[ProcessHandle]:
     handles: List[ProcessHandle] = [ProcessHandle("voice service", commands.voice, dirs.voice)]
+    pipeline_mode = (env.get("VOICE_PIPELINE_MODE", "direct_unified") or "direct_unified").strip().lower()
+    use_legacy_dialog_stack = pipeline_mode == "legacy_mqtt"
     if commands.hub is not None:
         handles.insert(0, ProcessHandle("mqtt-broker", commands.hub, dirs.hub))
     if commands.orchestrator is not None:
@@ -1138,10 +1248,24 @@ def _build_handles(commands: CommandSet, dirs: DirectorySet, env: Dict[str, str]
         handles.append(ProcessHandle("piper-http", commands.piper_http, dirs.piper_http))
     if commands.qwen_http is not None:
         handles.append(ProcessHandle("qwen-http", commands.qwen_http, dirs.qwen_http))
+    if commands.desktop_runtime is not None:
+        handles.append(
+            ProcessHandle(
+                "desktop-runtime",
+                commands.desktop_runtime,
+                dirs.desktop_runtime,
+                restart_on_exit=True,
+                max_restarts=3,
+            )
+        )
     if commands.intent is not None:
         handles.append(ProcessHandle("intent-service", commands.intent, dirs.intent))
+        if not use_legacy_dialog_stack:
+            print("[voice-agent] intent-service running in standby for legacy MQTT fallback.")
     if commands.dialog is not None:
         handles.append(ProcessHandle("dialog-service", commands.dialog, dirs.dialog))
+        if not use_legacy_dialog_stack:
+            print("[voice-agent] dialog-service running in standby for legacy MQTT fallback.")
     if commands.telemetry is not None:
         telemetry_host = env.get("TELEMETRY_HOST", "0.0.0.0").strip() or "0.0.0.0"
         try:
@@ -1212,6 +1336,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "[voice-agent] INTENT_USE_MOONSHINE_RECOGNIZER="
         + str(env.get("INTENT_USE_MOONSHINE_RECOGNIZER", ""))
     )
+    print("[voice-agent] VOICE_PIPELINE_MODE=" + str(env.get("VOICE_PIPELINE_MODE", "")))
+    print("[voice-agent] VOICE_CONVERSATION_PROFILE=" + str(env.get("VOICE_CONVERSATION_PROFILE", "")))
     handles = _build_handles(commands, dirs, env)
     return _run_supervisor(handles, env, no_wait=args.no_wait)
 

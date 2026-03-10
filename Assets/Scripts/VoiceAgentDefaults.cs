@@ -1,4 +1,4 @@
-namespace RobotVoice
+﻿namespace RobotVoice
 {
     internal static class VoiceAgentDefaults
     {
@@ -12,6 +12,8 @@ namespace RobotVoice
 
         public const string AsrBaseUrl = "http://127.0.0.1:8000";
         public const string AsrTranscribeUrl = AsrBaseUrl + "/transcribe";
+        public const string ConversationConfigUrl = AsrBaseUrl + "/conversation/config";
+        public const string ConversationTurnStreamUrl = AsrBaseUrl + "/conversation/turn/stream";
 
         public const string PiperBaseUrl = "http://127.0.0.1:5005";
         public const string PiperSpeakUrl = PiperBaseUrl + "/speak";
@@ -20,6 +22,7 @@ namespace RobotVoice
 
         public const string OllamaBaseUrl = "http://127.0.0.1:11434";
         public const string TelemetryDashboardUrl = "http://127.0.0.1:8101/dashboard";
-        public const string DefaultVisionModel = "gemma3:4b";
+        public const string DefaultVisionModel = "qwen3.5:0.8b";
     }
 }
+

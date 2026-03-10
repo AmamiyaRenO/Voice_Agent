@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -115,6 +115,28 @@ namespace RobotVoice
             {
                 SetOrRemoveString(envObj, "OLLAMA_MODEL", value);
             }
+            if (TryReadOptionalString(requestObj, "conversation_pipeline_mode", out value))
+            {
+                SetOrRemoveString(envObj, "VOICE_PIPELINE_MODE", NormalizeConversationPipelineModeForConfig(value));
+            }
+            if (TryReadOptionalString(requestObj, "conversation_profile", out value))
+            {
+                SetOrRemoveString(envObj, "VOICE_CONVERSATION_PROFILE", NormalizeConversationProfileForConfig(value));
+            }
+            if (TryReadOptionalString(requestObj, "local_asr_mode", out value))
+            {
+                var normalizedAsr = NormalizeAsrMode(value);
+                SetOrRemoveString(envObj, "VOICE_LOCAL_ASR_MODE", string.IsNullOrWhiteSpace(normalizedAsr) ? string.Empty : normalizedAsr);
+            }
+            if (TryReadOptionalString(requestObj, "cloud_asr_mode", out value))
+            {
+                var normalizedAsr = NormalizeAsrMode(value);
+                SetOrRemoveString(envObj, "VOICE_CLOUD_ASR_MODE", string.IsNullOrWhiteSpace(normalizedAsr) ? string.Empty : normalizedAsr);
+            }
+            if (TryReadOptionalString(requestObj, "openai_response_model", out value))
+            {
+                SetOrRemoveString(envObj, "OPENAI_RESPONSE_MODEL", value);
+            }
             if (TryReadOptionalString(requestObj, "launch_triggers", out value))
             {
                 SetOrRemoveStringList(intentObj, "launch_triggers", ParsePhraseList(value));
@@ -152,10 +174,19 @@ namespace RobotVoice
                 return;
             }
 
-            await WriteRuntimeConfigStatusAsync(
-                    context.Response,
-                    "saved. restart scripts/start_local_services.py to apply service runtime changes.")
-                .ConfigureAwait(false);
+            var liveApplyMessage = await ApplyConversationRuntimeChangesAsync(
+                ReadEnvString(envObj, "VOICE_PIPELINE_MODE", "direct_unified"),
+                ReadEnvString(envObj, "VOICE_CONVERSATION_PROFILE", "local"),
+                ReadEnvString(envObj, "VOICE_LOCAL_ASR_MODE", "moonshine-medium"),
+                ReadEnvString(envObj, "VOICE_CLOUD_ASR_MODE", "api"),
+                (openaiObj["api_key"]?.Value ?? string.Empty).Trim(),
+                (openaiObj["base_url"]?.Value ?? string.Empty).Trim(),
+                (openaiObj["transcribe_model"]?.Value ?? string.Empty).Trim(),
+                (openaiObj["transcribe_prompt"]?.Value ?? string.Empty).Trim(),
+                ReadEnvString(envObj, "OPENAI_RESPONSE_MODEL", "gpt-4o-mini"),
+                ReadEnvString(envObj, "OLLAMA_MODEL", VoiceAgentDefaults.DefaultVisionModel)).ConfigureAwait(false);
+
+            await WriteRuntimeConfigStatusAsync(context.Response, liveApplyMessage).ConfigureAwait(false);
         }
 
         private async Task WriteRuntimeConfigStatusAsync(HttpListenerResponse response, string message)
@@ -237,6 +268,19 @@ namespace RobotVoice
                 ollamaModel = VoiceAgentDefaults.DefaultVisionModel;
             }
             payload["ollama_model"] = ollamaModel;
+            payload["conversation_pipeline_mode"] = NormalizeConversationPipelineModeForConfig(
+                ReadEnvString(envObj, "VOICE_PIPELINE_MODE", "direct_unified"));
+            payload["conversation_profile"] = NormalizeConversationProfileForConfig(
+                ReadEnvString(envObj, "VOICE_CONVERSATION_PROFILE", "local"));
+            payload["local_asr_mode"] = ResolvePreferredConversationAsrMode(
+                "local",
+                ReadEnvString(envObj, "VOICE_LOCAL_ASR_MODE", "moonshine-medium"),
+                ReadEnvString(envObj, "VOICE_CLOUD_ASR_MODE", "api"));
+            payload["cloud_asr_mode"] = ResolvePreferredConversationAsrMode(
+                "cloud",
+                ReadEnvString(envObj, "VOICE_LOCAL_ASR_MODE", "moonshine-medium"),
+                ReadEnvString(envObj, "VOICE_CLOUD_ASR_MODE", "api"));
+            payload["openai_response_model"] = ReadEnvString(envObj, "OPENAI_RESPONSE_MODEL", "gpt-4o-mini");
             payload["launch_triggers"] = string.Join(", ", launchTriggers);
             payload["exit_keywords"] = string.Join(", ", exitKeywords);
             payload["use_llm_intent_classifier"] = useLlmIntentClassifier;
