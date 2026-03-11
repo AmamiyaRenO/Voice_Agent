@@ -676,6 +676,27 @@ def _load_speaker_profiles_root(path: Path) -> Dict[str, Any]:
     return payload
 
 
+def _save_speaker_profiles_root(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _clear_speaker_profile_for_user(memory_path: Path, user_id: str) -> bool:
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
+        return False
+    profiles_path = resolve_speaker_profiles_path(memory_path=str(memory_path))
+    root = _load_speaker_profiles_root(profiles_path)
+    users = root.get("users", {}) if isinstance(root, dict) else {}
+    if not isinstance(users, dict):
+        root["users"] = {}
+        users = root["users"]
+    removed = users.pop(normalized_user_id, None) is not None
+    if removed:
+        _save_speaker_profiles_root(profiles_path, root)
+    return removed
+
+
 def _speaker_profiles_summary(memory_path: Path) -> Dict[str, Dict[str, Any]]:
     root = _load_speaker_profiles_root(resolve_speaker_profiles_path(memory_path=str(memory_path)))
     users = root.get("users", {}) if isinstance(root, dict) else {}
@@ -1587,6 +1608,11 @@ async def _build_asr_status_payload() -> Dict[str, Any]:
         "active_user_id": str(getattr(status, "active_user_id", "") or ""),
         "last_speaker_match": dict(getattr(status, "last_speaker_match", {}) or {}),
         "live_capture_enabled": bool(getattr(status, "live_capture_enabled", False)),
+        "input_device_index": int(getattr(status, "input_device_index", -1) or -1),
+        "input_device_name": str(getattr(status, "input_device_name", "") or ""),
+        "input_device_hostapi": str(getattr(status, "input_device_hostapi", "") or ""),
+        "input_device_source": str(getattr(status, "input_device_source", "") or ""),
+        "input_device_sample_rate": _safe_json_float(getattr(status, "input_device_sample_rate", 0.0), 0.0),
     }
     try:
         response = await panel_http.get(f"{DEFAULT_ASR_BASE_URL}/transcribe/config")
@@ -2016,8 +2042,20 @@ async def api_memory_post(request: Request) -> Dict[str, Any]:
                 mapped = identity_map.get(key)
                 if isinstance(mapped, dict) and str(mapped.get("user_id") or "").strip() == user_id:
                     identity_map.pop(key, None)
+        cleared_speaker_profile = _clear_speaker_profile_for_user(path, user_id)
+        try:
+            speaker_status = await audio_agent.speaker_profiles_status()
+            active_profiles_path = Path(str(speaker_status.get("profiles_path") or "")).expanduser().resolve()
+            target_profiles_path = Path(resolve_speaker_profiles_path(memory_path=str(path))).expanduser().resolve()
+            if active_profiles_path == target_profiles_path:
+                await audio_agent.clear_speaker_profile(user_id=user_id)
+        except Exception:
+            pass
         _save_memory_root(path, root)
-        return _memory_payload(path, "", "memory user deleted")
+        message = "memory user deleted"
+        if cleared_speaker_profile:
+            message = "memory user deleted and speaker profile cleared"
+        return _memory_payload(path, "", message)
     raise HTTPException(status_code=400, detail="unknown action")
 
 

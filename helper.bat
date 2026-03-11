@@ -23,13 +23,13 @@ for %%P in (
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$root = [System.IO.Path]::GetFullPath('%CD%').ToLowerInvariant();" ^
-  "$targets = @('start_local_services.py','intent_service\main.py','dialog_service\main.py','game_launcher\main.py','telemetry_service\main.py','python_voice_service\main.py','python_voice_service\piper_http.py','python_voice_service\qwen_tts_http.py','python_voice_service\desktop_runtime.py','uvicorn main:app','uvicorn piper_http:app','uvicorn qwen_tts_http:app','uvicorn desktop_runtime:app');" ^
+  "$targets = @('start_local_services.py','intent_service\main.py','dialog_service\main.py','game_launcher\main.py','telemetry_service\main.py','python_voice_service\main.py','python_voice_service\piper_http.py','python_voice_service\qwen_tts_http.py','python_voice_service\kokoro_tts_http.py','python_voice_service\desktop_runtime.py','uvicorn main:app','uvicorn piper_http:app','uvicorn qwen_tts_http:app','uvicorn kokoro_tts_http:app','uvicorn desktop_runtime:app');" ^
   "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.Name -match '^(python|py)(\.exe)?$' } | ForEach-Object { $cmd = $_.CommandLine.ToLowerInvariant(); if($cmd.Contains($root)){ foreach($t in $targets){ if($cmd.Contains($t.ToLowerInvariant())){ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; break } } } }" >nul 2>nul
 
 timeout /t 1 /nobreak >nul
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ports = @(8000,5005,5006,8787);" ^
+  "$ports = @(8000,5005,5006,5007,8787);" ^
   "foreach($port in $ports){" ^
   "  Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | ForEach-Object {" ^
   "    try { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } catch {}" ^

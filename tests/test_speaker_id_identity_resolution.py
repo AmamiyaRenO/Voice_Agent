@@ -127,6 +127,8 @@ def test_speaker_id_match_threshold_margin_and_min_duration(tmp_path: Path, monk
     assert below_threshold.matched is False
     assert below_threshold.top1_score < config.match_threshold
     assert below_threshold.reason == "below_threshold"
+    assert below_threshold.top1_user_id == "alice"
+    assert below_threshold.top2_user_id == "bob"
 
     service._profiles = {
         "alice": {"centroid": speaker_id._normalize_embedding(_unit_vector(0.95, math.sqrt(1.0 - 0.95**2)))},
@@ -145,6 +147,8 @@ def test_speaker_id_match_threshold_margin_and_min_duration(tmp_path: Path, monk
     assert matched.matched is True
     assert matched.user_id == "alice"
     assert matched.reason == "matched"
+    assert matched.top1_user_id == "alice"
+    assert matched.top2_user_id == "bob"
 
 
 def test_intent_service_preserves_identity_resolution_none():
@@ -517,7 +521,7 @@ def test_voice_service_structured_renderer_falls_back_when_required_game_name_is
     assert "something new" not in reply
 
 
-def test_desktop_audio_agent_live_captions_can_use_fallback_segment_window():
+def test_desktop_audio_agent_live_captions_prefers_recent_strict_segment_over_older_fallback():
     if str(PYTHON_VOICE_DIR) not in sys.path:
         sys.path.insert(0, str(PYTHON_VOICE_DIR))
 
@@ -573,10 +577,272 @@ def test_desktop_audio_agent_live_captions_can_use_fallback_segment_window():
         agent._resolve_recent_speaker_user(source="live_captions", observed_at=now)
     )
 
+    assert user_id == ""
+    assert identity_resolution == "none"
+    assert agent._active_user_id == ""
+    assert agent._last_speaker_match["matched"] is False
+    assert agent._last_speaker_match["segment_used_fallback_window"] is False
+    assert agent._last_speaker_match["segment_selection_window"] == "strict"
+    assert agent._last_speaker_match["candidate_count"] == 2
+    assert agent._last_speaker_match["profile_candidate_count"] == 2
+    assert agent._last_speaker_match["segment_candidate_count"] == 2
+    assert agent._last_speaker_match["strict_segment_candidate_count"] == 1
+    assert agent._last_speaker_match["fallback_segment_candidate_count"] == 1
+    assert older_voice.caption_uses == 0
+    assert recent_noise.caption_uses == 1
+
+
+def test_desktop_audio_agent_live_captions_can_use_recent_fallback_segment_window():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_live_captions_recent_fallback_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    now = 100.0
+
+    older_voice = audio_agent_module.CapturedSpeechSegment(
+        audio=np.asarray([1.0], dtype=np.float32),
+        sample_rate=16000,
+        started_at=89.0,
+        ended_at=91.5,
+        speech_seconds=2.5,
+    )
+
+    agent._speaker_id = SimpleNamespace(
+        enabled=True,
+        match_audio=lambda _audio, _sample_rate: audio_agent_module.SpeakerMatchResult(
+            user_id="user_003",
+            matched=True,
+            score=0.91,
+            margin=0.13,
+            top1_score=0.91,
+            top2_score=0.78,
+            candidate_count=2,
+            duration_seconds=2.5,
+            reason="matched",
+        ),
+    )
+    agent._recent_speaker_segments = deque([older_voice])
+    agent._last_speaker_match = {}
+    agent._active_user_id = ""
+
+    user_id, identity_resolution = asyncio.run(
+        agent._resolve_recent_speaker_user(source="live_captions", observed_at=now)
+    )
+
     assert user_id == "user_003"
     assert identity_resolution == "auto"
     assert agent._active_user_id == "user_003"
     assert agent._last_speaker_match["matched"] is True
     assert agent._last_speaker_match["segment_used_fallback_window"] is True
-    assert agent._last_speaker_match["candidate_count"] >= 2
+    assert agent._last_speaker_match["segment_selection_window"] == "fallback"
+    assert agent._last_speaker_match["segment_candidate_count"] == 1
+    assert agent._last_speaker_match["strict_segment_candidate_count"] == 0
+    assert agent._last_speaker_match["fallback_segment_candidate_count"] == 1
+    assert agent._last_speaker_match["candidate_count"] == 2
+    assert agent._last_speaker_match["profile_candidate_count"] == 2
     assert older_voice.caption_uses == 1
+
+
+def test_desktop_audio_agent_live_captions_blocks_stale_fallback_segment():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_live_captions_stale_fallback_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    now = 100.0
+
+    stale_voice = audio_agent_module.CapturedSpeechSegment(
+        audio=np.asarray([1.0], dtype=np.float32),
+        sample_rate=16000,
+        started_at=82.0,
+        ended_at=84.5,
+        speech_seconds=2.5,
+    )
+
+    agent._speaker_id = SimpleNamespace(
+        enabled=True,
+        match_audio=lambda _audio, _sample_rate: (_ for _ in ()).throw(AssertionError("stale fallback should not match")),
+    )
+    agent._recent_speaker_segments = deque([stale_voice])
+    agent._last_speaker_match = {}
+    agent._active_user_id = "user_003"
+
+    user_id, identity_resolution = asyncio.run(
+        agent._resolve_recent_speaker_user(source="live_captions", observed_at=now)
+    )
+
+    assert user_id == ""
+    assert identity_resolution == "none"
+    assert agent._active_user_id == ""
+    assert agent._last_speaker_match["matched"] is False
+    assert agent._last_speaker_match["reason"] == "stale_fallback_segment"
+    assert agent._last_speaker_match["segment_used_fallback_window"] is True
+    assert agent._last_speaker_match["segment_candidate_count"] == 1
+    assert agent._last_speaker_match["strict_segment_candidate_count"] == 0
+    assert agent._last_speaker_match["fallback_segment_candidate_count"] == 1
+    assert agent._last_speaker_match["segment_age_seconds"] == pytest.approx(15.5, abs=1e-4)
+    assert stale_voice.caption_uses == 0
+
+
+def test_desktop_audio_agent_input_device_details_prefers_stream_device(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_input_device_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._input_stream_lock = threading.Lock()
+    agent._input_stream = SimpleNamespace(device=(5, 7))
+    agent._selected_input_device_index = -1
+    agent._selected_input_device_name = ""
+    agent._selected_input_device_hostapi = ""
+    agent._selected_input_device_source = ""
+
+    fake_sd = SimpleNamespace(
+        query_devices=lambda index: {"name": f"Mic {index}", "hostapi": 2},
+        query_hostapis=lambda index=None: {"name": "Windows WASAPI"} if index == 2 else [],
+        default=SimpleNamespace(device=(1, 2)),
+    )
+    monkeypatch.setattr(audio_agent_module, "sd", fake_sd)
+
+    index, name, hostapi, source = agent._input_device_details()
+
+    assert index == 5
+    assert name == "Mic 5"
+    assert hostapi == "Windows WASAPI"
+    assert source == "stream_runtime"
+
+
+def test_desktop_audio_agent_resolve_preferred_input_device_prefers_windows_wasapi(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_preferred_input_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+
+    hostapis = [
+        {"name": "MME", "default_input_device": 1},
+        {"name": "Windows WASAPI", "default_input_device": 4},
+    ]
+    devices = {
+        1: {"name": "Laptop Mic", "hostapi": 0, "max_input_channels": 1},
+        4: {"name": "Webcam Mic", "hostapi": 1, "max_input_channels": 1},
+    }
+    fake_sd = SimpleNamespace(
+        query_devices=lambda index=None: devices[index] if index is not None else list(devices.values()),
+        query_hostapis=lambda index=None: hostapis[index] if index is not None else hostapis,
+        default=SimpleNamespace(device=(1, 9)),
+    )
+    monkeypatch.setattr(audio_agent_module, "sd", fake_sd)
+    monkeypatch.setattr(audio_agent_module, "DEFAULT_INPUT_DEVICE_NAME", "")
+    monkeypatch.setattr(audio_agent_module, "DEFAULT_INPUT_DEVICE_INDEX", "")
+    monkeypatch.setattr(audio_agent_module.os, "name", "nt", raising=False)
+
+    index, name, hostapi, source = agent._resolve_preferred_input_device()
+
+    assert index == 4
+    assert name == "Webcam Mic"
+    assert hostapi == "Windows WASAPI"
+    assert source == "windows_default_wasapi"
+
+
+def test_desktop_audio_agent_preferred_input_stream_config_uses_device_sample_rate(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_stream_config_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent.capture_sample_rate = 16000
+    agent.input_blocksize = 160
+    monkeypatch.setattr(
+        agent,
+        "_resolve_preferred_input_device",
+        lambda: (4, "Webcam Mic", "Windows WASAPI", "windows_default_wasapi"),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_device_details_for_index",
+        lambda _index: (4, "Webcam Mic", "Windows WASAPI", 48000.0),
+    )
+
+    index, name, hostapi, source, sample_rate, blocksize = agent._preferred_input_stream_config()
+
+    assert index == 4
+    assert name == "Webcam Mic"
+    assert hostapi == "Windows WASAPI"
+    assert source == "windows_default_wasapi"
+    assert sample_rate == 48000.0
+    assert blocksize == 480
+
+
+def test_desktop_audio_agent_input_callback_resamples_to_capture_rate():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_input_callback_resample_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    pushed = []
+    agent._running = True
+    agent._listening = True
+    agent.current_asr_mode = "live-captions"
+    agent.is_assistant_speaking = lambda: False
+    agent._input_stream_sample_rate = 48000.0
+    agent.capture_sample_rate = 16000
+    agent._input_buffer = SimpleNamespace(push=lambda samples: pushed.append(np.asarray(samples, dtype=np.float32)))
+    agent._last_error = ""
+
+    indata = np.ones((480, 1), dtype=np.float32)
+    agent._input_callback(indata, 480, None, None)
+
+    assert len(pushed) == 1
+    assert pushed[0].size == pytest.approx(160, abs=2)
+
+
+def test_desktop_runtime_clear_speaker_profile_for_user(tmp_path: Path):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    runtime_module = _load_module("desktop_runtime_speaker_cleanup_module", PYTHON_VOICE_DIR / "desktop_runtime.py")
+    memory_path = tmp_path / "user_memory.json"
+    speaker_profiles_path = tmp_path / "speaker_profiles.json"
+    memory_path.write_text(json.dumps({"version": 1, "next_user_index": 1, "identity_map": {}, "profiles": {}}, indent=2), encoding="utf-8")
+    speaker_profiles_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "users": {
+                    "user_001": {"clip_count": 3, "centroid": [1.0, 0.0], "updated_ts": 1.0},
+                    "user_002": {"clip_count": 3, "centroid": [0.0, 1.0], "updated_ts": 2.0},
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    assert runtime_module._clear_speaker_profile_for_user(memory_path, "user_001") is True
+    payload = json.loads(speaker_profiles_path.read_text(encoding="utf-8"))
+    assert "user_001" not in payload["users"]
+    assert "user_002" in payload["users"]
+    assert runtime_module._clear_speaker_profile_for_user(memory_path, "missing") is False

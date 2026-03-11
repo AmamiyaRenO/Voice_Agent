@@ -4,7 +4,7 @@ Voice Agent is a local-first voice interaction stack for rehabilitation and exer
 The maintained fast path is now a standalone desktop runtime on `127.0.0.1:8787` plus Python services for ASR, grounded dialog, memory, TTS, and game launching. Unity is optional and currently treated as a shell layer for avatar/UI/game integration instead of the primary conversation orchestrator.
 
 The repository also includes:
-- A Python speech service (`python_voice_service/`) for ASR + LLM reply generation.
+- A Python voice service (`python_voice_service/`) for ASR, grounded dialog, speaker ID, TTS wrappers, and desktop runtime APIs.
 - A Python SDK (`python_sdk/`) for non-Unity control and automation.
 - Local orchestration scripts for multi-process development.
 
@@ -25,6 +25,7 @@ The repository also includes:
 | Python voice service | `8000` | Conversation, ASR, and response APIs |
 | Piper HTTP wrapper | `5005` | Main low-latency local TTS path |
 | Qwen TTS wrapper | `5006` | Optional alternate TTS backend |
+| Kokoro TTS wrapper | `5007` | Optional neural TTS backend for source/developer runs |
 | Telemetry service | `8101` | Exercise/usage metrics aggregation |
 | MQTT broker | `1883` | Robot, dialog, intent, and telemetry messaging |
 
@@ -37,6 +38,8 @@ The repository also includes:
 - Grounded game replies now cover explain/recommend/list behavior from the local manifest instead of freeform LLM guesses.
 - Contextual command carryover works for phrases such as `Open it.` after a recommendation or grounded explanation.
 - Piper runs as a persistent worker instead of a per-request process, which reduces TTS startup cost.
+- Kokoro TTS is now available as a third compatible backend on `:5007`, alongside Piper and Qwen.
+- The source launcher now auto-bootstraps/detects `.venv_asr` and `.venv_tts`, while `helper.bat` prefers packaged services, clears stale processes, and reuses an existing MQTT broker on `1883`.
 - Repeatable conversation regression now includes profile compare, grounded game cases, and a dedicated memory regression scenario set.
 
 ## SDK Spotlight (Start Here for Integration)
@@ -65,7 +68,7 @@ It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for 
 - [Intent Service (Routing + Manifest)](#intent-service-routing--manifest)
 - [Dialog Service (Speaker Identity + Persistent Memory)](#dialog-service-speaker-identity--persistent-memory)
 - [Runtime Config: Save vs Apply](#runtime-config-save-vs-apply)
-- [TTS Backends (Piper and Qwen)](#tts-backends-piper-and-qwen)
+- [TTS Backends (Piper, Qwen, and Kokoro)](#tts-backends-piper-qwen-and-kokoro)
 - [Troubleshooting](#troubleshooting)
 - [Development and Tests](#development-and-tests)
 - [License](#license)
@@ -81,7 +84,7 @@ flowchart LR
     Turn --> Memory["Structured memory<br/>facts / episodes / recent games / last referenced game"]
     Turn --> Provider["Reply provider<br/>local Ollama or cloud OpenAI"]
     Turn --> Vision["Optional vision query<br/>desktop camera snapshot -> describe"]
-    Runtime --> TTS["/api/speak -> Piper or Qwen"]
+    Runtime --> TTS["/api/speak -> Piper / Qwen / Kokoro"]
     Runtime --> MQTT["MQTT bridge"]
     MQTT --> Robot["robot/pi/*<br/>face / servo / LED"]
     MQTT --> Intent["robot/intent<br/>launch / back home"]
@@ -123,7 +126,7 @@ sequenceDiagram
 | Path | Purpose |
 |---|---|
 | `Assets/` | Unity scenes, scripts, prefabs, browser panel assets, and optional shell integration |
-| `python_voice_service/` | FastAPI services for conversation, ASR, desktop runtime, Piper/Qwen wrappers, grounding, and streaming audio tools |
+| `python_voice_service/` | FastAPI services for conversation, ASR, desktop runtime, Piper/Qwen/Kokoro wrappers, grounding, speaker ID, and streaming audio tools |
 | `python_sdk/` | Python client SDK for robot controls and runtime APIs |
 | `scripts/` | Local launcher plus helper services (`intent_service`, `dialog_service`, `telemetry_service`, `game_launcher`, packaging) |
 | `runtime/` | Runtime outputs and assets such as eval results, captions, local models, and packaged-service payloads |
@@ -147,7 +150,7 @@ sequenceDiagram
 - Optional vision-assisted replies through the desktop runtime camera describe endpoint.
 - Telemetry aggregation service for elder-exercise metrics (supports mock seeding).
 - Browser control panel over HTTP (default port `8787`) with runtime switching, memory/QMD tools, games, camera, and logs.
-- Pluggable TTS backend on stable endpoint (`/speak`) with persistent Piper worker or Qwen wrapper.
+- Pluggable TTS backend on stable endpoint (`/speak`) with persistent Piper worker plus optional Qwen and Kokoro wrappers.
 - Python SDK parity with Unity panel actions.
 - SDK Visualizer (`/sdk`) with step-by-step flow building, execution, and JSON import/export.
 - Local multi-process launcher (`scripts/start_local_services.py`).
@@ -174,7 +177,7 @@ flowchart LR
 2. Run `.\helper.bat` from the repo root.
 3. Open `http://127.0.0.1:8787`.
 4. Use `/runtime` to switch `local` / `cloud`, ASR mode, and model/runtime settings.
-5. Use `/memory`, `/games`, and `/sdk` for memory inspection, manifest editing, and API testing.
+5. Use `/setup`, `/memory`, `/games`, and `/sdk` for first-run checks, memory inspection, manifest editing, and API testing.
 
 `helper.bat` delegates to `scripts/start_local_services.py`, which can launch source services in development or bundled executables when running from a packaged deployment.
 
@@ -205,6 +208,7 @@ Optional dependencies:
 - Ollama runtime (for `/respond` endpoint)
 - Piper executable + ONNX model (for Piper TTS wrapper)
 - Qwen TTS environment (separate venv recommended)
+- Kokoro TTS Python environment (`python_voice_service/.venv_tts`, auto-bootstrapped when possible)
 
 ## Detailed Setup
 
@@ -237,14 +241,17 @@ Important:
 - By default, the launcher auto-starts a local MQTT broker (Mosquitto) if available.
 - `--hub-cmd` is optional and only needed when you want to override broker startup.
 - Use `--no-hub` if you already have an external broker running.
-- By default, the script starts voice service + Piper HTTP + Qwen HTTP + intent service + dialog service + telemetry service + game launcher.
-- Launcher config file (no env var required): `scripts/local_services.user.json`
+- By default, the script starts voice service + Piper HTTP + Qwen HTTP + Kokoro HTTP + intent service + dialog service + telemetry service + game launcher.
+- Launcher config files:
+  - baseline defaults: `scripts/local_services.default.json`
+  - per-machine overrides (no env var required): `scripts/local_services.user.json`
   - Sample template: `scripts/local_services.user.sample.json`
   - Editable from User Panel: `/runtime.html` (`/api/runtime/config`)
   - Runtime panel stores path-like fields as absolute paths.
   - Runtime panel supports configurable intent action phrases:
     - launch triggers (for `LAUNCH_GAME`)
     - exit keywords (for `BACK_HOME`)
+- On source checkouts, the launcher can auto-bootstrap `python_voice_service/.venv_asr` and `.venv_tts` before falling back to system Python.
 - Intent alias matching uses `scripts/intent_service/manifest.json` by default (override with `INTENT_MANIFEST_PATH`).
 - Game launching reads the same manifest file (override with `GAME_LAUNCHER_MANIFEST_PATH`).
 - Each game entry can include `exec`, `workdir`, `args`, and `env`; `LAUNCH_GAME` only opens a process when `exec` is configured.
@@ -286,6 +293,8 @@ Recommended env vars when you want to control it explicitly:
 ### 4) Optional helper.bat
 
 `helper.bat` now starts `scripts/start_local_services.py` from the repository root using local Python (`py -3` or `python`) and no longer depends on `Robot_opr` paths.
+If `runtime/services/service_launcher.exe` exists, it uses the packaged launcher first.
+Otherwise it clears stale source/service processes, prefers `python_voice_service\.venv_asr` and `.venv_tts`, and automatically passes `--no-hub` when an MQTT broker is already listening on `1883`.
 
 Quick run:
 
@@ -318,6 +327,9 @@ The default packaged service set now includes:
 - `telemetry_service.exe`
 - `game_launcher.exe`
 - `service_launcher.exe`
+
+The Windows packaging path is currently centered on Piper for turnkey installs.
+Qwen can be bundled as an optional extra executable at build time, while Kokoro is primarily documented as a source/developer backend for now.
 
 2. Put your Unity Windows build output into `dist/unity`.
 3. Build the installer (Inno Setup 6 required):
@@ -361,10 +373,11 @@ See full deployment notes in [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WIND
 
 | Service | Default Port | Key Endpoints |
 |---|---:|---|
-| Desktop Runtime / Panel | `8787` | `/`, `/games`, `/runtime`, `/memory`, `/setup`, `/sdk`, `/api/speak`, `/api/llm/prompt`, `/api/vision/describe`, `/api/face`, `/api/flower`, `/api/led`, `/api/game`, `/api/game/manifest`, `/api/memory`, `/api/speaker-profiles`, `/api/qmd`, `/api/runtime/config`, `/api/runtime/prereq`, `/api/runtime/ollama`, `/api/asr`, `/api/logs/stream` |
+| Desktop Runtime / Panel | `8787` | `/`, `/games`, `/runtime`, `/memory`, `/setup`, `/sdk`, `/api/speak`, `/api/kokoro/options`, `/api/kokoro/speak`, `/api/llm/prompt`, `/api/vision/describe`, `/api/face`, `/api/flower`, `/api/led`, `/api/game`, `/api/game/manifest`, `/api/memory`, `/api/speaker-profiles`, `/api/qmd`, `/api/runtime/config`, `/api/runtime/prereq`, `/api/runtime/ollama`, `/api/asr`, `/api/logs/stream` |
 | Python Voice Service | `8000` | `/healthz`, `/conversation/config`, `/conversation/turn/stream`, `/transcribe`, `/transcribe/config`, `/respond`, `/respond/config`, `/respond/metrics` |
-| Piper wrapper | `5005` | `/speak` (GET/POST), `/speak_stream` |
-| Qwen wrapper | `5006` | `/speak` (GET/POST), `/metrics` |
+| Piper wrapper | `5005` | `/speak` (GET), `/speak_stream` (GET) |
+| Qwen wrapper | `5006` | `/speak` (GET), `/metrics` |
+| Kokoro wrapper | `5007` | `/healthz`, `/speak` (GET) |
 | Telemetry service | `8101` | `/healthz`, `/users`, `/dashboard`, `/metrics/user/{user_id}/weekly`, `/admin/seed-fake`, `/ingest` |
 
 ### MQTT topics (core)
@@ -809,25 +822,31 @@ Not every panel save is instant for all services. Use the table below:
 | Switch ASR mode | `POST /api/asr` (`set_mode`) | immediate (calls voice service runtime config API) |
 | Set/reset respond system prompt | `POST /respond/config` or panel `/api/llm/prompt` | immediate |
 
-## TTS Backends (Piper and Qwen)
+## TTS Backends (Piper, Qwen, and Kokoro)
 
-Both wrappers expose compatible `/speak` routes:
+All three wrappers expose compatible `/speak` routes:
 - Piper wrapper: `python_voice_service/piper_http.py`
 - Qwen wrapper: `python_voice_service/qwen_tts_http.py`
+- Kokoro wrapper: `python_voice_service/kokoro_tts_http.py`
 
 Typical defaults:
 - Piper on `5005`
 - Qwen on `5006`
+- Kokoro on `5007`
+
+The desktop runtime stable endpoint (`/api/speak`) can target `piper`, `qwen`, or `kokoro`, controlled by runtime config / panel settings and `VOICE_AGENT_TTS_BACKEND`.
 
 Override commands explicitly with launcher arguments:
 
 ```powershell
 python scripts/start_local_services.py `
   --piper-http-cmd "uvicorn piper_http:app --host 0.0.0.0 --port 5005" `
-  --qwen-http-cmd "uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5006"
+  --qwen-http-cmd "uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5006" `
+  --kokoro-http-cmd "uvicorn kokoro_tts_http:app --host 0.0.0.0 --port 5007"
 ```
 
-If you use Qwen TTS and Faster-Whisper together, keep separate virtual environments to avoid dependency conflicts.
+If you use Qwen or Kokoro TTS alongside Faster-Whisper, keep separate virtual environments to avoid dependency conflicts.
+For Windows packaging, Piper remains the default turnkey option.
 
 ## Troubleshooting
 
@@ -854,6 +873,7 @@ If you use Qwen TTS and Faster-Whisper together, keep separate virtual environme
   - Confirm topic names match your robot-side subscribers.
 - `/api/speak` fails:
   - Ensure the desktop runtime is listening on `8787`.
+  - If `VOICE_AGENT_TTS_BACKEND=kokoro`, confirm `http://127.0.0.1:5007/healthz` responds and the TTS venv has the `kokoro` dependency installed.
 - `/transcribe` fails:
   - Check `WHISPER_MODEL_PATH` and model availability.
   - Check Python service logs for load/runtime errors.

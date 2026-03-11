@@ -222,6 +222,8 @@ class SpeakerMatchResult:
     matched: bool = False
     score: float = 0.0
     margin: float = 0.0
+    top1_user_id: str = ""
+    top2_user_id: str = ""
     top1_score: float = 0.0
     top2_score: float = 0.0
     candidate_count: int = 0
@@ -234,6 +236,8 @@ class SpeakerMatchResult:
             "matched": bool(self.matched),
             "score": round(float(self.score), 4),
             "margin": round(float(self.margin), 4),
+            "top1_user_id": str(self.top1_user_id or ""),
+            "top2_user_id": str(self.top2_user_id or ""),
             "top1_score": round(float(self.top1_score), 4),
             "top2_score": round(float(self.top2_score), 4),
             "candidate_count": int(self.candidate_count),
@@ -405,6 +409,7 @@ class SpeakerIdService:
                 return SpeakerMatchResult(duration_seconds=duration_seconds, reason="no_profiles")
             scored.sort(key=lambda item: item[1], reverse=True)
             user_id, top1 = scored[0]
+            top2_user_id = str(scored[1][0]) if len(scored) > 1 else ""
             top2 = float(scored[1][1]) if len(scored) > 1 else 0.0
             margin = float(top1 - top2)
             matched = top1 >= self._config.match_threshold and margin >= self._config.match_margin
@@ -413,6 +418,8 @@ class SpeakerIdService:
                 matched=matched,
                 score=float(top1),
                 margin=margin,
+                top1_user_id=str(user_id or ""),
+                top2_user_id=top2_user_id,
                 top1_score=float(top1),
                 top2_score=float(top2),
                 candidate_count=len(scored),

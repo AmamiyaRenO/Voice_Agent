@@ -93,6 +93,8 @@ DEFAULT_OUTPUT_SAMPLE_RATE = int(os.getenv("AUDIO_AGENT_OUTPUT_SAMPLE_RATE", "22
 DEFAULT_INPUT_BLOCKSIZE = int(os.getenv("AUDIO_AGENT_INPUT_BLOCKSIZE", "160") or "160")
 DEFAULT_OUTPUT_BLOCKSIZE = int(os.getenv("AUDIO_AGENT_OUTPUT_BLOCKSIZE", "512") or "512")
 DEFAULT_INPUT_QUEUE_MAX_FRAMES = int(os.getenv("AUDIO_AGENT_INPUT_QUEUE_MAX_FRAMES", "240") or "240")
+DEFAULT_INPUT_DEVICE_NAME = str(os.getenv("VOICE_AGENT_INPUT_DEVICE_NAME", "") or "").strip()
+DEFAULT_INPUT_DEVICE_INDEX = str(os.getenv("VOICE_AGENT_INPUT_DEVICE_INDEX", "") or "").strip()
 DEFAULT_AEC_DELAY_MS = int(os.getenv("AUDIO_AGENT_AEC_DELAY_MS", "40") or "40")
 DEFAULT_HTTP_TIMEOUT = httpx.Timeout(60.0)
 DEFAULT_TURN_TIMEOUT_SECONDS = float(os.getenv("AUDIO_AGENT_TURN_TIMEOUT_SECONDS", "90") or "90")
@@ -129,6 +131,9 @@ DEFAULT_SPEAKER_ID_SEGMENT_MAX_AGE_SECONDS = float(
 )
 DEFAULT_SPEAKER_ID_SEGMENT_FALLBACK_AGE_SECONDS = float(
     os.getenv("VOICE_SPEAKER_ID_SEGMENT_FALLBACK_AGE_SECONDS", "18.0") or "18.0"
+)
+DEFAULT_SPEAKER_ID_STALE_FALLBACK_SECONDS = float(
+    os.getenv("VOICE_SPEAKER_ID_STALE_FALLBACK_SECONDS", "12.0") or "12.0"
 )
 DEFAULT_SPEAKER_ID_RECENT_SEGMENTS = int(os.getenv("VOICE_SPEAKER_ID_RECENT_SEGMENTS", "8") or "8")
 DEFAULT_SPEAKER_ID_ENROLL_TIMEOUT_SECONDS = float(
@@ -1298,6 +1303,11 @@ class AudioAgentStatus:
     active_user_id: str = ""
     last_speaker_match: Optional[Dict[str, Any]] = None
     live_capture_enabled: bool = False
+    input_device_name: str = ""
+    input_device_index: int = -1
+    input_device_hostapi: str = ""
+    input_device_source: str = ""
+    input_device_sample_rate: float = 0.0
 
 
 @dataclass
@@ -1413,6 +1423,12 @@ class DesktopAudioAgent:
         )
         self._input_stream = None
         self._input_stream_lock = threading.Lock()
+        self._selected_input_device_index = -1
+        self._selected_input_device_name = ""
+        self._selected_input_device_hostapi = ""
+        self._selected_input_device_source = ""
+        self._selected_input_device_sample_rate = 0.0
+        self._input_stream_sample_rate = float(self.capture_sample_rate)
         self._capture_worker_stop = threading.Event()
         self._capture_worker_thread: Optional[threading.Thread] = None
         self._live_captions_source = LiveCaptionsTranscriptSource(
@@ -1564,6 +1580,7 @@ class DesktopAudioAgent:
         extras: Optional[Dict[str, Any]] = None,
     ) -> None:
         payload = result.to_payload()
+        payload["profile_candidate_count"] = int(payload.get("candidate_count") or 0)
         payload["source"] = str(source or "")
         payload["ts"] = time.time()
         if extras:
@@ -1573,6 +1590,164 @@ class DesktopAudioAgent:
 
     def _speaker_match_payload(self) -> Dict[str, Any]:
         return dict(self._last_speaker_match or {})
+
+    def _sounddevice_hostapi_name(self, hostapi_index: Any) -> str:
+        if sd is None:
+            return ""
+        try:
+            index = int(hostapi_index)
+            hostapi = sd.query_hostapis(index)
+            if isinstance(hostapi, dict):
+                return str(hostapi.get("name") or "")
+        except Exception:
+            return ""
+        return ""
+
+    @staticmethod
+    def _normalize_audio_device_name(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+    def _device_details_for_index(self, index: Any) -> Tuple[int, str, str, float]:
+        if sd is None:
+            return -1, "", "", 0.0
+        try:
+            resolved_index = int(index)
+            device_info = sd.query_devices(resolved_index)
+        except Exception:
+            return -1, "", "", 0.0
+        if not isinstance(device_info, dict):
+            return resolved_index, "", "", 0.0
+        return (
+            resolved_index,
+            str(device_info.get("name") or ""),
+            self._sounddevice_hostapi_name(device_info.get("hostapi")),
+            float(device_info.get("default_samplerate") or 0.0),
+        )
+
+    def _resolve_preferred_input_device(self) -> Tuple[int, str, str, str]:
+        if sd is None:
+            return -1, "", "", ""
+        env_index_raw = str(DEFAULT_INPUT_DEVICE_INDEX or "").strip()
+        if env_index_raw:
+            try:
+                env_index = int(env_index_raw)
+            except Exception:
+                env_index = -1
+            if env_index >= 0:
+                resolved_index, name, hostapi, _sample_rate = self._device_details_for_index(env_index)
+                if resolved_index >= 0:
+                    return resolved_index, name, hostapi, "env_index"
+
+        env_name = self._normalize_audio_device_name(DEFAULT_INPUT_DEVICE_NAME)
+        if env_name:
+            try:
+                devices = list(sd.query_devices() or [])
+            except Exception:
+                devices = []
+            best_match: Tuple[int, str, str, int] = (-1, "", "", 99)
+            for index, device_info in enumerate(devices):
+                if not isinstance(device_info, dict):
+                    continue
+                if int(device_info.get("max_input_channels") or 0) <= 0:
+                    continue
+                device_name = str(device_info.get("name") or "")
+                normalized_name = self._normalize_audio_device_name(device_name)
+                if not normalized_name:
+                    continue
+                rank = 99
+                if normalized_name == env_name:
+                    rank = 0
+                elif env_name in normalized_name:
+                    rank = 1
+                elif normalized_name in env_name:
+                    rank = 2
+                if rank >= best_match[3]:
+                    continue
+                best_match = (index, device_name, self._sounddevice_hostapi_name(device_info.get("hostapi")), rank)
+            if best_match[0] >= 0:
+                return best_match[0], best_match[1], best_match[2], "env_name"
+
+        if os.name == "nt":
+            try:
+                hostapis = list(sd.query_hostapis() or [])
+            except Exception:
+                hostapis = []
+            for hostapi in hostapis:
+                if not isinstance(hostapi, dict):
+                    continue
+                hostapi_name = str(hostapi.get("name") or "")
+                if "wasapi" not in hostapi_name.casefold():
+                    continue
+                default_input = int(hostapi.get("default_input_device") or -1)
+                if default_input >= 0:
+                    resolved_index, name, resolved_hostapi, _sample_rate = self._device_details_for_index(default_input)
+                    if resolved_index >= 0:
+                        return resolved_index, name, resolved_hostapi or hostapi_name, "windows_default_wasapi"
+
+        try:
+            default_device = getattr(getattr(sd, "default", None), "device", None)
+            if isinstance(default_device, (list, tuple)) and default_device:
+                default_input = default_device[0]
+            else:
+                default_input = default_device
+            resolved_index, name, hostapi, _sample_rate = self._device_details_for_index(default_input)
+            if resolved_index >= 0:
+                return resolved_index, name, hostapi, "sounddevice_default"
+        except Exception:
+            pass
+        return -1, "", "", ""
+
+    def _input_device_details(self) -> Tuple[int, str, str, str]:
+        if sd is None:
+            return -1, "", "", ""
+        try:
+            with self._input_stream_lock:
+                stream = self._input_stream
+            if self._selected_input_device_index >= 0:
+                return (
+                    int(self._selected_input_device_index),
+                    str(self._selected_input_device_name or ""),
+                    str(self._selected_input_device_hostapi or ""),
+                    str(self._selected_input_device_source or ""),
+                )
+            device_value = getattr(stream, "device", None) if stream is not None else None
+            if isinstance(device_value, (list, tuple)) and device_value:
+                input_device = device_value[0]
+            elif device_value is not None:
+                input_device = device_value
+            else:
+                default_device = getattr(sd, "default", None)
+                default_pair = getattr(default_device, "device", None)
+                if isinstance(default_pair, (list, tuple)) and default_pair:
+                    input_device = default_pair[0]
+                else:
+                    input_device = default_pair
+            index, name, hostapi, _sample_rate = self._device_details_for_index(input_device)
+            return index, name, hostapi, "stream_runtime"
+        except Exception:
+            return -1, "", "", ""
+
+    def _preferred_input_stream_config(self) -> Tuple[int, str, str, str, float, int]:
+        device_index, device_name, device_hostapi, device_source = self._resolve_preferred_input_device()
+        device_sample_rate = float(self.capture_sample_rate)
+        if device_index >= 0:
+            _resolved_index, _resolved_name, _resolved_hostapi, resolved_sample_rate = self._device_details_for_index(device_index)
+            if resolved_sample_rate > 0.0:
+                device_sample_rate = float(resolved_sample_rate)
+        if device_sample_rate <= 0.0:
+            device_sample_rate = float(self.capture_sample_rate)
+        stream_blocksize = max(
+            1,
+            int(round(float(self.input_blocksize) * float(device_sample_rate) / float(max(1, self.capture_sample_rate)))),
+        )
+        return (
+            int(device_index),
+            str(device_name or ""),
+            str(device_hostapi or ""),
+            str(device_source or ""),
+            float(device_sample_rate),
+            int(stream_blocksize),
+        )
 
     def _remember_speaker_segment(self, audio: np.ndarray, *, started_at: float, ended_at: float) -> None:
         segment_audio = np.asarray(audio, dtype=np.float32).reshape(-1)
@@ -2160,20 +2335,54 @@ class DesktopAudioAgent:
             fallback_age_seconds=DEFAULT_SPEAKER_ID_SEGMENT_FALLBACK_AGE_SECONDS,
             max_candidates=DEFAULT_SPEAKER_ID_LIVE_CAPTIONS_MAX_CANDIDATES,
         )
+        strict_candidates = [item for item in candidates if not item[1]]
+        fallback_candidates = [item for item in candidates if item[1]]
+        candidate_ages = [float(item[2]) for item in candidates]
+        diagnostic_extras = {
+            "segment_candidate_count": len(candidates),
+            "strict_segment_candidate_count": len(strict_candidates),
+            "fallback_segment_candidate_count": len(fallback_candidates),
+        }
+        if candidate_ages:
+            diagnostic_extras["freshest_segment_age_seconds"] = round(min(candidate_ages), 4)
+            diagnostic_extras["oldest_segment_age_seconds"] = round(max(candidate_ages), 4)
         if not candidates:
-            self._update_last_speaker_match(SpeakerMatchResult(reason="no_recent_segment"), source=source)
+            self._update_last_speaker_match(
+                SpeakerMatchResult(reason="no_recent_segment"),
+                source=source,
+                extras=diagnostic_extras,
+            )
             return "", "none"
+        evaluation_candidates = strict_candidates
+        selection_window = "strict"
+        if not evaluation_candidates:
+            freshest_fallback_age = min((float(item[2]) for item in fallback_candidates), default=float("inf"))
+            stale_fallback_seconds = max(
+                DEFAULT_SPEAKER_ID_SEGMENT_MAX_AGE_SECONDS,
+                min(DEFAULT_SPEAKER_ID_SEGMENT_FALLBACK_AGE_SECONDS, DEFAULT_SPEAKER_ID_STALE_FALLBACK_SECONDS),
+            )
+            diagnostic_extras["stale_fallback_age_limit_seconds"] = round(float(stale_fallback_seconds), 4)
+            if freshest_fallback_age > stale_fallback_seconds:
+                diagnostic_extras["segment_used_fallback_window"] = True
+                diagnostic_extras["segment_age_seconds"] = round(float(freshest_fallback_age), 4)
+                self._update_last_speaker_match(
+                    SpeakerMatchResult(reason="stale_fallback_segment"),
+                    source=source,
+                    extras=diagnostic_extras,
+                )
+                return "", "none"
+            evaluation_candidates = fallback_candidates
+            selection_window = "fallback"
         best_result: Optional[SpeakerMatchResult] = None
         best_segment: Optional[CapturedSpeechSegment] = None
-        best_fallback = False
+        best_fallback = selection_window == "fallback"
         best_age = 0.0
         best_rank = -1
-        for index, (segment, used_fallback, age) in enumerate(candidates):
+        for index, (segment, _used_fallback, age) in enumerate(evaluation_candidates):
             result = await asyncio.to_thread(self._speaker_id.match_audio, segment.audio, segment.sample_rate)
             if best_result is None:
                 best_result = result
                 best_segment = segment
-                best_fallback = used_fallback
                 best_age = age
                 best_rank = index
                 continue
@@ -2188,15 +2397,15 @@ class DesktopAudioAgent:
             if replace:
                 best_result = result
                 best_segment = segment
-                best_fallback = used_fallback
                 best_age = age
                 best_rank = index
         assert best_result is not None
         extras = {
+            **diagnostic_extras,
             "segment_age_seconds": round(float(best_age), 4),
             "segment_used_fallback_window": bool(best_fallback),
-            "candidate_count": len(candidates),
-            "candidate_rank": int(best_rank),
+            "segment_selection_window": selection_window,
+            "segment_candidate_rank": int(best_rank),
         }
         if best_segment is not None:
             best_segment.caption_uses += 1
@@ -2408,6 +2617,8 @@ class DesktopAudioAgent:
         with self._asr_backend_lock:
             backend = self._asr_backend
         frontend = self._frontend.status()
+        input_device_index, input_device_name, input_device_hostapi, input_device_source = self._input_device_details()
+        input_device_sample_rate = float(self._selected_input_device_sample_rate or self._input_stream_sample_rate or 0.0)
         streaming_backend = backend.backend_name if backend is not None else ""
         if self.current_asr_mode == STREAMING_ASR_MODE_LIVE_CAPTIONS:
             streaming_backend = "live-captions"
@@ -2451,6 +2662,11 @@ class DesktopAudioAgent:
             active_user_id=self._active_user_id,
             last_speaker_match=self._speaker_match_payload(),
             live_capture_enabled=bool(self._input_stream is not None),
+            input_device_index=input_device_index,
+            input_device_name=input_device_name,
+            input_device_hostapi=input_device_hostapi,
+            input_device_source=input_device_source,
+            input_device_sample_rate=input_device_sample_rate,
         )
 
     def is_assistant_speaking(self) -> bool:
@@ -2816,16 +3032,37 @@ class DesktopAudioAgent:
                 return
             self._start_capture_worker()
             try:
+                (
+                    device_index,
+                    device_name,
+                    device_hostapi,
+                    device_source,
+                    device_sample_rate,
+                    stream_blocksize,
+                ) = self._preferred_input_stream_config()
                 stream = sd.InputStream(
-                    samplerate=self.capture_sample_rate,
-                    blocksize=self.input_blocksize,
+                    samplerate=device_sample_rate,
+                    blocksize=stream_blocksize,
                     channels=1,
                     dtype="float32",
                     callback=self._input_callback,
+                    device=device_index if device_index >= 0 else None,
                 )
                 stream.start()
                 self._input_stream = stream
+                self._selected_input_device_index = int(device_index)
+                self._selected_input_device_name = str(device_name or "")
+                self._selected_input_device_hostapi = str(device_hostapi or "")
+                self._selected_input_device_source = str(device_source or "")
+                self._selected_input_device_sample_rate = float(device_sample_rate or 0.0)
+                self._input_stream_sample_rate = float(device_sample_rate or self.capture_sample_rate)
             except Exception:
+                self._selected_input_device_index = -1
+                self._selected_input_device_name = ""
+                self._selected_input_device_hostapi = ""
+                self._selected_input_device_source = ""
+                self._selected_input_device_sample_rate = 0.0
+                self._input_stream_sample_rate = float(self.capture_sample_rate)
                 self._stop_capture_worker()
                 raise
 
@@ -2835,6 +3072,12 @@ class DesktopAudioAgent:
         with self._input_stream_lock:
             stream = self._input_stream
             self._input_stream = None
+            self._selected_input_device_index = -1
+            self._selected_input_device_name = ""
+            self._selected_input_device_hostapi = ""
+            self._selected_input_device_source = ""
+            self._selected_input_device_sample_rate = 0.0
+            self._input_stream_sample_rate = float(self.capture_sample_rate)
         self._stop_capture_worker()
         if stream is None:
             return
@@ -2859,6 +3102,12 @@ class DesktopAudioAgent:
         samples = np.asarray(indata[:, 0], dtype=np.float32).reshape(-1)
         if samples.size <= 0:
             return
+        stream_sample_rate = float(self._input_stream_sample_rate or self.capture_sample_rate)
+        if int(round(stream_sample_rate)) != int(self.capture_sample_rate):
+            samples = _safe_resample(samples, int(round(stream_sample_rate)), int(self.capture_sample_rate))
+            samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+            if samples.size <= 0:
+                return
         try:
             self._input_buffer.push(samples)
         except Exception as exc:
