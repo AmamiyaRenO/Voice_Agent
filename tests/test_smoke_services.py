@@ -1,12 +1,14 @@
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PYTHON_VOICE_DIR = ROOT / "python_voice_service"
 SCRIPTS_DIR = ROOT / "scripts"
 INTENT_DIR = SCRIPTS_DIR / "intent_service"
 DIALOG_DIR = SCRIPTS_DIR / "dialog_service"
@@ -238,9 +240,8 @@ def test_smoke_dialog_schedule_preference_memory(tmp_path: Path):
         retrieve_top_k=2,
     )
     user_id = store.resolve_user("moonshine:7:33")
-    store.remember_utterance(user_id, "I want to plan rehab for tomorrow.")
-    store.remember_utterance(user_id, "Morning is better.")
-    store.remember_utterance(user_id, "What about Friday then?")
+    store.remember_utterance(user_id, "I want to plan rehab for Friday.")
+    store.remember_utterance(user_id, "Morning is better for rehab.")
 
     context = store.build_memory_context(user_id, query_text="which day do I prefer")
     facts = store.build_facts_reply(user_id)
@@ -248,6 +249,200 @@ def test_smoke_dialog_schedule_preference_memory(tmp_path: Path):
     assert "Preferred training time: morning." in context
     assert "you prefer training on Friday" in facts
     assert "you prefer training in the morning" in facts
+
+
+def test_smoke_memory_query_reply_is_no_longer_system_like(tmp_path: Path):
+    if str(DIALOG_DIR) not in sys.path:
+        sys.path.insert(0, str(DIALOG_DIR))
+
+    user_memory = _load_module("smoke_dialog_memory_query_tone", DIALOG_DIR / "user_memory.py")
+    store = user_memory.UserMemoryStore(
+        path=str(tmp_path / "user_memory.json"),
+        max_notes=8,
+        prompt_max_chars=420,
+        embedder=None,
+        retrieve_top_k=2,
+    )
+    user_id = store.resolve_user("moonshine:7:41")
+    store.remember_utterance(user_id, "my name is Alex")
+    store.remember_utterance(user_id, "I like disc golf")
+
+    reply = store.answer_memory_query(user_id, "What do you know about me?")
+
+    assert "From what I have saved" not in reply
+    assert "Alex" in reply
+    assert "disc golf" in reply.lower()
+
+
+def test_smoke_dialog_game_context_accepts_new_manifest_games(tmp_path: Path):
+    if str(DIALOG_DIR) not in sys.path:
+        sys.path.insert(0, str(DIALOG_DIR))
+
+    user_memory = _load_module("smoke_dialog_game_context_memory", DIALOG_DIR / "user_memory.py")
+    store = user_memory.UserMemoryStore(
+        path=str(tmp_path / "user_memory.json"),
+        max_notes=8,
+        prompt_max_chars=420,
+        embedder=None,
+        retrieve_top_k=2,
+    )
+    user_id = store.resolve_user("moonshine:8:44")
+    store.set_game_reference(
+        user_id,
+        game_name="Balance Quest",
+        reference_kind="game_recommend",
+        source="game_catalog",
+        now_ts=time.time(),
+    )
+
+    assert store.get_game_reference(user_id) == "Balance Quest"
+    snapshot = store.profile_snapshot(user_id)
+    assert snapshot["last_game_recommended"] == "Balance Quest"
+    assert snapshot["recent_game_candidates"][0]["game_name"] == "Balance Quest"
+
+
+def test_smoke_game_catalog_alternatives_scale_beyond_two_games(tmp_path: Path):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    game_grounding = _load_module("smoke_game_grounding_scale_module", PYTHON_VOICE_DIR / "game_grounding.py")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "games": [
+                    {"id": "cornhole", "name": "Bean Bag Toss", "synonyms": ["bean bag toss"], "recommendation_weight": 0.85},
+                    {"id": "disc_golf", "name": "Disc Golf", "synonyms": ["disc golf", "disk golf"], "recommendation_weight": 0.8},
+                    {"id": "balance_quest", "name": "Balance Quest", "synonyms": ["balance quest"], "recommendation_weight": 0.92},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = game_grounding.GameCatalog(manifest_path)
+    result = catalog.grounded_reply(
+        "What about the other game?",
+        user_profile={
+            "last_game_recommended": "Bean Bag Toss",
+            "last_game_recommended_ts": time.time(),
+        },
+    )
+
+    assert result["type"] == "game_alternative"
+    assert result["game_name"] == "Balance Quest"
+    assert set(result["candidates"]) == {"Disc Golf", "Balance Quest"}
+    assert "Disc Golf" in result["text"]
+    assert "Balance Quest" in result["text"]
+
+
+def test_smoke_game_catalog_other_recommendation_uses_alternative_branch(tmp_path: Path):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    game_grounding = _load_module("smoke_game_grounding_alt_recommend_module", PYTHON_VOICE_DIR / "game_grounding.py")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "games": [
+                    {"id": "cornhole", "name": "Bean Bag Toss", "synonyms": ["bean bag toss"], "recommendation_weight": 0.85},
+                    {"id": "disc_golf", "name": "Disc Golf", "synonyms": ["disc golf", "disk golf"], "recommendation_weight": 0.8},
+                    {"id": "balance_quest", "name": "Balance Quest", "synonyms": ["balance quest"], "recommendation_weight": 0.92},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = game_grounding.GameCatalog(manifest_path)
+    result = catalog.grounded_reply(
+        "Any other recommendation?",
+        user_profile={
+            "last_game_recommended": "Bean Bag Toss",
+            "last_game_recommended_ts": time.time(),
+        },
+    )
+
+    assert result["type"] == "game_alternative"
+    assert result["game_name"] != "Bean Bag Toss"
+    assert "Bean Bag Toss" in result["text"]
+    assert result["game_name"] in result["text"]
+
+
+def test_smoke_dialog_game_mentions_route_new_game_followups(tmp_path: Path):
+    pytest.importorskip("paho.mqtt.client")
+
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+    if str(INTENT_DIR) not in sys.path:
+        sys.path.insert(0, str(INTENT_DIR))
+    if str(DIALOG_DIR) not in sys.path:
+        sys.path.insert(0, str(DIALOG_DIR))
+
+    game_grounding = _load_module("smoke_game_grounding_followup_module", PYTHON_VOICE_DIR / "game_grounding.py")
+    intent_main = _load_module("smoke_intent_followup_module", INTENT_DIR / "main.py")
+    dialog_cfg = _load_module("smoke_dialog_followup_cfg_module", DIALOG_DIR / "dialog_config.py")
+    dialog_impl = _load_module("smoke_dialog_followup_impl_module", DIALOG_DIR / "dialog_service_impl.py")
+    user_memory = _load_module("smoke_dialog_followup_memory_module", DIALOG_DIR / "user_memory.py")
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "games": [
+                    {"id": "cornhole", "name": "Bean Bag Toss", "synonyms": ["bean bag toss"]},
+                    {"id": "disc_golf", "name": "Disc Golf", "synonyms": ["disc golf", "disk golf"]},
+                    {"id": "balance_quest", "name": "Balance Quest", "synonyms": ["balance quest"]},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = dialog_cfg.Config(enable_user_memory=False, enable_vision_query=False)
+    service = dialog_impl.DialogService(cfg)
+    try:
+        service.user_memory = user_memory.UserMemoryStore(
+            path=str(tmp_path / "user_memory.json"),
+            max_notes=8,
+            prompt_max_chars=420,
+            embedder=None,
+            retrieve_top_k=2,
+        )
+        service.game_catalog = game_grounding.GameCatalog(manifest_path)
+        user_id = service.user_memory.resolve_user("moonshine:9:55")
+        service._remember_game_context(
+            user_id=user_id,
+            text="Yes, we do have a Balance Quest mode available in our system.",
+            reference_kind="mentioned",
+            source="assistant",
+        )
+
+        context_game_name = service.user_memory.get_game_reference(user_id)
+        resolver = intent_main.ManifestAliasResolver(str(manifest_path))
+        router = intent_main.IntentRouterEngine(
+            intent_main.Config(
+                require_wake_word=False,
+                manifest_path=str(manifest_path),
+                use_llm_classifier=False,
+                use_moonshine_intent_recognizer=False,
+            ),
+            resolver,
+        )
+        try:
+            route = router.route("open it", "corr-followup", context_game_name=context_game_name)
+        finally:
+            router.close()
+
+        assert context_game_name == "Balance Quest"
+        assert route.payload["type"] == "LAUNCH_GAME"
+        assert route.payload["game_name"] == "Balance Quest"
+    finally:
+        service.http.close()
 
 
 def test_smoke_dialog_policy_classifier():

@@ -65,15 +65,17 @@ textarea{min-height:88px;font-family:'Segoe UI',sans-serif;font-size:.9rem;line-
     <div class="toolbar">
       <button onclick="reloadMemory()">Reload</button>
       <button class="secondary" onclick="selectFirstUser()">Select First</button>
+      <button class="secondary" onclick="createNewUser()">New User</button>
     </div>
     <div class="section">
       <div class="field">
-        <label>Open user by ID (existing or new)</label>
+        <label>Open user by ID</label>
         <input id="userIdInput" placeholder="user_001">
       </div>
       <div class="toolbar">
         <button class="secondary" onclick="loadByInputUserId()">Open User</button>
       </div>
+      <div class="muted" id="userIdHint" style="margin-top:.45rem;">Leave blank on New User to auto-create the next user_xxx.</div>
       <div id="userCount" class="muted" style="margin-top:.55rem;"></div>
     </div>
     <div id="users" class="list"></div>
@@ -91,7 +93,8 @@ textarea{min-height:88px;font-family:'Segoe UI',sans-serif;font-size:.9rem;line-
       <div>Embedded Memories</div><div id="memoryItemsCount">0</div>
       <div>Structured Facts</div><div id="factsCount">0</div>
       <div>Episodes</div><div id="episodesCount">0</div>
-      <div>Voice Samples</div><div id="sampleCount">0</div>
+      <div>Identity Hits</div><div id="identityHitsCount">0</div>
+      <div>Enrollment Clips</div><div id="enrollmentClipCount">0</div>
     </div>
 
     <div class="section">
@@ -135,6 +138,16 @@ textarea{min-height:88px;font-family:'Segoe UI',sans-serif;font-size:.9rem;line-
     </div>
 
     <div class="section">
+      <h2>Game Context</h2>
+      <div class="kv">
+        <div>Last Mentioned</div><div id="lastGameMentioned">-</div>
+        <div>Last Recommended</div><div id="lastGameRecommended">-</div>
+        <div>Last Launched</div><div id="lastGameLaunched">-</div>
+        <div>Recent Candidates</div><div id="recentGameCandidates">-</div>
+      </div>
+    </div>
+
+    <div class="section">
       <h2>Goals And Notes</h2>
       <div class="field">
         <label>Goals (one per line)</label>
@@ -150,6 +163,23 @@ textarea{min-height:88px;font-family:'Segoe UI',sans-serif;font-size:.9rem;line-
           Save notes as source of truth (clear old embedded memories)
         </label>
       </div>
+    </div>
+
+    <div class="section">
+      <h2>Speaker Enrollment</h2>
+      <div class="toolbar">
+        <button class="secondary" id="recordSampleBtn" onclick="recordSpeakerSample()">Record Sample</button>
+        <button class="secondary" id="commitSpeakerBtn" onclick="commitSpeakerProfile()">Commit Voiceprint</button>
+        <button class="danger" id="clearSpeakerBtn" onclick="clearSpeakerProfile()">Clear Voiceprint</button>
+      </div>
+      <div id="speakerPromptExample" class="muted" style="margin-top:.55rem;">Example sentence: "Today I am ready for my exercise session."</div>
+      <div class="kv" style="margin-top:.7rem;">
+        <div>Voiceprint Ready</div><div id="speakerProfileState">-</div>
+        <div>Pending Clips</div><div id="speakerPendingState">0</div>
+        <div>Last Enrollment</div><div id="speakerUpdatedAt">-</div>
+        <div>Last Match</div><div id="speakerLastMatch">-</div>
+      </div>
+      <div class="muted">Record at least 3 clips. Each clip should be one natural sentence, about 1.5 to 6 seconds. Clips stay pending until you commit them into a voiceprint.</div>
     </div>
 
     <div class="section">
@@ -191,14 +221,35 @@ const lastSeenEl = document.getElementById('lastSeen');
 const memoryItemsCountEl = document.getElementById('memoryItemsCount');
 const factsCountEl = document.getElementById('factsCount');
 const episodesCountEl = document.getElementById('episodesCount');
-const sampleCountEl = document.getElementById('sampleCount');
+const identityHitsCountEl = document.getElementById('identityHitsCount');
+const enrollmentClipCountEl = document.getElementById('enrollmentClipCount');
 const factsViewEl = document.getElementById('factsView');
 const episodesViewEl = document.getElementById('episodesView');
 const qmdPathEl = document.getElementById('qmdPath');
+const lastGameMentionedEl = document.getElementById('lastGameMentioned');
+const lastGameRecommendedEl = document.getElementById('lastGameRecommended');
+const lastGameLaunchedEl = document.getElementById('lastGameLaunched');
+const recentGameCandidatesEl = document.getElementById('recentGameCandidates');
+const recordSampleBtnEl = document.getElementById('recordSampleBtn');
+const commitSpeakerBtnEl = document.getElementById('commitSpeakerBtn');
+const clearSpeakerBtnEl = document.getElementById('clearSpeakerBtn');
+const speakerProfileStateEl = document.getElementById('speakerProfileState');
+const speakerPendingStateEl = document.getElementById('speakerPendingState');
+const speakerUpdatedAtEl = document.getElementById('speakerUpdatedAt');
+const speakerLastMatchEl = document.getElementById('speakerLastMatch');
+const speakerPromptExampleEl = document.getElementById('speakerPromptExample');
 
 let memoryState = null;
 let selectedUserId = '';
 let selectedProfile = {};
+let speakerState = null;
+let speakerSamplePromptIndex = 0;
+
+const SPEAKER_SAMPLE_PROMPTS = [
+  'Today I am ready for my exercise session.',
+  'I would like to start with a gentle warm up.',
+  'Please help me practice my balance today.'
+];
 
 function setStatus(text){
   if(statusEl){ statusEl.textContent = text || ''; }
@@ -215,6 +266,42 @@ function esc(text){
 
 function normalizeId(raw){
   return String(raw || '').trim();
+}
+
+function apiErrorMessage(data, status){
+  if(data && typeof data === 'object'){
+    const detail = String(data.detail || '').trim();
+    if(detail){ return detail; }
+    const message = String(data.message || '').trim();
+    if(message){ return message; }
+  }
+  return 'HTTP ' + String(status || '');
+}
+
+function errorText(err){
+  if(err && typeof err === 'object' && typeof err.message === 'string' && err.message.trim()){
+    return err.message.trim();
+  }
+  return String(err || '').trim() || 'Unknown error';
+}
+
+function renderSpeakerPromptExample(prompt){
+  if(!speakerPromptExampleEl){ return; }
+  const text = String(prompt || '').trim();
+  speakerPromptExampleEl.textContent = text
+    ? ('Example sentence: "' + text + '"')
+    : 'Example sentence: -';
+}
+
+function nextSpeakerSamplePrompt(){
+  if(!Array.isArray(SPEAKER_SAMPLE_PROMPTS) || !SPEAKER_SAMPLE_PROMPTS.length){
+    renderSpeakerPromptExample('');
+    return '';
+  }
+  const prompt = String(SPEAKER_SAMPLE_PROMPTS[speakerSamplePromptIndex % SPEAKER_SAMPLE_PROMPTS.length] || '').trim();
+  speakerSamplePromptIndex = (speakerSamplePromptIndex + 1) % SPEAKER_SAMPLE_PROMPTS.length;
+  renderSpeakerPromptExample(prompt);
+  return prompt;
 }
 
 function parseList(text, maxItems, maxChars){
@@ -267,6 +354,19 @@ function renderEpisodes(profile){
   }).filter(Boolean).join('\n');
 }
 
+function renderRecentGameCandidates(profile){
+  if(!profile || !Array.isArray(profile.recent_game_candidates) || !profile.recent_game_candidates.length){
+    return '-';
+  }
+  const rows = profile.recent_game_candidates.map(item => {
+    if(item && typeof item === 'object'){
+      return String(item.game_name || '').trim();
+    }
+    return String(item || '').trim();
+  }).filter(Boolean);
+  return rows.length ? rows.join(', ') : '-';
+}
+
 function toInt(value, fallback){
   const n = Number(value);
   if(!Number.isFinite(n)){ return fallback; }
@@ -292,6 +392,9 @@ function pickSelectedSummary(data){
 function setButtonsEnabled(enabled){
   if(saveBtnEl){ saveBtnEl.disabled = !enabled; }
   if(deleteBtnEl){ deleteBtnEl.disabled = !enabled; }
+  if(recordSampleBtnEl){ recordSampleBtnEl.disabled = !enabled; }
+  if(commitSpeakerBtnEl){ commitSpeakerBtnEl.disabled = !enabled; }
+  if(clearSpeakerBtnEl){ clearSpeakerBtnEl.disabled = !enabled; }
 }
 
 async function fetchMemory(userId){
@@ -304,9 +407,30 @@ async function fetchMemory(userId){
   const resp = await fetch('/api/memory' + qs, { cache: 'no-store' });
   const data = await resp.json();
   if(!resp.ok || data.status !== 'ok'){
-    throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+    throw new Error(apiErrorMessage(data, resp.status));
   }
   return data;
+}
+
+async function fetchSpeakerProfiles(){
+  const resp = await fetch('/api/speaker-profiles?_ts=' + Date.now(), { cache: 'no-store' });
+  const data = await resp.json();
+  if(!resp.ok || data.status !== 'ok'){
+    throw new Error(apiErrorMessage(data, resp.status));
+  }
+  return data;
+}
+
+function isoTextFromTs(value){
+  const n = Number(value || 0);
+  if(!Number.isFinite(n) || n <= 0){
+    return '-';
+  }
+  try{
+    return new Date(n * 1000).toISOString();
+  }catch(err){
+    return '-';
+  }
 }
 
 function renderUsers(data){
@@ -324,13 +448,61 @@ function renderUsers(data){
     const name = String(u.name || '').trim();
     const sub = name ? ('Preferred: ' + name) : 'Preferred: -';
     const meta = 'likes:' + (u.likes_count||0) + ' goals:' + (u.goals_count||0) + ' notes:' + (u.recent_notes_count||0);
+    const speakerMeta = 'hits:' + (u.identity_hits||0) + ' clips:' + (u.enrollment_clip_count||0);
     return '<div class="item' + active + '" onclick="selectUser(\'' + esc(id) + '\')">' +
       '<div class="id">' + esc(displayName) + '</div>' +
       '<div class="meta">' + esc(id) + '</div>' +
       '<div class="meta">' + esc(sub) + '</div>' +
       '<div class="meta">' + esc(meta) + '</div>' +
+      '<div class="meta">' + esc(speakerMeta) + '</div>' +
     '</div>';
   }).join('');
+}
+
+function renderSpeakerSelection(data){
+  speakerState = data && typeof data === 'object' ? data : {};
+  const users = Array.isArray(speakerState.users) ? speakerState.users : [];
+  let selectedSpeaker = null;
+  for(let i = 0; i < users.length; i++){
+    if(String(users[i] && users[i].user_id || '') === selectedUserId){
+      selectedSpeaker = users[i];
+      break;
+    }
+  }
+  const pending = selectedSpeaker && selectedSpeaker.pending && typeof selectedSpeaker.pending === 'object'
+    ? selectedSpeaker.pending
+    : {};
+  const hasProfile = !!(selectedSpeaker && selectedSpeaker.has_profile);
+  if(speakerProfileStateEl){
+    speakerProfileStateEl.textContent = hasProfile ? 'ready' : 'not enrolled';
+  }
+  if(speakerPendingStateEl){
+    const pendingCount = Number(pending.pending_clip_count || 0);
+    const requiredCount = Number(pending.required_clip_count || 3);
+    speakerPendingStateEl.textContent = String(pendingCount) + ' / ' + String(requiredCount);
+  }
+  if(speakerUpdatedAtEl){
+    speakerUpdatedAtEl.textContent = isoTextFromTs(selectedSpeaker && selectedSpeaker.updated_ts);
+  }
+  if(speakerLastMatchEl){
+    const match = speakerState && speakerState.last_speaker_match && typeof speakerState.last_speaker_match === 'object'
+      ? speakerState.last_speaker_match
+      : {};
+    const matchedUserId = String(match.user_id || '').trim();
+    if(matchedUserId && matchedUserId === selectedUserId && !!match.matched){
+      speakerLastMatchEl.textContent = 'matched (' + String(match.score || 0) + ')';
+    }else if(match.reason){
+      speakerLastMatchEl.textContent = String(match.reason);
+    }else{
+      speakerLastMatchEl.textContent = '-';
+    }
+  }
+  if(commitSpeakerBtnEl){
+    commitSpeakerBtnEl.disabled = !selectedUserId || !(pending && pending.can_commit);
+  }
+  if(clearSpeakerBtnEl){
+    clearSpeakerBtnEl.disabled = !selectedUserId || !hasProfile;
+  }
 }
 
 function renderSelection(data){
@@ -346,6 +518,10 @@ function renderSelection(data){
     favorite_game: '',
     preferred_training_day: '',
     preferred_training_time: '',
+    last_game_mentioned: '',
+    last_game_recommended: '',
+    last_game_launched: '',
+    recent_game_candidates: [],
     likes: [],
     dislikes: [],
     goals: [],
@@ -360,6 +536,10 @@ function renderSelection(data){
   const keys = Array.isArray(data.selected_identity_keys) ? data.selected_identity_keys : [];
   if(identityKeysEl){ identityKeysEl.textContent = keys.length ? keys.join('\n') : '-'; }
   if(pathEl){ pathEl.textContent = 'Path: ' + String(data.path || ''); }
+  if(userIdInputEl){
+    userIdInputEl.placeholder = String(data.suggested_user_id || 'user_001');
+    userIdInputEl.value = selectedUserId || '';
+  }
 
   if(displayNameInputEl){
     displayNameInputEl.value = String(selectedProfile.display_name || selectedUserId || '').trim();
@@ -378,6 +558,18 @@ function renderSelection(data){
   }
   if(preferredTimeInputEl){
     preferredTimeInputEl.value = String(selectedProfile.preferred_training_time || '').trim();
+  }
+  if(lastGameMentionedEl){
+    lastGameMentionedEl.textContent = String(selectedProfile.last_game_mentioned || '').trim() || '-';
+  }
+  if(lastGameRecommendedEl){
+    lastGameRecommendedEl.textContent = String(selectedProfile.last_game_recommended || '').trim() || '-';
+  }
+  if(lastGameLaunchedEl){
+    lastGameLaunchedEl.textContent = String(selectedProfile.last_game_launched || '').trim() || '-';
+  }
+  if(recentGameCandidatesEl){
+    recentGameCandidatesEl.textContent = renderRecentGameCandidates(selectedProfile);
   }
   if(likesInputEl){
     likesInputEl.value = toTextList(selectedProfile.likes);
@@ -419,8 +611,11 @@ function renderSelection(data){
       : (Array.isArray(selectedProfile.episodes) ? selectedProfile.episodes.length : 0);
     episodesCountEl.textContent = String(count);
   }
-  if(sampleCountEl){
-    sampleCountEl.textContent = String(toInt(summary && summary.sample_count, 0));
+  if(identityHitsCountEl){
+    identityHitsCountEl.textContent = String(toInt(summary && summary.identity_hits, 0));
+  }
+  if(enrollmentClipCountEl){
+    enrollmentClipCountEl.textContent = String(toInt(summary && summary.enrollment_clip_count, 0));
   }
   if(factsViewEl){
     factsViewEl.textContent = renderFacts(selectedProfile);
@@ -439,9 +634,18 @@ async function reloadMemory(){
     memoryState = data;
     renderSelection(data);
     renderUsers(data);
+    try{
+      const speakerData = await fetchSpeakerProfiles();
+      renderSpeakerSelection(speakerData);
+    }catch(err){
+      if(speakerProfileStateEl){ speakerProfileStateEl.textContent = 'unavailable'; }
+      if(speakerPendingStateEl){ speakerPendingStateEl.textContent = '-'; }
+      if(speakerUpdatedAtEl){ speakerUpdatedAtEl.textContent = '-'; }
+      if(speakerLastMatchEl){ speakerLastMatchEl.textContent = String(err); }
+    }
     setStatus('Loaded.');
   }catch(err){
-    setStatus('Error: ' + err);
+    setStatus('Error: ' + errorText(err));
   }
 }
 
@@ -457,6 +661,38 @@ async function selectFirstUser(){
   if(memoryState && Array.isArray(memoryState.users) && memoryState.users.length){
     selectedUserId = normalizeId(memoryState.users[0].user_id || '');
     await reloadMemory();
+  }
+}
+
+async function createNewUser(){
+  setStatus('Creating new user...');
+  try{
+    const requestedId = normalizeId((userIdInputEl && userIdInputEl.value) || '');
+    const payload = { action: 'create_user' };
+    if(requestedId){
+      payload.user_id = requestedId;
+    }
+    const resp = await fetch('/api/memory', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      cache: 'no-store',
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){
+      throw new Error(apiErrorMessage(data, resp.status));
+    }
+    memoryState = data;
+    renderSelection(data);
+    renderUsers(data);
+    try{
+      const speakerData = await fetchSpeakerProfiles();
+      renderSpeakerSelection(speakerData);
+    }catch(err){
+    }
+    setStatus(data.message || 'New user created.');
+  }catch(err){
+    setStatus('Error: ' + errorText(err));
   }
 }
 
@@ -518,12 +754,12 @@ async function exportQmd(){
     });
     const data = await resp.json();
     if(!resp.ok || data.status !== 'ok'){
-      throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+      throw new Error(apiErrorMessage(data, resp.status));
     }
     await refreshQmdStatus();
     setStatus(data.message || 'QMD exported.');
   }catch(err){
-    setStatus('Error: ' + err);
+    setStatus('Error: ' + errorText(err));
   }
 }
 
@@ -538,13 +774,13 @@ async function importQmd(){
     });
     const data = await resp.json();
     if(!resp.ok || data.status !== 'ok'){
-      throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+      throw new Error(apiErrorMessage(data, resp.status));
     }
     await refreshQmdStatus();
     await reloadMemory();
     setStatus(data.message || 'QMD imported.');
   }catch(err){
-    setStatus('Error: ' + err);
+    setStatus('Error: ' + errorText(err));
   }
 }
 
@@ -568,7 +804,7 @@ async function saveSelectedUser(){
     });
     const data = await resp.json();
     if(!resp.ok || data.status !== 'ok'){
-      throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+      throw new Error(apiErrorMessage(data, resp.status));
     }
     const verifyData = await fetchMemory(selectedUserId);
     memoryState = verifyData;
@@ -578,7 +814,7 @@ async function saveSelectedUser(){
     const suffix = clearEmbeddings ? ' (embedded memories cleared)' : '';
     setStatus((data.message || 'Saved.') + suffix);
   }catch(err){
-    setStatus('Error: ' + err);
+    setStatus('Error: ' + errorText(err));
   }
 }
 
@@ -601,7 +837,7 @@ async function deleteSelectedUser(){
     });
     const data = await resp.json();
     if(!resp.ok || data.status !== 'ok'){
-      throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status));
+      throw new Error(apiErrorMessage(data, resp.status));
     }
     selectedUserId = '';
     selectedProfile = {};
@@ -610,11 +846,95 @@ async function deleteSelectedUser(){
     renderUsers(data);
     setStatus(data.message || 'Deleted.');
   }catch(err){
-    setStatus('Error: ' + err);
+    setStatus('Error: ' + errorText(err));
+  }
+}
+
+async function recordSpeakerSample(){
+  if(!selectedUserId){
+    setStatus('Error: select a user first');
+    return;
+  }
+  const prompt = nextSpeakerSamplePrompt();
+  setStatus(
+    prompt
+      ? ('Listening for next enrollment clip (1.5 to 6 seconds)... Say: "' + prompt + '"')
+      : 'Listening for next enrollment clip (1.5 to 6 seconds)...'
+  );
+  try{
+    const resp = await fetch('/api/speaker-profiles', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      cache: 'no-store',
+      body: JSON.stringify({action:'record_sample', user_id:selectedUserId, timeout_seconds:30})
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){
+      throw new Error(apiErrorMessage(data, resp.status));
+    }
+    renderSpeakerSelection(data);
+    await reloadMemory();
+    setStatus(data.message || 'Enrollment clip captured.');
+  }catch(err){
+    setStatus('Error: ' + errorText(err));
+  }
+}
+
+async function commitSpeakerProfile(){
+  if(!selectedUserId){
+    setStatus('Error: select a user first');
+    return;
+  }
+  setStatus('Committing voiceprint...');
+  try{
+    const resp = await fetch('/api/speaker-profiles', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      cache: 'no-store',
+      body: JSON.stringify({action:'commit_profile', user_id:selectedUserId})
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){
+      throw new Error(apiErrorMessage(data, resp.status));
+    }
+    renderSpeakerSelection(data);
+    await reloadMemory();
+    setStatus(data.message || 'Voiceprint committed.');
+  }catch(err){
+    setStatus('Error: ' + errorText(err));
+  }
+}
+
+async function clearSpeakerProfile(){
+  if(!selectedUserId){
+    setStatus('Error: select a user first');
+    return;
+  }
+  if(!window.confirm('Clear speaker voiceprint for ' + selectedUserId + '?')){
+    return;
+  }
+  setStatus('Clearing voiceprint...');
+  try{
+    const resp = await fetch('/api/speaker-profiles', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      cache: 'no-store',
+      body: JSON.stringify({action:'clear_profile', user_id:selectedUserId})
+    });
+    const data = await resp.json();
+    if(!resp.ok || data.status !== 'ok'){
+      throw new Error(apiErrorMessage(data, resp.status));
+    }
+    renderSpeakerSelection(data);
+    await reloadMemory();
+    setStatus(data.message || 'Voiceprint cleared.');
+  }catch(err){
+    setStatus('Error: ' + errorText(err));
   }
 }
 
 refreshQmdStatus();
+renderSpeakerPromptExample(SPEAKER_SAMPLE_PROMPTS[0] || '');
 reloadMemory();
 </script>
 </body>

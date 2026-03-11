@@ -76,6 +76,11 @@ except Exception:
         supported_streaming_asr_modes,
     )
 
+try:
+    from .speaker_id import SpeakerIdService, SpeakerMatchResult
+except Exception:
+    from speaker_id import SpeakerIdService, SpeakerMatchResult
+
 logger = logging.getLogger("desktop_audio_agent")
 
 DEFAULT_ASR_BASE_URL = "http://127.0.0.1:8000"
@@ -118,6 +123,23 @@ DEFAULT_PARTIAL_COMMIT_DELAY_SECONDS = float(
 DEFAULT_PARTIAL_COMMIT_MIN_CHARS = int(os.getenv("AUDIO_AGENT_PARTIAL_COMMIT_MIN_CHARS", "3") or "3")
 DEFAULT_API_ASR_PREROLL_MS = float(os.getenv("AUDIO_AGENT_API_ASR_PREROLL_MS", "220") or "220")
 DEFAULT_API_ASR_MIN_TURN_MS = float(os.getenv("AUDIO_AGENT_API_ASR_MIN_TURN_MS", "260") or "260")
+DEFAULT_SPEAKER_ID_PREROLL_MS = float(os.getenv("VOICE_SPEAKER_ID_PREROLL_MS", "180") or "180")
+DEFAULT_SPEAKER_ID_SEGMENT_MAX_AGE_SECONDS = float(
+    os.getenv("VOICE_SPEAKER_ID_SEGMENT_MAX_AGE_SECONDS", "8.0") or "8.0"
+)
+DEFAULT_SPEAKER_ID_SEGMENT_FALLBACK_AGE_SECONDS = float(
+    os.getenv("VOICE_SPEAKER_ID_SEGMENT_FALLBACK_AGE_SECONDS", "18.0") or "18.0"
+)
+DEFAULT_SPEAKER_ID_RECENT_SEGMENTS = int(os.getenv("VOICE_SPEAKER_ID_RECENT_SEGMENTS", "8") or "8")
+DEFAULT_SPEAKER_ID_ENROLL_TIMEOUT_SECONDS = float(
+    os.getenv("VOICE_SPEAKER_ID_ENROLL_TIMEOUT_SECONDS", "20.0") or "20.0"
+)
+DEFAULT_SPEAKER_ID_ENROLL_SUPPRESS_SECONDS = float(
+    os.getenv("VOICE_SPEAKER_ID_ENROLL_SUPPRESS_SECONDS", "3.0") or "3.0"
+)
+DEFAULT_SPEAKER_ID_LIVE_CAPTIONS_MAX_CANDIDATES = int(
+    os.getenv("VOICE_SPEAKER_ID_LIVE_CAPTIONS_MAX_CANDIDATES", "4") or "4"
+)
 DEFAULT_GEMINI_LIVE_MODEL = (
     os.getenv("GEMINI_LIVE_MODEL", "models/gemini-2.5-flash-native-audio-latest")
     or "models/gemini-2.5-flash-native-audio-latest"
@@ -150,6 +172,9 @@ DEFAULT_LIVE_CAPTIONS_ASSISTANT_HISTORY_SECONDS = float(
 DEFAULT_LIVE_CAPTIONS_ASSISTANT_VARIANT_LIMIT = int(
     os.getenv("LIVE_CAPTIONS_ASSISTANT_VARIANT_LIMIT", "256") or "256"
 )
+DEFAULT_LIVE_CAPTIONS_MINIMIZE_WINDOW = str(
+    os.getenv("LIVE_CAPTIONS_MINIMIZE_WINDOW", "0") or "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 TRANSCRIPT_SOURCE_FINAL = "final"
 TRANSCRIPT_SOURCE_STABLE_PARTIAL_COMMAND = "stable_partial_command"
 TRANSCRIPT_SOURCE_STABLE_PARTIAL_FALLBACK = "stable_partial_fallback"
@@ -319,6 +344,21 @@ def _token_overlap_ratio(left: str, right: str) -> float:
     return overlap / float(max(1, min(len(lhs_set), len(rhs_set))))
 
 
+def _normalize_request_source(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    normalized = re.sub(r"\s+", "_", normalized)
+    return normalized
+
+
+def _compose_turn_source(input_source: Optional[str]) -> str:
+    normalized = _normalize_request_source(input_source)
+    if not normalized:
+        return "desktop_audio"
+    if normalized.startswith("desktop_audio"):
+        return normalized
+    return f"desktop_audio:{normalized}"
+
+
 def _assistant_text_variants(text: str) -> List[str]:
     normalized = " ".join(str(text or "").strip().split())
     if not normalized:
@@ -352,8 +392,14 @@ def _estimate_transcript_confidence(
     grammar_confidence: float,
     avg_logprob: Optional[float],
     transcript_source: str,
+    input_source: str = "",
 ) -> str:
     route = str(grammar_route or "").strip().upper()
+    normalized_input_source = _normalize_request_source(input_source)
+    live_captions_final = (
+        transcript_source == TRANSCRIPT_SOURCE_FINAL
+        and normalized_input_source.endswith("live_captions")
+    )
     if route != "QUERY" and float(grammar_confidence or 0.0) >= 0.86:
         return TRANSCRIPT_CONFIDENCE_HIGH
     if avg_logprob is not None and float(avg_logprob) < -1.2:
@@ -362,6 +408,8 @@ def _estimate_transcript_confidence(
     if transcript_source == TRANSCRIPT_SOURCE_STABLE_PARTIAL_FALLBACK:
         return TRANSCRIPT_CONFIDENCE_MEDIUM if route != "QUERY" else TRANSCRIPT_CONFIDENCE_LOW
     if route == "QUERY" and token_count <= 3:
+        if live_captions_final:
+            return TRANSCRIPT_CONFIDENCE_MEDIUM
         return TRANSCRIPT_CONFIDENCE_LOW
     return TRANSCRIPT_CONFIDENCE_MEDIUM
 
@@ -1019,7 +1067,7 @@ class LiveCaptionsTranscriptSource:
         *,
         exe_path: str,
         output_dir: str,
-        on_caption: Callable[[str], None],
+        on_caption: Callable[[str, float], None],
         on_error: Callable[[str], None],
     ) -> None:
         self.exe_path = str(exe_path or "").strip()
@@ -1059,18 +1107,43 @@ class LiveCaptionsTranscriptSource:
             process = self._process
         return process is not None and process.poll() is None
 
+    def _terminate_stale_helpers(self) -> None:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        script = (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.Name -eq 'EnableLcMic.exe' -and $_.CommandLine -like '*--headless*' } | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+        )
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                creationflags=creationflags,
+                timeout=8.0,
+            )
+        except Exception:
+            pass
+
     def start(self) -> None:
         if self.is_running():
             return
         exe = Path(self.exe_path)
         if not exe.exists():
             raise FileNotFoundError(f"Live Captions listener not found: {exe}")
+        self._terminate_stale_helpers()
         output_dir = Path(self.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"captions_{int(time.time() * 1000)}_{os.getpid()}.txt"
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        args = [str(exe), "--headless"]
+        if not DEFAULT_LIVE_CAPTIONS_MINIMIZE_WINDOW:
+            args.append("--show-live-captions")
+        args.extend(["--output", str(output_path)])
         process = subprocess.Popen(
-            [str(exe), "--headless", "--output", str(output_path)],
+            args,
             cwd=str(exe.parent),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1128,9 +1201,10 @@ class LiveCaptionsTranscriptSource:
                 line = process.stdout.readline()
                 if not line:
                     break
+                observed_at = time.time()
                 text = self._extract_caption_text(line)
                 if text:
-                    self._on_caption(text)
+                    self._on_caption(text, observed_at)
         except Exception as exc:
             self._record_error(f"live captions stdout failed: {exc}")
 
@@ -1217,6 +1291,24 @@ class AudioAgentStatus:
     last_error: str = ""
     live_captions_available: bool = False
     live_captions_output_path: str = ""
+    live_captions_status: str = ""
+    live_captions_error: str = ""
+    speaker_id_enabled: bool = False
+    speaker_id_ready: bool = False
+    active_user_id: str = ""
+    last_speaker_match: Optional[Dict[str, Any]] = None
+    live_capture_enabled: bool = False
+
+
+@dataclass
+class CapturedSpeechSegment:
+    audio: np.ndarray
+    sample_rate: int
+    started_at: float
+    ended_at: float
+    speech_seconds: float
+    caption_uses: int = 0
+    last_caption_ts: float = 0.0
 
 
 class DesktopAudioAgent:
@@ -1276,9 +1368,12 @@ class DesktopAudioAgent:
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
         self._last_assistant_spoke_at = 0.0
+        self._active_user_id = ""
+        self._last_speaker_match: Dict[str, Any] = {}
         self._recent_assistant_texts: Deque[Tuple[float, str]] = deque(
             maxlen=max(32, DEFAULT_LIVE_CAPTIONS_ASSISTANT_VARIANT_LIMIT)
         )
+        self._speaker_id = SpeakerIdService()
         self._hotword_pack = HotwordPack()
         self._command_grammar = CommandGrammarMatcher.from_sources(
             launch_triggers=[],
@@ -1361,6 +1456,29 @@ class DesktopAudioAgent:
             1,
             int(round(max(0.0, DEFAULT_API_ASR_MIN_TURN_MS) * self.capture_sample_rate / 1000.0)),
         )
+        self._speaker_segment_preroll_frames: Deque[np.ndarray] = deque(
+            maxlen=max(
+                1,
+                int(
+                    round(
+                        max(0.0, DEFAULT_SPEAKER_ID_PREROLL_MS)
+                        * self.capture_sample_rate
+                        / max(1, self.input_blocksize)
+                        / 1000.0
+                    )
+                ),
+            )
+        )
+        self._speaker_segment_active = False
+        self._speaker_segment_frames: List[np.ndarray] = []
+        self._speaker_segment_started_at = 0.0
+        self._recent_speaker_segments: Deque[CapturedSpeechSegment] = deque(
+            maxlen=max(1, DEFAULT_SPEAKER_ID_RECENT_SEGMENTS)
+        )
+        self._speaker_enrollment_requests: Deque[Tuple[str, asyncio.Future[Dict[str, Any]], float]] = deque()
+        self._speaker_enrollment_lock = threading.Lock()
+        self._last_enrollment_suppression_log_at = 0.0
+        self._speaker_enrollment_suppress_until = 0.0
 
     def _preferred_asr_mode(self, profile: str) -> str:
         normalized = _normalize_profile(profile)
@@ -1376,6 +1494,172 @@ class DesktopAudioAgent:
 
     def _sanitize_streaming_mode(self, mode: str) -> str:
         return normalize_streaming_asr_mode(mode)
+
+    def _speaker_id_enabled(self) -> bool:
+        return bool(self._speaker_id.enabled)
+
+    def _speaker_capture_enabled(self) -> bool:
+        if self.current_asr_mode != STREAMING_ASR_MODE_LIVE_CAPTIONS:
+            return True
+        if self._speaker_id_enabled():
+            return True
+        with self._speaker_enrollment_lock:
+            return bool(self._speaker_enrollment_requests)
+
+    def _speaker_enrollment_pending(self) -> bool:
+        with self._speaker_enrollment_lock:
+            while self._speaker_enrollment_requests and self._speaker_enrollment_requests[0][1].done():
+                self._speaker_enrollment_requests.popleft()
+            return bool(self._speaker_enrollment_requests)
+
+    def _remove_speaker_enrollment_future(self, future: "asyncio.Future[Dict[str, Any]]") -> None:
+        with self._speaker_enrollment_lock:
+            self._speaker_enrollment_requests = deque(
+                [item for item in self._speaker_enrollment_requests if item[1] is not future]
+            )
+
+    def _requeue_speaker_enrollment_request(
+        self,
+        request: Tuple[str, "asyncio.Future[Dict[str, Any]]", float],
+    ) -> None:
+        with self._speaker_enrollment_lock:
+            future = request[1]
+            if future.done():
+                return
+            self._speaker_enrollment_requests.appendleft(request)
+
+    def _arm_speaker_enrollment_suppression(self, *, seconds: float) -> None:
+        duration = max(0.0, float(seconds))
+        if duration <= 0.0:
+            return
+        self._speaker_enrollment_suppress_until = max(
+            float(self._speaker_enrollment_suppress_until or 0.0),
+            time.time() + duration,
+        )
+
+    def _suppress_transcript_during_enrollment(self, *, source: str, text: str = "") -> bool:
+        pending = self._speaker_enrollment_pending()
+        suppress_until = float(self._speaker_enrollment_suppress_until or 0.0)
+        if not pending and time.time() >= suppress_until:
+            return False
+        now = time.time()
+        if (now - float(self._last_enrollment_suppression_log_at or 0.0)) >= 1.5:
+            self._last_enrollment_suppression_log_at = now
+            normalized = str(text or "").strip()
+            detail = f" ({normalized})" if normalized else ""
+            state = "active" if pending else "cooldown"
+            self.log_store.add(
+                "system",
+                f"speaker enrollment {state}; ignored transcript from {source}{detail}",
+                speaker="system",
+                source="speaker_enrollment",
+            )
+        return True
+
+    def _update_last_speaker_match(
+        self,
+        result: SpeakerMatchResult,
+        *,
+        source: str,
+        extras: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload = result.to_payload()
+        payload["source"] = str(source or "")
+        payload["ts"] = time.time()
+        if extras:
+            payload.update(extras)
+        self._last_speaker_match = payload
+        self._active_user_id = str(result.user_id or "").strip() if result.matched else ""
+
+    def _speaker_match_payload(self) -> Dict[str, Any]:
+        return dict(self._last_speaker_match or {})
+
+    def _remember_speaker_segment(self, audio: np.ndarray, *, started_at: float, ended_at: float) -> None:
+        segment_audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if segment_audio.size <= 0:
+            return
+        segment = CapturedSpeechSegment(
+            audio=segment_audio.copy(),
+            sample_rate=self.capture_sample_rate,
+            started_at=float(started_at),
+            ended_at=float(ended_at),
+            speech_seconds=segment_audio.size / float(max(1, self.capture_sample_rate)),
+        )
+        self._recent_speaker_segments.append(segment)
+        if self._loop is None:
+            return
+        with self._speaker_enrollment_lock:
+            has_pending = bool(self._speaker_enrollment_requests)
+        if has_pending:
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._consume_next_enrollment_segment(segment))
+            )
+
+    def _update_speaker_capture(self, audio: np.ndarray, *, speech_active: bool) -> None:
+        if not self._speaker_capture_enabled():
+            return
+        frame_copy = np.asarray(audio, dtype=np.float32).reshape(-1).copy()
+        if frame_copy.size <= 0:
+            return
+        now = time.time()
+        if speech_active and not self.is_assistant_speaking():
+            if not self._speaker_segment_active:
+                self._speaker_segment_frames = [
+                    np.asarray(item, dtype=np.float32).copy() for item in self._speaker_segment_preroll_frames
+                ]
+                self._speaker_segment_active = True
+                self._speaker_segment_started_at = now
+                self._speaker_segment_preroll_frames.clear()
+            self._speaker_segment_frames.append(frame_copy)
+            return
+        if self._speaker_segment_active:
+            self._speaker_segment_frames.append(frame_copy)
+            full_audio = (
+                np.concatenate(self._speaker_segment_frames).astype(np.float32, copy=False)
+                if self._speaker_segment_frames
+                else np.zeros(0, dtype=np.float32)
+            )
+            started_at = float(self._speaker_segment_started_at or now)
+            self._speaker_segment_active = False
+            self._speaker_segment_frames = []
+            self._speaker_segment_started_at = 0.0
+            self._speaker_segment_preroll_frames.clear()
+            if full_audio.size > 0:
+                self._remember_speaker_segment(full_audio, started_at=started_at, ended_at=now)
+            return
+        self._speaker_segment_preroll_frames.append(frame_copy)
+
+    def _recent_speaker_segment_candidates(
+        self,
+        *,
+        reference_ts: float,
+        max_age_seconds: float,
+        fallback_age_seconds: float,
+        max_candidates: int,
+    ) -> List[Tuple[CapturedSpeechSegment, bool, float]]:
+        now = float(reference_ts or time.time())
+        strict_age = max(0.1, float(max_age_seconds))
+        fallback_age = max(strict_age, float(fallback_age_seconds))
+        prune_age = max(fallback_age + 5.0, strict_age + 5.0)
+        while self._recent_speaker_segments:
+            age = now - float(self._recent_speaker_segments[0].ended_at)
+            if age <= prune_age:
+                break
+            self._recent_speaker_segments.popleft()
+        strict_candidates: List[Tuple[CapturedSpeechSegment, bool, float]] = []
+        fallback_candidates: List[Tuple[CapturedSpeechSegment, bool, float]] = []
+        for segment in reversed(self._recent_speaker_segments):
+            age = now - float(segment.ended_at)
+            if age < -0.35:
+                continue
+            item = (segment, False, age)
+            if age <= strict_age:
+                strict_candidates.append(item)
+            elif age <= fallback_age:
+                fallback_candidates.append((segment, True, age))
+        candidates = strict_candidates + fallback_candidates
+        candidates.sort(key=lambda item: (item[0].caption_uses > 0, item[2]))
+        return candidates[: max(1, int(max_candidates))]
 
     def _reset_api_asr_turn(self, *, clear_preroll: bool = False) -> None:
         self._api_asr_turn_active = False
@@ -1397,6 +1681,7 @@ class DesktopAudioAgent:
         self.active_kokoro_voice = _env("KOKORO_TTS_VOICE", self.active_kokoro_voice)
         self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
         self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
+        self._speaker_id.reload_from_env(memory_path=_env("DIALOG_USER_MEMORY_PATH", ""))
 
     def _close_gemini_live_output(self, *, clear_player: bool) -> None:
         if self._gemini_live_output_open:
@@ -1865,14 +2150,124 @@ class DesktopAudioAgent:
             lambda: self.log_store.add("system", self._last_error, speaker="system", source="live_captions")
         )
 
-    def _on_live_captions_caption(self, text: str) -> None:
+    async def _resolve_recent_speaker_user(self, *, source: str, observed_at: Optional[float] = None) -> Tuple[str, str]:
+        if not self._speaker_id_enabled():
+            return "", "none"
+        reference_ts = float(observed_at or time.time())
+        candidates = self._recent_speaker_segment_candidates(
+            reference_ts=reference_ts,
+            max_age_seconds=DEFAULT_SPEAKER_ID_SEGMENT_MAX_AGE_SECONDS,
+            fallback_age_seconds=DEFAULT_SPEAKER_ID_SEGMENT_FALLBACK_AGE_SECONDS,
+            max_candidates=DEFAULT_SPEAKER_ID_LIVE_CAPTIONS_MAX_CANDIDATES,
+        )
+        if not candidates:
+            self._update_last_speaker_match(SpeakerMatchResult(reason="no_recent_segment"), source=source)
+            return "", "none"
+        best_result: Optional[SpeakerMatchResult] = None
+        best_segment: Optional[CapturedSpeechSegment] = None
+        best_fallback = False
+        best_age = 0.0
+        best_rank = -1
+        for index, (segment, used_fallback, age) in enumerate(candidates):
+            result = await asyncio.to_thread(self._speaker_id.match_audio, segment.audio, segment.sample_rate)
+            if best_result is None:
+                best_result = result
+                best_segment = segment
+                best_fallback = used_fallback
+                best_age = age
+                best_rank = index
+                continue
+            replace = False
+            if result.matched and not best_result.matched:
+                replace = True
+            elif result.matched == best_result.matched:
+                if float(result.score) > float(best_result.score) + 1e-6:
+                    replace = True
+                elif abs(float(result.score) - float(best_result.score)) <= 1e-6 and age < best_age:
+                    replace = True
+            if replace:
+                best_result = result
+                best_segment = segment
+                best_fallback = used_fallback
+                best_age = age
+                best_rank = index
+        assert best_result is not None
+        extras = {
+            "segment_age_seconds": round(float(best_age), 4),
+            "segment_used_fallback_window": bool(best_fallback),
+            "candidate_count": len(candidates),
+            "candidate_rank": int(best_rank),
+        }
+        if best_segment is not None:
+            best_segment.caption_uses += 1
+            best_segment.last_caption_ts = reference_ts
+            extras["segment_duration_seconds"] = round(float(best_segment.speech_seconds), 4)
+        self._update_last_speaker_match(best_result, source=source, extras=extras)
+        if best_result.matched:
+            return str(best_result.user_id or "").strip(), "auto"
+        return "", "none"
+
+    async def _consume_next_enrollment_segment(self, segment: CapturedSpeechSegment) -> None:
+        if self._loop is None:
+            return
+        request: Optional[Tuple[str, asyncio.Future[Dict[str, Any]], float]] = None
+        with self._speaker_enrollment_lock:
+            while self._speaker_enrollment_requests:
+                candidate = self._speaker_enrollment_requests[0]
+                if candidate[1].done():
+                    self._speaker_enrollment_requests.popleft()
+                    continue
+                request = self._speaker_enrollment_requests.popleft()
+                break
+        if request is None:
+            return
+        user_id, future, _created_at = request
+        if future.done():
+            return
+        try:
+            summary = await asyncio.to_thread(
+                self._speaker_id.add_pending_clip,
+                user_id,
+                segment.audio,
+                segment.sample_rate,
+            )
+            self._arm_speaker_enrollment_suppression(seconds=DEFAULT_SPEAKER_ID_ENROLL_SUPPRESS_SECONDS)
+            future.set_result(summary)
+        except ValueError as exc:
+            self.log_store.add(
+                "system",
+                f"ignored invalid enrollment clip for {user_id}: {exc}",
+                speaker="system",
+                source="speaker_enrollment",
+            )
+            self._requeue_speaker_enrollment_request(request)
+        except Exception as exc:
+            future.set_exception(exc)
+
+    def _on_live_captions_caption(self, text: str, observed_at: float) -> None:
         if self._loop is None:
             return
         normalized = str(text or "").strip()
         if not normalized:
             return
+        observed_ts = float(observed_at or time.time())
+
+        async def _forward() -> None:
+            if self._suppress_transcript_during_enrollment(source="live_captions", text=normalized):
+                return
+            user_id, identity_resolution = await self._resolve_recent_speaker_user(
+                source="live_captions",
+                observed_at=observed_ts,
+            )
+            await self._handle_external_transcript_final(
+                normalized,
+                source="live_captions",
+                user_id=user_id,
+                identity_resolution=identity_resolution,
+            )
+
         self._loop.call_soon_threadsafe(
-            lambda: asyncio.create_task(self._handle_external_transcript_final(normalized, source="live_captions"))
+            lambda: asyncio.create_task(_forward())
         )
 
     def _on_asr_backend_event(self, event: AsrEvent) -> None:
@@ -1917,6 +2312,19 @@ class DesktopAudioAgent:
         self._close_asr_backend()
         self._player.stop()
         self._aec.close()
+        with self._speaker_enrollment_lock:
+            while self._speaker_enrollment_requests:
+                _user_id, future, _created_at = self._speaker_enrollment_requests.popleft()
+                if not future.done():
+                    future.cancel()
+        self._recent_speaker_segments.clear()
+        self._speaker_segment_preroll_frames.clear()
+        self._speaker_segment_active = False
+        self._speaker_segment_frames = []
+        self._speaker_segment_started_at = 0.0
+        self._speaker_enrollment_suppress_until = 0.0
+        self._active_user_id = ""
+        self._last_speaker_match = {}
         await self._client.aclose()
         self._disconnect_mqtt()
         self.log_store.add("system", "desktop audio agent stopped", source="desktop_runtime")
@@ -2036,6 +2444,13 @@ class DesktopAudioAgent:
             last_error=self._last_error,
             live_captions_available=self._live_captions_source.is_available(),
             live_captions_output_path=self._live_captions_source.output_path,
+            live_captions_status=self._live_captions_source.last_status,
+            live_captions_error=self._live_captions_source.last_error,
+            speaker_id_enabled=self._speaker_id.enabled,
+            speaker_id_ready=self._speaker_id.ready,
+            active_user_id=self._active_user_id,
+            last_speaker_match=self._speaker_match_payload(),
+            live_capture_enabled=bool(self._input_stream is not None),
         )
 
     def is_assistant_speaking(self) -> bool:
@@ -2044,6 +2459,65 @@ class DesktopAudioAgent:
         if self._conversation_task is not None and not self._conversation_task.done():
             return True
         return self._manual_task is not None and not self._manual_task.done()
+
+    async def speaker_profiles_status(self) -> Dict[str, Any]:
+        payload = await asyncio.to_thread(self._speaker_id.status_payload)
+        payload["active_user_id"] = str(self._active_user_id or "")
+        payload["last_speaker_match"] = self._speaker_match_payload()
+        payload["live_capture_enabled"] = bool(self._input_stream is not None)
+        payload["asr_mode"] = str(self.current_asr_mode or "")
+        return payload
+
+    async def record_speaker_profile_sample(
+        self,
+        *,
+        user_id: str,
+        timeout_seconds: float = DEFAULT_SPEAKER_ID_ENROLL_TIMEOUT_SECONDS,
+    ) -> Dict[str, Any]:
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("user_id is required")
+        if not self._speaker_id_enabled():
+            raise RuntimeError("speaker id is disabled")
+        if not self._speaker_id.ready:
+            raise RuntimeError(self._speaker_id.error or "speaker id is not ready")
+        if self._loop is None:
+            raise RuntimeError("audio agent loop is not ready")
+        if not self._running:
+            raise RuntimeError("audio agent is not running")
+        if not self._listening:
+            raise RuntimeError("start listening before recording a speaker sample")
+        future: asyncio.Future[Dict[str, Any]] = self._loop.create_future()
+        with self._speaker_enrollment_lock:
+            self._speaker_enrollment_requests.append((normalized_user_id, future, time.time()))
+        self.log_store.add(
+            "system",
+            f"speaker enrollment armed for {normalized_user_id}; next valid speech clip will be captured without agent reply",
+            speaker="system",
+            source="speaker_enrollment",
+        )
+        if self._running and self.current_asr_mode == STREAMING_ASR_MODE_LIVE_CAPTIONS and self._input_stream is None:
+            self._start_input_stream()
+        try:
+            result = await asyncio.wait_for(future, timeout=max(1.0, float(timeout_seconds)))
+            return result
+        except Exception:
+            self._remove_speaker_enrollment_future(future)
+            raise
+
+    async def commit_speaker_profile(self, *, user_id: str) -> Dict[str, Any]:
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("user_id is required")
+        return await asyncio.to_thread(self._speaker_id.commit_pending_clips, normalized_user_id)
+
+    async def clear_speaker_profile(self, *, user_id: str) -> Dict[str, Any]:
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("user_id is required")
+        if self._active_user_id == normalized_user_id:
+            self._active_user_id = ""
+        return await asyncio.to_thread(self._speaker_id.clear_profile, normalized_user_id)
 
     async def set_listening(self, listening: bool) -> None:
         self._listening = bool(listening)
@@ -2299,6 +2773,7 @@ class DesktopAudioAgent:
             processed = self._frontend.process(processed)
             speech_active = self._frontend.status().speech_active
             self._update_speech_activity(speech_active)
+            self._update_speaker_capture(processed, speech_active=speech_active)
             if self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
                 try:
                     self._handle_gemini_live_frame(processed)
@@ -2327,9 +2802,11 @@ class DesktopAudioAgent:
         if self.current_asr_mode == STREAMING_ASR_MODE_LIVE_CAPTIONS:
             try:
                 self._live_captions_source.start()
+                self._last_error = ""
             except Exception as exc:
                 self._last_error = f"live captions start failed: {exc}"
                 logger.warning(self._last_error)
+        if not self._speaker_capture_enabled() and self.current_asr_mode == STREAMING_ASR_MODE_LIVE_CAPTIONS:
             return
         if sd is None:
             self._last_error = "sounddevice is not installed"
@@ -2355,7 +2832,6 @@ class DesktopAudioAgent:
     def _stop_input_stream(self) -> None:
         if self.current_asr_mode == STREAMING_ASR_MODE_LIVE_CAPTIONS:
             self._live_captions_source.stop()
-            return
         with self._input_stream_lock:
             stream = self._input_stream
             self._input_stream = None
@@ -2401,6 +2877,10 @@ class DesktopAudioAgent:
         stable_text = self._last_stable_partial_text
         if not stable_text or not self._listening or self.is_assistant_speaking():
             return
+        if self._suppress_transcript_during_enrollment(source="streaming_partial", text=stable_text):
+            self._last_partial_text = ""
+            self._last_stable_partial_text = ""
+            return
         grammar_match = self._command_grammar.canonicalize(stable_text)
         if grammar_match.route_type == "QUERY" or grammar_match.confidence < 0.86:
             return
@@ -2417,6 +2897,8 @@ class DesktopAudioAgent:
                 avg_logprob=None,
                 speaker_index=event.speaker_index if event.has_speaker_id else None,
                 speaker_id=event.speaker_id if event.has_speaker_id else None,
+                user_id="",
+                identity_resolution="auto",
                 transcript_source=TRANSCRIPT_SOURCE_STABLE_PARTIAL_COMMAND,
                 transcript_confidence=TRANSCRIPT_CONFIDENCE_HIGH,
             )
@@ -2435,12 +2917,15 @@ class DesktopAudioAgent:
             grammar_confidence=grammar_match.confidence,
             avg_logprob=event.avg_logprob,
             transcript_source=transcript_source,
+            input_source=str(event.backend or self.current_asr_mode or "streaming_final"),
         )
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
         if not final_text or not self._listening:
             return
         if self.is_assistant_speaking():
+            return
+        if self._suppress_transcript_during_enrollment(source="streaming_final", text=final_text):
             return
         await self._submit_user_turn(
             text=final_text,
@@ -2451,11 +2936,21 @@ class DesktopAudioAgent:
             avg_logprob=event.avg_logprob,
             speaker_index=event.speaker_index if event.has_speaker_id else None,
             speaker_id=event.speaker_id if event.has_speaker_id else None,
+            user_id="",
+            identity_resolution="auto",
             transcript_source=transcript_source,
             transcript_confidence=transcript_confidence,
+            input_source=str(event.backend or self.current_asr_mode or "streaming_final"),
         )
 
-    async def _handle_external_transcript_final(self, raw_text: str, *, source: str) -> None:
+    async def _handle_external_transcript_final(
+        self,
+        raw_text: str,
+        *,
+        source: str,
+        user_id: str = "",
+        identity_resolution: str = "none",
+    ) -> None:
         self._cancel_partial_commit()
         self._last_final_event_at = time.time()
         grammar_match = self._command_grammar.canonicalize(raw_text)
@@ -2463,6 +2958,8 @@ class DesktopAudioAgent:
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
         if not final_text or not self._listening or self.is_assistant_speaking():
+            return
+        if self._suppress_transcript_during_enrollment(source=source, text=final_text):
             return
         if source == "live_captions" and self._should_ignore_live_captions_echo(final_text):
             self.log_store.add(
@@ -2481,6 +2978,8 @@ class DesktopAudioAgent:
             avg_logprob=None,
             speaker_index=None,
             speaker_id=None,
+            user_id=user_id,
+            identity_resolution=identity_resolution,
             transcript_source=TRANSCRIPT_SOURCE_FINAL,
             transcript_confidence=_estimate_transcript_confidence(
                 text=final_text,
@@ -2488,7 +2987,9 @@ class DesktopAudioAgent:
                 grammar_confidence=grammar_match.confidence,
                 avg_logprob=None,
                 transcript_source=TRANSCRIPT_SOURCE_FINAL,
+                input_source=source,
             ),
+            input_source=source,
         )
 
     def _handle_api_asr_frame(self, audio: np.ndarray, *, speech_active: bool) -> None:
@@ -2529,6 +3030,14 @@ class DesktopAudioAgent:
         self._api_asr_preroll_frames.append(frame_copy)
 
     def _start_api_asr_task(self, audio: np.ndarray) -> None:
+        if self._speaker_enrollment_pending():
+            self.log_store.add(
+                "system",
+                "speaker enrollment active; skipped API transcription turn",
+                speaker="system",
+                source="speaker_enrollment",
+            )
+            return
         task = asyncio.create_task(self._run_api_asr_turn(np.asarray(audio, dtype=np.float32)))
         self._active_api_asr_tasks.add(task)
         task.add_done_callback(lambda completed: self._active_api_asr_tasks.discard(completed))
@@ -2537,6 +3046,11 @@ class DesktopAudioAgent:
         normalized_audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if normalized_audio.size <= 0 or not self._listening:
             return
+        speaker_task: Optional[asyncio.Task[SpeakerMatchResult]] = None
+        if self._speaker_id_enabled():
+            speaker_task = asyncio.create_task(
+                asyncio.to_thread(self._speaker_id.match_audio, normalized_audio, self.capture_sample_rate)
+            )
 
         try:
             response = await self._client.post(
@@ -2551,16 +3065,39 @@ class DesktopAudioAgent:
             response.raise_for_status()
             payload = response.json() if response.content else {}
         except Exception as exc:
+            if speaker_task is not None:
+                speaker_task.cancel()
             self._last_error = f"service API transcription failed: {exc}"
             self.log_store.add("system", self._last_error, speaker="system", source="service_api_asr")
             return
 
         transcript = str(payload.get("text") or "").strip() if isinstance(payload, dict) else ""
         if not transcript:
+            if speaker_task is not None:
+                try:
+                    await speaker_task
+                except Exception:
+                    pass
             return
         self._last_error = ""
         provider = str(payload.get("provider") or "api").strip().lower() if isinstance(payload, dict) else "api"
-        await self._handle_external_transcript_final(transcript, source=f"api_{provider or 'api'}")
+        resolved_user_id = ""
+        identity_resolution = "none"
+        if speaker_task is not None:
+            try:
+                match_result = await speaker_task
+            except Exception as exc:
+                match_result = SpeakerMatchResult(reason=str(exc))
+            self._update_last_speaker_match(match_result, source=f"api_{provider or 'api'}")
+            if match_result.matched:
+                resolved_user_id = str(match_result.user_id or "").strip()
+                identity_resolution = "auto"
+        await self._handle_external_transcript_final(
+            transcript,
+            source=f"api_{provider or 'api'}",
+            user_id=resolved_user_id,
+            identity_resolution=identity_resolution,
+        )
 
     def _cancel_partial_commit(self) -> None:
         task = self._partial_commit_task
@@ -2595,6 +3132,10 @@ class DesktopAudioAgent:
             await asyncio.sleep(DEFAULT_PARTIAL_COMMIT_DELAY_SECONDS)
             if not self._listening or self.is_assistant_speaking():
                 return
+            if self._suppress_transcript_during_enrollment(source="stable_partial_fallback"):
+                self._last_partial_text = ""
+                self._last_stable_partial_text = ""
+                return
             if self._speech_active_last or self._speech_ended_at != speech_ended_at:
                 return
             if self._last_final_event_at >= speech_ended_at:
@@ -2624,6 +3165,8 @@ class DesktopAudioAgent:
                 avg_logprob=None,
                 speaker_index=None,
                 speaker_id=None,
+                user_id="",
+                identity_resolution="auto",
                 transcript_source=TRANSCRIPT_SOURCE_STABLE_PARTIAL_FALLBACK,
                 transcript_confidence=_estimate_transcript_confidence(
                     text=final_text,
@@ -2631,7 +3174,9 @@ class DesktopAudioAgent:
                     grammar_confidence=grammar_match.confidence,
                     avg_logprob=None,
                     transcript_source=TRANSCRIPT_SOURCE_STABLE_PARTIAL_FALLBACK,
+                    input_source=self.current_asr_mode,
                 ),
+                input_source=self.current_asr_mode,
             )
         except asyncio.CancelledError:
             return
@@ -2647,8 +3192,11 @@ class DesktopAudioAgent:
         avg_logprob: Optional[float],
         speaker_index: Optional[int],
         speaker_id: Optional[int],
+        user_id: str,
+        identity_resolution: str,
         transcript_source: str,
         transcript_confidence: str,
+        input_source: str = "",
     ) -> None:
         normalized = str(text or "").strip()
         if not normalized:
@@ -2663,6 +3211,7 @@ class DesktopAudioAgent:
         self._last_user_submit_at = now
         corr_id = uuid.uuid4().hex
         barge_in, interrupted_text, interrupted_corr_id = self._consume_barge_in()
+        request_source = _compose_turn_source(input_source)
         metadata_parts: List[str] = []
         raw_value = _collapse_spaces(original_text)
         if raw_value and raw_value != normalized:
@@ -2671,6 +3220,8 @@ class DesktopAudioAgent:
             metadata_parts.append(f"grammar={grammar_route}:{grammar_confidence:.2f}")
         if transcript_source:
             metadata_parts.append(f"asr={transcript_source}:{transcript_confidence}")
+        if request_source != "desktop_audio":
+            metadata_parts.append(f"source={request_source}")
         self.log_store.add(
             "user",
             normalized,
@@ -2683,7 +3234,7 @@ class DesktopAudioAgent:
             self._latest_legacy_corr_id = corr_id
             payload: Dict[str, Any] = {
                 "text": normalized,
-                "source": "desktop_audio",
+                "source": request_source,
                 "corr_id": corr_id,
                 "ts": int(time.time() * 1000),
             }
@@ -2693,6 +3244,10 @@ class DesktopAudioAgent:
                 payload["speaker_index"] = int(speaker_index)
             if speaker_id is not None:
                 payload["speaker_id"] = int(speaker_id)
+            if user_id:
+                payload["user_id"] = str(user_id)
+            if identity_resolution:
+                payload["identity_resolution"] = str(identity_resolution)
             if grammar_route and grammar_route != "QUERY":
                 payload["grammar_route"] = grammar_route
             if grammar_game_name:
@@ -2720,6 +3275,8 @@ class DesktopAudioAgent:
                 avg_logprob=avg_logprob,
                 speaker_index=speaker_index,
                 speaker_id=speaker_id,
+                user_id=user_id,
+                identity_resolution=identity_resolution,
                 grammar_route=grammar_route,
                 grammar_game_name=grammar_game_name,
                 grammar_confidence=grammar_confidence,
@@ -2728,6 +3285,7 @@ class DesktopAudioAgent:
                 interrupted_tts_corr_id=interrupted_corr_id,
                 transcript_source=transcript_source,
                 transcript_confidence=transcript_confidence,
+                input_source=input_source,
             )
         )
 
@@ -2739,6 +3297,8 @@ class DesktopAudioAgent:
         avg_logprob: Optional[float],
         speaker_index: Optional[int],
         speaker_id: Optional[int],
+        user_id: str,
+        identity_resolution: str,
         grammar_route: str,
         grammar_game_name: str,
         grammar_confidence: float,
@@ -2747,11 +3307,13 @@ class DesktopAudioAgent:
         interrupted_tts_corr_id: str,
         transcript_source: str,
         transcript_confidence: str,
+        input_source: str,
     ) -> None:
+        request_source = _compose_turn_source(input_source)
         payload: Dict[str, Any] = {
             "text": text,
             "corr_id": corr_id,
-            "source": "desktop_audio",
+            "source": request_source,
             "barge_in": bool(barge_in),
         }
         if avg_logprob is not None:
@@ -2760,6 +3322,10 @@ class DesktopAudioAgent:
             payload["speaker_index"] = int(speaker_index)
         if speaker_id is not None:
             payload["speaker_id"] = int(speaker_id)
+        if user_id:
+            payload["user_id"] = str(user_id)
+        if identity_resolution:
+            payload["identity_resolution"] = str(identity_resolution)
         if grammar_route and grammar_route != "QUERY":
             payload["grammar_route"] = grammar_route
         if grammar_game_name:

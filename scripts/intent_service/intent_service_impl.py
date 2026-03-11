@@ -27,6 +27,13 @@ except Exception:
         speaker_identity_key = None
 
 
+def _normalize_identity_resolution(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "none":
+        return "none"
+    return "auto"
+
+
 def extract_identity_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     result: Dict[str, Any] = {}
     if not isinstance(payload, dict):
@@ -53,6 +60,10 @@ def extract_identity_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not value:
             continue
         result[str_key] = value
+
+    identity_resolution = _normalize_identity_resolution(payload.get("identity_resolution"))
+    if identity_resolution:
+        result["identity_resolution"] = identity_resolution
 
     return result
 
@@ -142,7 +153,11 @@ class IntentService:
         if self._user_memory is not None:
             try:
                 resolved_user_id = str(payload.get("user_id") or "").strip()
-                if not resolved_user_id and speaker_identity_key is not None:
+                if (
+                    not resolved_user_id
+                    and _normalize_identity_resolution(payload.get("identity_resolution")) != "none"
+                    and speaker_identity_key is not None
+                ):
                     resolved_user_id = self._user_memory.resolve_user(speaker_identity_key(payload))
                 if resolved_user_id:
                     context_game_name = self._user_memory.get_game_reference(resolved_user_id)

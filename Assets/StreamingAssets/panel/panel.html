@@ -251,6 +251,11 @@ textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0
 <div class="asr-detail">
   <div><strong>Current Partial:</strong> <span id="asrCurrentPartialText">--</span></div>
   <div><strong>Stable Partial:</strong> <span id="asrStablePartialText">--</span></div>
+  <div><strong>Speaker ID:</strong> <span id="asrSpeakerStatusText">--</span></div>
+  <div><strong>Active User:</strong> <span id="asrActiveUserText">--</span></div>
+  <div><strong>Last Match:</strong> <span id="asrLastMatchText">--</span></div>
+  <div><strong>Local Capture:</strong> <span id="asrLiveCaptureText">--</span></div>
+  <div><strong>LC Status:</strong> <span id="asrLiveCaptionsStatusText">--</span></div>
 </div>
 </section>
 <section>
@@ -316,6 +321,11 @@ const asrQueueBadgeEl = document.getElementById('asrQueueBadge');
 const asrDropBadgeEl = document.getElementById('asrDropBadge');
 const asrCurrentPartialTextEl = document.getElementById('asrCurrentPartialText');
 const asrStablePartialTextEl = document.getElementById('asrStablePartialText');
+const asrSpeakerStatusTextEl = document.getElementById('asrSpeakerStatusText');
+const asrActiveUserTextEl = document.getElementById('asrActiveUserText');
+const asrLastMatchTextEl = document.getElementById('asrLastMatchText');
+const asrLiveCaptureTextEl = document.getElementById('asrLiveCaptureText');
+const asrLiveCaptionsStatusTextEl = document.getElementById('asrLiveCaptionsStatusText');
 const llmPromptEl = document.getElementById('llmPromptText');
 const llmModelSelect = document.getElementById('llmModelSelect');
 const llmModelStatusEl = document.getElementById('llmModelStatus');
@@ -869,6 +879,7 @@ function renderAsrStatus(data){
   const serverMode = (typeof serverCfg.mode === 'string' && serverCfg.mode) ? serverCfg.mode : '';
   const apiReady = !!serverCfg.openai_configured;
   const lcMissing = (mode === 'live-captions' && !data.live_captions_available);
+  const match = (data && typeof data.last_speaker_match === 'object' && data.last_speaker_match) ? data.last_speaker_match : {};
   if(asrStateEl){
     const suffix = (serverMode === 'api' && !apiReady) ? ' | OPENAI_API_KEY missing' : '';
     const lcSuffix = lcMissing ? ' | LiveCaptionsListener missing' : '';
@@ -900,6 +911,26 @@ function renderAsrStatus(data){
   }
   if(asrCurrentPartialTextEl){ asrCurrentPartialTextEl.textContent = String(data.current_partial || '--'); }
   if(asrStablePartialTextEl){ asrStablePartialTextEl.textContent = String(data.stable_partial || '--'); }
+  if(asrSpeakerStatusTextEl){
+    asrSpeakerStatusTextEl.textContent = !data.speaker_id_enabled
+      ? 'off'
+      : (data.speaker_id_ready ? 'ready' : 'loading');
+  }
+  if(asrActiveUserTextEl){ asrActiveUserTextEl.textContent = String(data.active_user_id || '--'); }
+  if(asrLastMatchTextEl){
+    if(match && match.matched && match.user_id){
+      asrLastMatchTextEl.textContent = `${String(match.user_id)} (${Number(match.score || 0).toFixed(2)})`;
+    }else if(match && match.reason){
+      asrLastMatchTextEl.textContent = String(match.reason);
+    }else{
+      asrLastMatchTextEl.textContent = '--';
+    }
+  }
+  if(asrLiveCaptureTextEl){ asrLiveCaptureTextEl.textContent = data.live_capture_enabled ? 'ON' : 'OFF'; }
+  if(asrLiveCaptionsStatusTextEl){
+    const statusText = String(data.live_captions_error || data.live_captions_status || '--');
+    asrLiveCaptionsStatusTextEl.textContent = statusText;
+  }
 }
 async function refreshAsrStatus(){
   try {

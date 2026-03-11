@@ -165,6 +165,8 @@ class IntentRouterEngine:
             "that",
             "this",
             "one",
+            "other",
+            "else",
             "recommended",
             "recommend",
             "suggested",

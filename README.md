@@ -138,6 +138,7 @@ sequenceDiagram
 - Standalone desktop voice workflow that no longer requires Unity Play Mode for end-to-end speech testing.
 - Direct unified conversation stream with runtime switch between `local` and `cloud`.
 - ASR mode switch at runtime: `whisper-large-v3`, `moonshine-small`, `moonshine-medium`, `api`.
+- Independent speaker ID for `api` and `live-captions`, with closed-set user matching, enrollment clips, and conservative reject-to-anonymous behavior.
 - MQTT command publish for face/servo/LED and game intents.
 - Intent router with layered strategy: exact alias, fuzzy/phonetic similarity, optional LLM classifier, optional Moonshine embedding matcher.
 - Structured memory with speaker identity mapping, facts, episodic recall, recent game history, and contextual game references (`scripts/dialog_service/user_memory.json`).
@@ -267,6 +268,21 @@ python scripts/start_local_services.py --no-telemetry
 
 You can also pass `--env-file` to preload environment variables.
 
+### 3.5) Optional speaker ID model for API / Live Captions
+
+The desktop audio agent can now run a lightweight independent speaker matcher for the `api` and `live-captions` paths.
+
+- Python dependency: install `python_voice_service/requirements.txt` into `python_voice_service/.venv_asr` so `onnxruntime` is available.
+- Default model path: `runtime/models/speaker_id/voxceleb_ECAPA512_LM.onnx`
+- Default profile store: `scripts/dialog_service/speaker_profiles.json` (or the same directory as `DIALOG_USER_MEMORY_PATH`)
+- Runtime panel support: `/memory.html` for enrollment and `/api/speaker-profiles` for status / record / commit / clear
+
+Recommended env vars when you want to control it explicitly:
+
+- `VOICE_SPEAKER_ID_ENABLED=1`
+- `VOICE_SPEAKER_ID_MODEL_PATH=<absolute path to ECAPA ONNX>`
+- `VOICE_SPEAKER_ID_PROFILES_PATH=<absolute path to speaker_profiles.json>`
+
 ### 4) Optional helper.bat
 
 `helper.bat` now starts `scripts/start_local_services.py` from the repository root using local Python (`py -3` or `python`) and no longer depends on `Robot_opr` paths.
@@ -345,7 +361,7 @@ See full deployment notes in [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WIND
 
 | Service | Default Port | Key Endpoints |
 |---|---:|---|
-| Desktop Runtime / Panel | `8787` | `/`, `/games`, `/runtime`, `/memory`, `/setup`, `/sdk`, `/api/speak`, `/api/llm/prompt`, `/api/vision/describe`, `/api/face`, `/api/flower`, `/api/led`, `/api/game`, `/api/game/manifest`, `/api/memory`, `/api/qmd`, `/api/runtime/config`, `/api/runtime/prereq`, `/api/runtime/ollama`, `/api/asr`, `/api/logs/stream` |
+| Desktop Runtime / Panel | `8787` | `/`, `/games`, `/runtime`, `/memory`, `/setup`, `/sdk`, `/api/speak`, `/api/llm/prompt`, `/api/vision/describe`, `/api/face`, `/api/flower`, `/api/led`, `/api/game`, `/api/game/manifest`, `/api/memory`, `/api/speaker-profiles`, `/api/qmd`, `/api/runtime/config`, `/api/runtime/prereq`, `/api/runtime/ollama`, `/api/asr`, `/api/logs/stream` |
 | Python Voice Service | `8000` | `/healthz`, `/conversation/config`, `/conversation/turn/stream`, `/transcribe`, `/transcribe/config`, `/respond`, `/respond/config`, `/respond/metrics` |
 | Piper wrapper | `5005` | `/speak` (GET/POST), `/speak_stream` |
 | Qwen wrapper | `5006` | `/speak` (GET/POST), `/metrics` |

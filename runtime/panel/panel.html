@@ -463,6 +463,26 @@ h1{
         <span class="fact-label">Speech</span>
         <span id="speechValue" class="fact-value">--</span>
       </div>
+      <div class="fact">
+        <span class="fact-label">Speaker ID</span>
+        <span id="speakerIdValue" class="fact-value">--</span>
+      </div>
+      <div class="fact">
+        <span class="fact-label">Active User</span>
+        <span id="activeUserValue" class="fact-value">--</span>
+      </div>
+      <div class="fact">
+        <span class="fact-label">Last Match</span>
+        <span id="lastMatchValue" class="fact-value">--</span>
+      </div>
+      <div class="fact">
+        <span class="fact-label">Local Capture</span>
+        <span id="liveCaptureValue" class="fact-value">--</span>
+      </div>
+      <div class="fact">
+        <span class="fact-label">LC Status</span>
+        <span id="liveCaptionsStatusValue" class="fact-value">--</span>
+      </div>
     </div>
       <div id="asrErrorNotice" class="warning" hidden></div>
     </div>
@@ -541,6 +561,11 @@ const asrModeValueEl = document.getElementById('asrModeValue');
 const backendAsrValueEl = document.getElementById('backendAsrValue');
 const listeningValueEl = document.getElementById('listeningValue');
 const speechValueEl = document.getElementById('speechValue');
+const speakerIdValueEl = document.getElementById('speakerIdValue');
+const activeUserValueEl = document.getElementById('activeUserValue');
+const lastMatchValueEl = document.getElementById('lastMatchValue');
+const liveCaptureValueEl = document.getElementById('liveCaptureValue');
+const liveCaptionsStatusValueEl = document.getElementById('liveCaptionsStatusValue');
 const asrErrorNoticeEl = document.getElementById('asrErrorNotice');
 
 let liveLogVersion = -1;
@@ -661,10 +686,25 @@ function renderRuntime(runtime){
 
 function renderAsrStatus(data){
   const serverCfg = (data && typeof data.server_transcribe === 'object' && data.server_transcribe) ? data.server_transcribe : {};
+  const match = (data && typeof data.last_speaker_match === 'object' && data.last_speaker_match) ? data.last_speaker_match : {};
   asrModeValueEl.textContent = data && data.mode ? String(data.mode) : '--';
   backendAsrValueEl.textContent = serverCfg.mode ? String(serverCfg.mode) : '--';
   listeningValueEl.textContent = data && data.listening ? 'ON' : 'PAUSED';
   speechValueEl.textContent = data && data.speech_active ? 'ACTIVE' : 'idle';
+  speakerIdValueEl.textContent = !(data && data.speaker_id_enabled)
+    ? 'off'
+    : (data && data.speaker_id_ready ? 'ready' : 'loading');
+  activeUserValueEl.textContent = data && data.active_user_id ? String(data.active_user_id) : '--';
+  liveCaptureValueEl.textContent = data && data.live_capture_enabled ? 'ON' : 'OFF';
+  liveCaptionsStatusValueEl.textContent = String((data && (data.live_captions_error || data.live_captions_status)) || '--');
+  if(match && match.matched && match.user_id){
+    const score = Number(match.score || 0);
+    lastMatchValueEl.textContent = `${String(match.user_id)} (${score.toFixed(2)})`;
+  } else if(match && match.reason){
+    lastMatchValueEl.textContent = String(match.reason);
+  } else {
+    lastMatchValueEl.textContent = '--';
+  }
   if(data && data.last_error){
     asrErrorNoticeEl.hidden = false;
     asrErrorNoticeEl.textContent = String(data.last_error);
@@ -823,6 +863,11 @@ async function reloadAsr(){
     backendAsrValueEl.textContent = '--';
     listeningValueEl.textContent = '--';
     speechValueEl.textContent = '--';
+    speakerIdValueEl.textContent = '--';
+    activeUserValueEl.textContent = '--';
+    lastMatchValueEl.textContent = '--';
+    liveCaptureValueEl.textContent = '--';
+    liveCaptionsStatusValueEl.textContent = '--';
     setStatus('ASR error: ' + err, 'error');
   }
 }

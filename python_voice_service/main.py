@@ -18,6 +18,7 @@ import io
 import json
 import sys
 import wave
+import threading
 from collections import deque
 from functools import lru_cache
 from pathlib import Path
@@ -34,6 +35,11 @@ try:
     from .game_grounding import GameCatalog
 except Exception:
     from game_grounding import GameCatalog
+
+try:
+    from .session_context import SessionContextStore
+except Exception:
+    from session_context import SessionContextStore
 
 try:
     import paho.mqtt.publish as mqtt_publish
@@ -127,12 +133,41 @@ DEFAULT_SYSTEM_PROMPT = (
     "- Do not address the user by name unless they explicitly gave it and using it is clearly helpful.\n"
     "- If the user shares a personal event, setback, or feeling, acknowledge that content briefly instead of turning it into generic coaching.\n"
     "- If the user asks about live real-world information you cannot verify here, say that limitation plainly instead of guessing.\n"
+    "- For local game availability, recommendations, and game descriptions, rely on the local game catalog context instead of claiming you cannot see the environment.\n"
+    "- When answering from memory or structured local data, sound like a person speaking, not a system notice.\n"
+    "- Avoid stiff lead-ins such as 'From what I have saved' or 'I don't have access to your personal history'.\n"
     "- Do not claim you can see, check, track, monitor, or verify real-world conditions unless tool or vision context actually provides that information.\n"
     "- When explaining a game or activity, describe what it actually is; do not invent benefits or training claims.\n"
     "- Avoid repetitive motivational slogans.\n"
     "- Default length is 1-2 sentences.\n"
-    "- Match the user's language when possible."
+    "- Reply in English only."
 )
+STRUCTURED_RENDER_SYSTEM_PROMPT = (
+    "You rewrite structured assistant results into natural spoken replies.\n"
+    "Rules:\n"
+    "- Keep every fact exactly true.\n"
+    "- Keep every required name, option, status, and limitation intact.\n"
+    "- Do not add new facts, medical claims, environment observations, or user-state guesses.\n"
+    "- Do not change a game from available into already opening unless the payload explicitly says it is opening.\n"
+    "- Use warm, natural spoken language.\n"
+    "- Reply in English only.\n"
+    "- Use 1 or 2 short sentences unless the payload explicitly allows 3.\n"
+    "- No bullet lists, no labels, no JSON, no meta commentary.\n"
+    "- Output only the final spoken reply."
+)
+STRUCTURED_RENDER_DISALLOWED_MARKERS = (
+    "i don't have access to your personal history",
+    "i do not have access to your personal history",
+    "from what i have saved",
+    "i can see your environment",
+    "i can check your environment",
+    "i can track your environment",
+    "i know your complete history",
+    "i know your full history",
+)
+STRUCTURED_RENDER_SENTENCE_SPLIT_RE = re.compile(r"[.!?。！？]+")
+ANONYMOUS_SESSION_MAX_TURNS = 6
+ANONYMOUS_SESSION_MAX_AGE_SEC = 600.0
 _SYSTEM_PROMPT_LEAK_MARKERS = (
     "understand the user's intent and answer naturally",
     "keep interactions supportive and safe during exercise",
@@ -1056,6 +1091,10 @@ class ConversationTurnRequest(BaseModel):
     text: str = Field(..., min_length=1, description="User transcript to route through the unified conversation pipeline.")
     corr_id: Optional[str] = Field(default=None, description="Stable corr_id from Unity for de-dupe and cancelation.")
     user_id: Optional[str] = Field(default=None, description="Optional stable user identifier.")
+    identity_resolution: str = Field(
+        default="auto",
+        description="Identity policy: auto resolves via speaker tags/profile, none keeps the turn anonymous.",
+    )
     source: Optional[str] = Field(default=None, description="Source label for diagnostics.")
     avg_logprob: Optional[float] = Field(default=None)
     rms: Optional[float] = Field(default=None)
@@ -1071,6 +1110,13 @@ class ConversationTurnRequest(BaseModel):
 
 class OllamaError(RuntimeError):
     pass
+
+
+def _normalize_identity_resolution(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"none", "anonymous", "anon", "skip", "off"}:
+        return "none"
+    return "auto"
 
 
 def _ollama_base_url() -> str:
@@ -1245,6 +1291,259 @@ class OpenAIResponseError(RuntimeError):
     pass
 
 
+class _AnonymousSessionStore:
+    def __init__(self, *, max_turns: int = ANONYMOUS_SESSION_MAX_TURNS, max_age_sec: float = ANONYMOUS_SESSION_MAX_AGE_SEC) -> None:
+        self.max_turns = max(2, int(max_turns))
+        self.max_age_sec = float(max_age_sec)
+        self._lock = threading.Lock()
+        self._turns: deque[Dict[str, Any]] = deque(maxlen=self.max_turns)
+
+    def _prune_unlocked(self, *, now_ts: Optional[float] = None) -> None:
+        cutoff = float(now_ts if now_ts is not None else time.time()) - self.max_age_sec
+        while self._turns and float(self._turns[0].get("ts") or 0.0) < cutoff:
+            self._turns.popleft()
+
+    def remember_turn(self, role: str, text: str) -> None:
+        clean = " ".join((text or "").strip().split())
+        if not clean:
+            return
+        now_ts = time.time()
+        with self._lock:
+            self._prune_unlocked(now_ts=now_ts)
+            self._turns.append({"role": str(role or "user").strip().lower() or "user", "text": clean[:240], "ts": now_ts})
+
+    def build_memory_payload(self, query_text: str) -> Dict[str, Any]:
+        normalized_query = _normalize_compare_text(query_text)
+        now_ts = time.time()
+        with self._lock:
+            self._prune_unlocked(now_ts=now_ts)
+            turns = list(self._turns)
+        user_points: List[str] = []
+        for item in turns:
+            if str(item.get("role") or "user").strip().lower() != "user":
+                continue
+            text = " ".join(str(item.get("text") or "").strip().split())
+            if not text:
+                continue
+            if _normalize_compare_text(text) == normalized_query:
+                continue
+            user_points.append(text)
+        user_points = user_points[-2:]
+        fallback = "So far I only know what we have talked about in this conversation, and I do not have a linked long-term profile yet."
+        if user_points:
+            if len(user_points) == 1:
+                fallback = (
+                    f"So far in this conversation, I know you mentioned {user_points[0]}. "
+                    "I just do not have your long-term profile linked yet."
+                )
+            else:
+                fallback = (
+                    f"So far in this conversation, I know you mentioned {user_points[0]} and {user_points[1]}. "
+                    "I just do not have your long-term profile linked yet."
+                )
+        return {
+            "type": "memory_query",
+            "query_kind": "summary",
+            "result_kind": "session_only_summary",
+            "binding_state": "session_only",
+            "facts": [],
+            "notes": user_points,
+            "required_terms": [],
+            "text": fallback,
+            "max_sentences": 2,
+        }
+
+
+_ANONYMOUS_SESSION_STORE = _AnonymousSessionStore()
+_SESSION_CONTEXT_STORE = SessionContextStore(max_age_sec=ANONYMOUS_SESSION_MAX_AGE_SEC)
+
+
+def _structured_memory_field_clause(field: str, value: str) -> str:
+    clean_field = str(field or "").strip()
+    clean_value = " ".join(str(value or "").strip().split())
+    if not clean_value:
+        return ""
+    if clean_field == "goal":
+        return f"your goal is {clean_value}"
+    if clean_field == "name":
+        return f"your name is {clean_value}"
+    if clean_field == "like":
+        return f"you like {clean_value}"
+    if clean_field == "dislike":
+        return f"you dislike {clean_value}"
+    if clean_field == "favorite_game":
+        return f"your favorite game is {clean_value}"
+    if clean_field == "origin":
+        return f"you are from {clean_value}"
+    if clean_field == "preferred_training_day":
+        return f"you prefer training on {clean_value}"
+    if clean_field == "preferred_training_time":
+        return f"you prefer training in the {clean_value}"
+    return clean_value
+
+
+def _pick_structured_variant(options: List[str], seed_text: str) -> str:
+    if not options:
+        return ""
+    seed = sum(ord(ch) for ch in (seed_text or ""))
+    return options[seed % len(options)]
+
+
+def _structured_template_reply(payload: Dict[str, Any], user_text: str) -> str:
+    reply_type = str(payload.get("type") or "").strip().lower()
+    result_kind = str(payload.get("result_kind") or "").strip().lower()
+    primary_game_name = str(payload.get("primary_game_name") or payload.get("game_name") or "").strip()
+    reference_game_name = str(payload.get("reference_game_name") or "").strip()
+    candidate_games = [str(item).strip() for item in payload.get("candidate_games", []) or [] if str(item).strip()]
+    facts = [item for item in payload.get("facts", []) or [] if isinstance(item, dict)]
+    notes = [" ".join(str(item).strip().split()) for item in payload.get("notes", []) or [] if str(item).strip()]
+    reason_text = " ".join(str(payload.get("reason_text") or "").strip().split())
+    fallback_text = " ".join(str(payload.get("text") or "").strip().split())
+    seed = f"{reply_type}|{result_kind}|{primary_game_name}|{user_text}"
+
+    if reply_type == "game_recommend":
+        if not primary_game_name:
+            return fallback_text
+        opener = _pick_structured_variant(
+            [
+                f"I would go with {primary_game_name}.",
+                f"{primary_game_name} looks like the best fit right now.",
+                f"A good one to try next is {primary_game_name}.",
+            ],
+            seed,
+        )
+        if reason_text:
+            return f"{opener} {reason_text[:1].upper() + reason_text[1:].rstrip('.')}."
+        return opener
+
+    if reply_type == "game_alternative":
+        listed = ""
+        if candidate_games:
+            if len(candidate_games) == 1:
+                listed = candidate_games[0]
+            elif len(candidate_games) == 2:
+                listed = f"{candidate_games[0]} and {candidate_games[1]}"
+            else:
+                listed = ", ".join(candidate_games[:-1]) + f", and {candidate_games[-1]}"
+        if reference_game_name and listed:
+            opener = f"Other good options besides {reference_game_name} are {listed}."
+        elif listed:
+            opener = f"Other good options are {listed}."
+        else:
+            opener = fallback_text
+        if primary_game_name and reason_text:
+            return f"{opener} I would lean toward {primary_game_name} because {reason_text[:1].lower() + reason_text[1:].rstrip('.')}."
+        if primary_game_name and primary_game_name not in opener:
+            return f"{opener} I would start with {primary_game_name}."
+        return opener
+
+    if reply_type == "game_list":
+        if candidate_games:
+            if len(candidate_games) == 1:
+                return f"Right now I have {candidate_games[0]} available."
+            if len(candidate_games) == 2:
+                return f"Right now I have {candidate_games[0]} and {candidate_games[1]} available."
+            return "Right now I have " + ", ".join(candidate_games[:-1]) + f", and {candidate_games[-1]} available."
+        return fallback_text
+
+    if reply_type == "game_explain":
+        if fallback_text:
+            return fallback_text
+        if primary_game_name and reason_text:
+            return f"{primary_game_name} is {reason_text.rstrip('.') }."
+
+    if reply_type == "memory_write_ack":
+        clauses = [str(item.get("spoken_text") or "").strip() for item in facts if str(item.get("spoken_text") or "").strip()]
+        if clauses:
+            if len(clauses) == 1:
+                return f"Okay, I will remember that {clauses[0]}."
+            return "Okay, I will remember that " + "; ".join(clauses[:3]) + "."
+        return fallback_text or "Okay, I will remember that."
+
+    if reply_type == "memory_query":
+        if result_kind == "session_only_summary":
+            return fallback_text
+        if result_kind == "known_specific_fact":
+            if facts:
+                spoken = str(facts[0].get("spoken_text") or "").strip()
+                if spoken:
+                    return f"I remember that {spoken}."
+        if result_kind == "known_recent_notes":
+            if len(notes) == 1:
+                return f"I remember you mentioned {notes[0]}."
+            if len(notes) >= 2:
+                return f"I remember you mentioned {notes[0]} and {notes[1]}."
+        if result_kind == "known_profile_summary":
+            clauses = [str(item.get("spoken_text") or "").strip() for item in facts if str(item.get("spoken_text") or "").strip()]
+            if len(clauses) == 1:
+                return f"So far I remember that {clauses[0]}."
+            if len(clauses) == 2:
+                return f"So far I remember that {clauses[0]}, and {clauses[1]}."
+            if len(clauses) >= 3:
+                return f"So far I remember that {clauses[0]}, {clauses[1]}, and {clauses[2]}."
+        return fallback_text
+
+    return fallback_text
+
+
+def _count_sentences(text: str) -> int:
+    clean = " ".join((text or "").strip().split())
+    if not clean:
+        return 0
+    parts = [segment.strip() for segment in STRUCTURED_RENDER_SENTENCE_SPLIT_RE.split(clean) if segment.strip()]
+    return max(1, len(parts))
+
+
+def _validate_structured_reply(
+    reply_text: str,
+    payload: Dict[str, Any],
+    *,
+    all_game_names: Optional[List[str]] = None,
+) -> Tuple[bool, str]:
+    clean = _normalize_final_reply_text(reply_text)
+    if not clean:
+        return False, "empty"
+    if _looks_like_system_prompt_leak(clean):
+        return False, "prompt_leak"
+    normalized = _normalize_compare_text(clean)
+    if any(_normalize_compare_text(marker) in normalized for marker in STRUCTURED_RENDER_DISALLOWED_MARKERS):
+        return False, "disallowed_marker"
+    max_sentences = int(payload.get("max_sentences") or (3 if str(payload.get("type") or "") == "game_explain" else 2))
+    if _count_sentences(clean) > max(1, max_sentences):
+        return False, "too_many_sentences"
+
+    required_terms = [str(item).strip() for item in payload.get("required_terms", []) or [] if str(item).strip()]
+    for term in required_terms:
+        if _normalize_compare_text(term) not in normalized:
+            return False, f"missing_required:{term}"
+
+    allowed_games = {
+        _normalize_compare_text(str(item))
+        for item in payload.get("allowed_game_names", []) or []
+        if _normalize_compare_text(str(item))
+    }
+    if all_game_names:
+        for game_name in all_game_names:
+            normalized_name = _normalize_compare_text(game_name)
+            if not normalized_name or normalized_name in allowed_games:
+                continue
+            if normalized_name in normalized:
+                return False, f"unexpected_game:{game_name}"
+
+    binding_state = str(payload.get("binding_state") or "").strip().lower()
+    if binding_state in {"session_only", "no_saved_profile"} and any(
+        _normalize_compare_text(marker) in normalized
+        for marker in (
+            "complete history",
+            "full history",
+            "your whole history",
+            "your long term profile says",
+        )
+    ):
+        return False, "binding_reversal"
+    return True, ""
+
+
 class _UnifiedConversationRuntime:
     def __init__(self) -> None:
         self.intent_cfg = None
@@ -1253,6 +1552,7 @@ class _UnifiedConversationRuntime:
         self.game_catalog = None
         self.dialog_cfg = None
         self.dialog_helper = None
+        self.session_store = _SESSION_CONTEXT_STORE
         self.ready = False
         self.error = ""
         self.reload_from_env()
@@ -1315,17 +1615,25 @@ class _UnifiedConversationRuntime:
         if not self.ready or self.intent_router is None or self.dialog_helper is None:
             raise RuntimeError(self.error or "unified conversation runtime is not ready")
 
-    def resolve_user_id(self, *, payload: Dict[str, Any], user_id: Optional[str]) -> Optional[str]:
+    def resolve_user_id(
+        self,
+        *,
+        payload: Dict[str, Any],
+        user_id: Optional[str],
+        identity_resolution: Optional[str] = None,
+    ) -> Optional[str]:
         self.ensure_ready()
         helper = self.dialog_helper
         assert helper is not None
         resolved_user_id = (user_id or "").strip() or None
+        if resolved_user_id:
+            return resolved_user_id
         if helper.user_memory is None:
             return resolved_user_id
+        if _normalize_identity_resolution(identity_resolution or payload.get("identity_resolution")) == "none":
+            return None
         try:
             identity_payload = dict(payload)
-            if resolved_user_id:
-                identity_payload["speaker_profile_id"] = resolved_user_id
             if speaker_identity_key is None:
                 identity_key = "source:default"
             else:
@@ -1342,13 +1650,18 @@ class _UnifiedConversationRuntime:
         *,
         payload: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
+        identity_resolution: Optional[str] = None,
     ):
         self.ensure_ready()
         helper = self.dialog_helper
         assert helper is not None
-        resolved_user_id = self.resolve_user_id(payload=payload or {}, user_id=user_id)
-        context_game_name = ""
-        if resolved_user_id and helper.user_memory is not None:
+        resolved_user_id = self.resolve_user_id(
+            payload=payload or {},
+            user_id=user_id,
+            identity_resolution=identity_resolution,
+        )
+        context_game_name = self.session_store.context_game_name(resolved_user_id)
+        if not context_game_name and resolved_user_id and helper.user_memory is not None:
             try:
                 context_game_name = helper.user_memory.get_game_reference(resolved_user_id)
             except Exception as exc:
@@ -1362,6 +1675,7 @@ class _UnifiedConversationRuntime:
         text: str,
         user_id: Optional[str],
         resolved_user_id: Optional[str] = None,
+        identity_resolution: Optional[str] = None,
     ) -> Tuple[Optional[str], str, Dict[str, str], Dict[str, Any]]:
         self.ensure_ready()
         helper = self.dialog_helper
@@ -1384,9 +1698,17 @@ class _UnifiedConversationRuntime:
         }
         if helper.user_memory is None:
             return resolved_user_id, memory_context, dialog_request_ctx, memory_update
+        if _normalize_identity_resolution(identity_resolution or payload.get("identity_resolution")) == "none":
+            return None, memory_context, dialog_request_ctx, memory_update
 
         try:
-            resolved_user_id = self.resolve_user_id(payload=payload, user_id=resolved_user_id)
+            resolved_user_id = self.resolve_user_id(
+                payload=payload,
+                user_id=resolved_user_id,
+                identity_resolution=identity_resolution,
+            )
+            if not resolved_user_id:
+                return None, memory_context, dialog_request_ctx, memory_update
             memory_update = helper.user_memory.remember_utterance(resolved_user_id, text)
             memory_context = helper.user_memory.build_memory_context(resolved_user_id, query_text=text)
             dialog_request_ctx = helper._build_dialog_request_context(user_id=resolved_user_id, user_text=text)
@@ -1411,6 +1733,66 @@ class _UnifiedConversationRuntime:
             }
         return resolved_user_id, memory_context, dialog_request_ctx, memory_update
 
+    def remember_user_turn(
+        self,
+        *,
+        user_id: Optional[str],
+        text: str,
+    ) -> None:
+        self.session_store.remember_turn(user_id=user_id, role="user", text=text)
+        if self.game_catalog is None:
+            return
+        mentions = self.game_catalog.extract_game_mentions(text, limit=3)
+        if len(mentions) == 1:
+            self.session_store.update_game_state(
+                user_id=user_id,
+                focused_game=mentions[0],
+            )
+
+    def remember_unbound_turn(self, *, role: str, text: str) -> None:
+        self.session_store.remember_turn(user_id=None, role=role, text=text)
+
+    def build_general_session_context(
+        self,
+        *,
+        user_id: Optional[str],
+        dialog_request_ctx: Dict[str, str],
+        current_user_text: str,
+    ) -> str:
+        return self.session_store.build_general_session_context(
+            user_id=user_id,
+            current_topic=dialog_request_ctx.get("current_topic") or "",
+            open_question=dialog_request_ctx.get("open_question") or "",
+            exclude_user_text=current_user_text,
+        )
+
+    def _all_game_names(self) -> List[str]:
+        cards = getattr(self.game_catalog, "cards", None)
+        if not isinstance(cards, list):
+            return []
+        return [str(getattr(card, "name", "")).strip() for card in cards if str(getattr(card, "name", "")).strip()]
+
+    async def _render_structured_reply(self, *, user_text: str, payload: Dict[str, Any]) -> str:
+        effective_payload = dict(payload)
+        if str(effective_payload.get("type") or "").strip().startswith("game_"):
+            allowed = [
+                str(item).strip()
+                for item in (
+                    effective_payload.get("allowed_game_names")
+                    or effective_payload.get("candidate_games")
+                    or []
+                )
+                if str(item).strip()
+            ]
+            primary = str(effective_payload.get("primary_game_name") or effective_payload.get("game_name") or "").strip()
+            reference = str(effective_payload.get("reference_game_name") or "").strip()
+            for name in (primary, reference):
+                if name and name not in allowed:
+                    allowed.append(name)
+            effective_payload["allowed_game_names"] = allowed
+            return await _spoken_reply_from_payload(user_text, effective_payload, all_game_names=self._all_game_names())
+        return await _spoken_reply_from_payload(user_text, effective_payload)
+
     def finalize_assistant_turn(
         self,
         *,
@@ -1418,11 +1800,32 @@ class _UnifiedConversationRuntime:
         user_text: str,
         answer_text: str,
         dialog_request_ctx: Dict[str, str],
+        track_game_mentions: bool = True,
     ) -> None:
         self.ensure_ready()
         helper = self.dialog_helper
         assert helper is not None
-        if not user_id or helper.user_memory is None or not helper.cfg.enable_dialog_context:
+        self.session_store.remember_turn(user_id=user_id, role="assistant", text=answer_text)
+        if track_game_mentions and self.game_catalog is not None:
+            mentions = self.game_catalog.extract_game_mentions(answer_text, limit=3)
+            if len(mentions) == 1:
+                self.session_store.update_game_state(
+                    user_id=user_id,
+                    focused_game=mentions[0],
+                )
+        if not user_id or helper.user_memory is None:
+            return
+        if track_game_mentions:
+            try:
+                helper._remember_game_context(
+                    user_id=user_id,
+                    text=answer_text,
+                    reference_kind="mentioned",
+                    source="assistant",
+                )
+            except Exception as exc:
+                logger.warning("game context update failed: %s", exc)
+        if not helper.cfg.enable_dialog_context:
             return
 
         try:
@@ -1443,7 +1846,7 @@ class _UnifiedConversationRuntime:
         except Exception as exc:
             logger.warning("dialog slot update failed: %s", exc)
 
-    def try_memory_reply(
+    async def try_memory_reply(
         self,
         *,
         user_id: Optional[str],
@@ -1453,14 +1856,18 @@ class _UnifiedConversationRuntime:
         self.ensure_ready()
         helper = self.dialog_helper
         assert helper is not None
-        if not user_id or helper.user_memory is None or not helper._is_memory_query(text):
+        if not helper._is_memory_query(text):
             return ""
-
-        try:
-            reply = (helper.user_memory.answer_memory_query(user_id, text) or "").strip()
-        except Exception as exc:
-            logger.warning("user memory reply failed: %s", exc)
-            return ""
+        payload: Dict[str, Any] = {}
+        if user_id and helper.user_memory is not None:
+            try:
+                payload = helper.user_memory.answer_memory_query_payload(user_id, text)
+            except Exception as exc:
+                logger.warning("user memory reply failed: %s", exc)
+                return ""
+        else:
+            payload = self.session_store.build_memory_payload(user_id=user_id, query_text=text)
+        reply = await self._render_structured_reply(user_text=text, payload=payload)
         reply = _finalize_static_tts_reply(helper, reply)
         if reply:
             self.finalize_assistant_turn(
@@ -1471,7 +1878,7 @@ class _UnifiedConversationRuntime:
             )
         return reply
 
-    def try_memory_write_reply(
+    async def try_memory_write_reply(
         self,
         *,
         user_id: Optional[str],
@@ -1484,9 +1891,28 @@ class _UnifiedConversationRuntime:
         assert helper is not None
         if not user_id or helper.user_memory is None:
             return ""
-        reply = str(memory_update.get("ack_text") or "").strip()
-        if not reply:
+        if not str(memory_update.get("ack_text") or "").strip():
             return ""
+        facts_written = [
+            {
+                "field": str(item.get("field") or "").strip(),
+                "value": str(item.get("value") or "").strip(),
+                "spoken_text": _structured_memory_field_clause(str(item.get("field") or ""), str(item.get("value") or "")),
+            }
+            for item in memory_update.get("facts_written", []) or []
+            if str(item.get("value") or "").strip()
+        ]
+        payload = {
+            "type": "memory_write_ack",
+            "result_kind": "memory_write_ack",
+            "binding_state": "bound_profile",
+            "facts": facts_written,
+            "notes": [],
+            "required_terms": [str(item.get("value") or "").strip() for item in facts_written[:2] if str(item.get("value") or "").strip()],
+            "text": str(memory_update.get("ack_text") or "").strip(),
+            "max_sentences": 2,
+        }
+        reply = await self._render_structured_reply(user_text=text, payload=payload)
         reply = _finalize_static_tts_reply(helper, reply)
         if reply:
             self.finalize_assistant_turn(
@@ -1497,7 +1923,75 @@ class _UnifiedConversationRuntime:
             )
         return reply
 
-    def try_game_reply(
+    async def _semantic_game_intent_hint(self, *, user_id: Optional[str], text: str) -> str:
+        if self.game_catalog is None:
+            return ""
+        session_state = self.session_store.game_state(user_id)
+        if not self.game_catalog.looks_like_game_domain(text, session_state=session_state):
+            return ""
+        provider = _conversation_effective_response_provider(_conversation_profile())
+        prompt = (
+            "Classify the user's latest message into exactly one label:\n"
+            "- game_recommend\n"
+            "- game_alternative\n"
+            "- game_availability\n"
+            "- game_introduce\n"
+            "- game_compare\n"
+            "- none\n\n"
+            "Return only the label.\n\n"
+            f"Focused game: {session_state.focused_game or '(none)'}\n"
+            f"Candidate games: {', '.join(session_state.candidate_games) if session_state.candidate_games else '(none)'}\n"
+            f"Primary recommendation: {session_state.primary_recommendation or '(none)'}\n"
+            f"Last message: {text}\n\n"
+            "Label:"
+        )
+        system_prompt = (
+            "You are a tiny classifier for local game dialogue. "
+            "Reply with exactly one label and no explanation."
+        )
+        try:
+            if provider == "openai":
+                client = _AsyncOpenAIClient.get()
+                response = await client.chat.completions.create(
+                    model=_openai_response_model(),
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.0,
+                    top_p=0.1,
+                    max_tokens=12,
+                    stream=False,
+                )
+                raw = response.choices[0].message.content if response.choices else ""
+            else:
+                client = _AsyncHttpClient.get()
+                response = await client.post(
+                    f"{_ollama_base_url()}/api/generate",
+                    json={
+                        "model": _conversation_local_response_model(),
+                        "think": False,
+                        "system": system_prompt,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {
+                            "temperature": 0.0,
+                            "top_p": 0.1,
+                            "top_k": 5,
+                            "num_predict": 12,
+                            "repeat_penalty": 1.0,
+                        },
+                    },
+                )
+                raw = (response.json().get("response") or "") if response.status_code == 200 else ""
+        except Exception:
+            return ""
+        normalized = str(raw or "").strip().lower().replace(" ", "_")
+        if normalized in {"game_recommend", "game_alternative", "game_availability", "game_introduce", "game_compare"}:
+            return normalized
+        return ""
+
+    async def try_game_reply(
         self,
         *,
         user_id: Optional[str],
@@ -1515,21 +2009,56 @@ class _UnifiedConversationRuntime:
                 user_profile = helper.user_memory.profile_snapshot(user_id)
             except Exception:
                 user_profile = {}
+        session_state = self.session_store.game_state(user_id)
+        forced_intent = ""
         try:
-            grounded = self.game_catalog.grounded_reply(text, user_profile=user_profile)
+            decision = self.game_catalog.route_game_query(
+                text,
+                session_state=session_state,
+                user_profile=user_profile,
+            )
+            if decision.intent == "none" and self.game_catalog.looks_like_game_domain(text, session_state=session_state):
+                forced_intent = await self._semantic_game_intent_hint(user_id=user_id, text=text)
+            grounded = self.game_catalog.grounded_reply(
+                text,
+                user_profile=user_profile,
+                session_state=session_state,
+                forced_intent=forced_intent,
+            )
         except Exception as exc:
             logger.warning("game grounding failed: %s", exc)
             return ""
-        reply = str(grounded.get("text") or "").strip()
+        reply = await self._render_structured_reply(user_text=text, payload=grounded)
         if not reply:
             return ""
-        grounded_game_name = str(grounded.get("game_name") or "").strip()
+        grounded_game_name = str(grounded.get("primary_game_name") or grounded.get("game_name") or "").strip()
+        candidate_games = [
+            str(item).strip()
+            for item in grounded.get("candidate_games", []) or []
+            if str(item).strip()
+        ]
+        router_intent = str(grounded.get("intent") or grounded.get("type") or "").strip()
+        if grounded_game_name or candidate_games or router_intent:
+            introduced_games: List[str] = []
+            if str(grounded.get("intent") or "").strip() in {"game_introduce", "game_compare"}:
+                introduced_games = candidate_games or ([grounded_game_name] if grounded_game_name else [])
+            elif str(grounded.get("type") or "").strip() == "game_alternative":
+                introduced_games = candidate_games or ([grounded_game_name] if grounded_game_name else [])
+            self.session_store.update_game_state(
+                user_id=user_id,
+                focused_game=grounded_game_name or None,
+                candidate_games=candidate_games or None,
+                primary_recommendation=(grounded_game_name if str(grounded.get("type") or "") == "game_recommend" else None),
+                last_introduced_games=(introduced_games or None),
+                last_router_intent=router_intent or None,
+            )
         reply = _finalize_static_tts_reply(helper, reply)
-        if user_id and helper.user_memory is not None and grounded_game_name:
+        if user_id and helper.user_memory is not None:
             try:
-                helper.user_memory.set_game_reference(
-                    user_id,
-                    game_name=grounded_game_name,
+                helper._remember_game_context(
+                    user_id=user_id,
+                    text=reply,
+                    primary_game_name=grounded_game_name,
                     reference_kind=str(grounded.get("type") or "game_reply").strip() or "game_reply",
                     source="game_catalog",
                 )
@@ -1541,6 +2070,7 @@ class _UnifiedConversationRuntime:
                 user_text=text,
                 answer_text=reply,
                 dialog_request_ctx=dialog_request_ctx,
+                track_game_mentions=False,
             )
         return reply
 
@@ -1555,6 +2085,13 @@ class _UnifiedConversationRuntime:
         self.ensure_ready()
         helper = self.dialog_helper
         assert helper is not None
+        self.session_store.update_game_state(
+            user_id=user_id,
+            focused_game=game_name,
+            candidate_games=[game_name],
+            primary_recommendation=None,
+            last_router_intent="game_launch_followup" if str(action or "").strip().lower() == "launch" else "game_event",
+        )
         if not user_id or helper.user_memory is None:
             return
         try:
@@ -1664,11 +2201,27 @@ def _normalize_transcript_confidence(value: Optional[str]) -> str:
     return ""
 
 
+def _normalize_request_source(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    normalized = re.sub(r"\s+", "_", normalized)
+    return normalized
+
+
+def _is_live_captions_request(payload: ConversationTurnRequest) -> bool:
+    normalized = _normalize_request_source(payload.source)
+    if not normalized:
+        return False
+    parts = [part for part in re.split(r"[:/]", normalized) if part]
+    return "live_captions" in parts
+
+
 def _should_clarify_uncertain_turn(payload: ConversationTurnRequest, route_type: str) -> bool:
     if str(route_type or "").strip().upper() != "QUERY":
         return False
     confidence = _normalize_transcript_confidence(payload.transcript_confidence)
     source = str(payload.transcript_source or "").strip().lower()
+    if _is_live_captions_request(payload) and source != "stable_partial_fallback":
+        return False
     if confidence == "low":
         return True
     return source == "stable_partial_fallback"
@@ -1838,6 +2391,8 @@ def _compose_dialog_system_prompt(
         "- Do not add a generic follow-up question after a complete answer.",
         "- Do not invent emotions, symptoms, or user states that were not explicitly stated.",
         "- Do not repeat old advice when the user asks for a topic switch.",
+        "- When replying from memory or local structured data, use natural spoken phrasing instead of system-style lead-ins.",
+        "- Avoid phrasing like 'From what I have saved' or 'I don't have access to your personal history'.",
         "- When explaining a game, define the game plainly instead of inventing benefits.",
         "- Use literal, practical language; avoid poetic or metaphorical phrasing.",
         "- Treat simple preferences (for example morning/evening) as scheduling input, not emotional signals.",
@@ -1845,6 +2400,7 @@ def _compose_dialog_system_prompt(
         "- If the user shares a personal event or disappointment, respond to that content directly instead of converting it into coaching language.",
         "- For real-world or out-of-scope questions, give a brief honest limitation or a cautious general answer.",
         "- Do not say you can see, check, monitor, track, or find something unless tool or vision context explicitly provides it.",
+        "- Reply in English only.",
     ]
     if requests_single_sentence_reply():
         instructions.append("- The user explicitly asked for one short sentence. Reply with exactly one short sentence.")
@@ -1941,7 +2497,14 @@ async def _build_coach_prompt_package(
         barge_in=bool(barge_in),
         user_text=user_text,
     )
-    return merged_system, "\n\n".join(prompt_parts)
+    prompt_text = "\n\n".join(prompt_parts)
+    logger.info(
+        "coach prompt budget: memory_chars=%d dialog_chars=%d prompt_chars=%d",
+        len(context_text),
+        len(dialog_context_text),
+        len(prompt_text),
+    )
+    return merged_system, prompt_text
 
 
 async def _build_ollama_generate_payload(
@@ -2141,6 +2704,121 @@ async def _generate_coach_reply(
         raise OllamaError("Ollama response was empty")
 
     return reply_text
+
+
+def _build_structured_render_prompt(user_text: str, payload: Dict[str, Any]) -> Tuple[str, str]:
+    compact_payload = {
+        "type": str(payload.get("type") or "").strip(),
+        "result_kind": str(payload.get("result_kind") or "").strip(),
+        "binding_state": str(payload.get("binding_state") or "").strip(),
+        "primary_game_name": str(payload.get("primary_game_name") or payload.get("game_name") or "").strip(),
+        "reference_game_name": str(payload.get("reference_game_name") or "").strip(),
+        "candidate_games": [str(item).strip() for item in payload.get("candidate_games", []) or [] if str(item).strip()],
+        "intent": str(payload.get("intent") or "").strip(),
+        "facts": payload.get("facts", []) or [],
+        "notes": payload.get("notes", []) or [],
+        "reason_text": str(payload.get("reason_text") or "").strip(),
+        "doc_snippets": [str(item).strip() for item in payload.get("doc_snippets", []) or [] if str(item).strip()],
+        "required_terms": [str(item).strip() for item in payload.get("required_terms", []) or [] if str(item).strip()],
+        "allowed_game_names": [str(item).strip() for item in payload.get("allowed_game_names", []) or [] if str(item).strip()],
+        "fallback_text": str(payload.get("text") or "").strip(),
+        "max_sentences": int(payload.get("max_sentences") or 2),
+    }
+    prompt = (
+        "Rewrite the structured result as a short spoken reply.\n"
+        "Keep the facts exact and keep every required term.\n"
+        "Do not add any new facts.\n"
+        "Do not mention any game outside allowed_game_names.\n"
+        "Do not use labels or bullet lists.\n\n"
+        f"Latest user message:\n{user_text}\n\n"
+        "Structured result JSON:\n"
+        + json.dumps(compact_payload, ensure_ascii=False, indent=2)
+        + "\n\nSpoken reply:"
+    )
+    return STRUCTURED_RENDER_SYSTEM_PROMPT, prompt
+
+
+async def _generate_structured_spoken_reply(user_text: str, payload: Dict[str, Any]) -> str:
+    provider = _conversation_effective_response_provider(_conversation_profile())
+    system_prompt, prompt = _build_structured_render_prompt(user_text, payload)
+    if provider == "openai":
+        client = _AsyncOpenAIClient.get()
+        model = _openai_response_model()
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.28,
+                top_p=0.85,
+                max_tokens=96,
+                stream=False,
+            )
+        except Exception as exc:
+            raise OpenAIResponseError(f"OpenAI structured render request failed: {exc}") from exc
+        try:
+            content = response.choices[0].message.content if response.choices else ""
+        except Exception:
+            content = ""
+        reply = _normalize_final_reply_text(str(content or ""))
+        if not reply:
+            raise OpenAIResponseError("OpenAI structured render response was empty")
+        return reply
+
+    payload_json: Dict[str, Any] = {
+        "model": _conversation_local_response_model(),
+        "think": False,
+        "system": system_prompt,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.22,
+            "top_p": 0.82,
+            "top_k": 20,
+            "num_predict": 96,
+            "repeat_penalty": 1.08,
+        },
+    }
+    keep_alive = _environment("OLLAMA_KEEP_ALIVE", "30m")
+    if keep_alive:
+        payload_json["keep_alive"] = keep_alive
+    url = f"{_ollama_base_url()}/api/generate"
+    try:
+        client = _AsyncHttpClient.get()
+        response = await client.post(url, json=payload_json)
+    except httpx.HTTPError as exc:
+        raise OllamaError(f"Failed to contact Ollama at {url}: {exc}") from exc
+    if response.status_code != 200:
+        raise OllamaError(f"Ollama returned status {response.status_code}: {response.text.strip()}")
+    data = response.json()
+    reply = _normalize_final_reply_text(str(data.get("response") or ""))
+    if not reply:
+        raise OllamaError("Ollama structured render response was empty")
+    return reply
+
+
+async def _spoken_reply_from_payload(
+    user_text: str,
+    payload: Dict[str, Any],
+    *,
+    all_game_names: Optional[List[str]] = None,
+) -> str:
+    fallback_text = _normalize_final_reply_text(_structured_template_reply(payload, user_text) or str(payload.get("text") or ""))
+    if fallback_text:
+        payload = dict(payload)
+        payload["text"] = fallback_text
+    try:
+        rendered = await _generate_structured_spoken_reply(user_text, payload)
+    except (OllamaError, OpenAIResponseError, RuntimeError) as exc:
+        logger.info("structured render fallback: %s", exc)
+        return fallback_text
+    valid, reason = _validate_structured_reply(rendered, payload, all_game_names=all_game_names)
+    if not valid:
+        logger.info("structured render validation fallback: %s", reason)
+        return fallback_text
+    return rendered
 
 
 @app.on_event("startup")
@@ -3903,8 +4581,20 @@ async def _stream_unified_conversation_events(
     corr_id = (payload.corr_id or "").strip() or f"turn-{int(time.time() * 1000)}-{os.getpid()}"
     text = payload.text.strip()
     request_payload = payload.dict(exclude_none=True)
-    resolved_user_id = runtime.resolve_user_id(payload=request_payload, user_id=payload.user_id)
-    route = runtime.route_text(text, corr_id, payload=request_payload, user_id=resolved_user_id)
+    identity_resolution = _normalize_identity_resolution(payload.identity_resolution)
+    request_payload["identity_resolution"] = identity_resolution
+    resolved_user_id = runtime.resolve_user_id(
+        payload=request_payload,
+        user_id=payload.user_id,
+        identity_resolution=identity_resolution,
+    )
+    route = runtime.route_text(
+        text,
+        corr_id,
+        payload=request_payload,
+        user_id=resolved_user_id,
+        identity_resolution=identity_resolution,
+    )
     route_payload = route.payload or {}
     route_type = str(route_payload.get("type") or "QUERY").strip().upper() or "QUERY"
     route_game_name = str(route_payload.get("game_name") or "").strip()
@@ -3948,7 +4638,9 @@ async def _stream_unified_conversation_events(
         text=text,
         user_id=payload.user_id,
         resolved_user_id=resolved_user_id,
+        identity_resolution=identity_resolution,
     )
+    runtime.remember_user_turn(user_id=user_id, text=text)
 
     if route_type in {"LAUNCH_GAME", "BACK_HOME"}:
         try:
@@ -3978,6 +4670,8 @@ async def _stream_unified_conversation_events(
             )
         reply_text = _command_ack_text(route_type, route_game_name)
         if reply_text:
+            runtime.session_store.remember_turn(user_id=user_id, role="assistant", text=reply_text)
+        if reply_text:
             yield _json_line(
                 {
                     "type": "chunk",
@@ -3999,7 +4693,7 @@ async def _stream_unified_conversation_events(
         )
         return
 
-    memory_write_reply = runtime.try_memory_write_reply(
+    memory_write_reply = await runtime.try_memory_write_reply(
         user_id=user_id,
         text=text,
         memory_update=memory_update,
@@ -4010,7 +4704,7 @@ async def _stream_unified_conversation_events(
         yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": memory_write_reply, "provider": "memory_write", "user_id": user_id or ""})
         return
 
-    memory_reply = runtime.try_memory_reply(
+    memory_reply = await runtime.try_memory_reply(
         user_id=user_id,
         text=text,
         dialog_request_ctx=dialog_request_ctx,
@@ -4020,7 +4714,7 @@ async def _stream_unified_conversation_events(
         yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": memory_reply, "provider": "memory", "user_id": user_id or ""})
         return
 
-    game_reply = runtime.try_game_reply(
+    game_reply = await runtime.try_game_reply(
         user_id=user_id,
         text=text,
         dialog_request_ctx=dialog_request_ctx,
@@ -4053,13 +4747,18 @@ async def _stream_unified_conversation_events(
     stream_provider = _conversation_effective_response_provider(_conversation_profile())
     accumulator = _ReplyChunkAccumulator()
     full_parts: List[str] = []
+    general_session_context = runtime.build_general_session_context(
+        user_id=user_id,
+        dialog_request_ctx=dialog_request_ctx,
+        current_user_text=text,
+    )
     try:
         if stream_provider == "openai":
             stream_iter = _stream_openai_reply(
                 text,
                 memory_context=memory_context or None,
                 user_id=user_id,
-                dialog_context=dialog_request_ctx.get("dialog_context") or None,
+                dialog_context=general_session_context or None,
                 dialog_policy=dialog_request_ctx.get("dialog_policy") or None,
                 current_topic=dialog_request_ctx.get("current_topic") or None,
                 open_question=dialog_request_ctx.get("open_question") or None,
@@ -4072,7 +4771,7 @@ async def _stream_unified_conversation_events(
                 text,
                 memory_context=memory_context or None,
                 user_id=user_id,
-                dialog_context=dialog_request_ctx.get("dialog_context") or None,
+                dialog_context=general_session_context or None,
                 dialog_policy=dialog_request_ctx.get("dialog_policy") or None,
                 current_topic=dialog_request_ctx.get("current_topic") or None,
                 open_question=dialog_request_ctx.get("open_question") or None,

@@ -159,6 +159,8 @@ _TIME_OF_DAY_MAP = {
     "evening": "evening",
     "night": "night",
 }
+_GAME_CONTEXT_MAX_AGE_SEC = 600.0
+_GAME_CONTEXT_MAX_CANDIDATES = 3
 _EXPLICIT_MEMORY_PATTERNS = [
     re.compile(r"^\s*(?:please\s+)?remember(?:\s+that)?\s+", re.IGNORECASE),
     re.compile(r"^\s*(?:please\s+)?don't forget(?:\s+that)?\s+", re.IGNORECASE),
@@ -202,6 +204,9 @@ _MEMORY_SUMMARY_QUERY_PATTERNS = [
     re.compile(r"\bwhat do you know about me\b", re.IGNORECASE),
     re.compile(r"\bwhat do you remember about me\b", re.IGNORECASE),
     re.compile(r"\btell me about me\b", re.IGNORECASE),
+    re.compile(r"你了解我什么"),
+    re.compile(r"你知道我什么"),
+    re.compile(r"你记得我什么"),
 ]
 _MEMORY_QUERY_PATTERN_GROUPS = {
     "summary": _MEMORY_SUMMARY_QUERY_PATTERNS,
@@ -224,6 +229,51 @@ _FACT_FIELD_PHRASES = {
     "preferred_training_time": ("you prefer training in the {value}", "{value}"),
     "favorite_game": ("your favorite game is {value}", "{value}"),
 }
+
+
+def _memory_fact_clause(field: str, value: str) -> str:
+    normalized_value = _normalize_fact_value(field, value)
+    if not normalized_value:
+        return ""
+    templates = _FACT_FIELD_PHRASES.get(field)
+    if not templates:
+        return normalized_value
+    return str(templates[0]).format(value=normalized_value)
+
+
+def _normalize_game_context_kind(value: str) -> str:
+    normalized = normalize_memory_value(value, max_len=24).casefold()
+    if not normalized:
+        return "mentioned"
+    if "launch" in normalized or normalized in {"open", "start", "play"}:
+        return "launch"
+    if "recommend" in normalized or "alternative" in normalized:
+        return "recommend"
+    return "mentioned"
+
+
+def _coerce_recent_game_candidates(value: Any) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    if not isinstance(value, list):
+        return out
+    for item in value:
+        if isinstance(item, dict):
+            game_name = normalize_memory_value(str(item.get("game_name") or item.get("name") or ""), max_len=64)
+            if not game_name:
+                continue
+            out.append(
+                {
+                    "game_name": game_name,
+                    "ts": float(item.get("ts") or 0.0),
+                    "kind": _normalize_game_context_kind(str(item.get("kind") or "mentioned")),
+                    "source": normalize_memory_value(str(item.get("source") or ""), max_len=32),
+                }
+            )
+            continue
+        game_name = normalize_memory_value(str(item or ""), max_len=64)
+        if game_name:
+            out.append({"game_name": game_name, "ts": 0.0, "kind": "mentioned", "source": ""})
+    return out[:_GAME_CONTEXT_MAX_CANDIDATES]
 _NAME_STOPWORDS = {
     "a",
     "an",
@@ -611,6 +661,13 @@ class UserMemoryStore:
                 "last_game_reference_kind": "",
                 "last_game_reference_source": "",
                 "last_game_reference_ts": 0.0,
+                "last_game_mentioned": "",
+                "last_game_mentioned_ts": 0.0,
+                "last_game_recommended": "",
+                "last_game_recommended_ts": 0.0,
+                "last_game_launched": "",
+                "last_game_launched_ts": 0.0,
+                "recent_game_candidates": [],
                 "current_topic": "",
                 "open_question": "",
                 "dialog_summary": "",
@@ -640,6 +697,13 @@ class UserMemoryStore:
         profile.setdefault("last_game_reference_kind", "")
         profile.setdefault("last_game_reference_source", "")
         profile.setdefault("last_game_reference_ts", 0.0)
+        profile.setdefault("last_game_mentioned", "")
+        profile.setdefault("last_game_mentioned_ts", 0.0)
+        profile.setdefault("last_game_recommended", "")
+        profile.setdefault("last_game_recommended_ts", 0.0)
+        profile.setdefault("last_game_launched", "")
+        profile.setdefault("last_game_launched_ts", 0.0)
+        profile.setdefault("recent_game_candidates", [])
         profile.setdefault("current_topic", "")
         profile.setdefault("open_question", "")
         profile.setdefault("dialog_summary", "")
@@ -647,6 +711,7 @@ class UserMemoryStore:
         profile.setdefault("first_seen_ts", now_ts)
         profile.setdefault("last_seen_ts", now_ts)
         profile.setdefault("utterance_count", 0)
+        profile["recent_game_candidates"] = _coerce_recent_game_candidates(profile.get("recent_game_candidates"))
         self._migrate_legacy_profile_fields(profile, now_ts)
         return profile
 
@@ -670,6 +735,49 @@ class UserMemoryStore:
             history = []
             profile["game_history"] = history
         return history
+
+    def _recent_game_candidates_items(self, profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+        items = _coerce_recent_game_candidates(profile.get("recent_game_candidates"))
+        profile["recent_game_candidates"] = items
+        return items
+
+    def _push_recent_game_candidate(
+        self,
+        profile: Dict[str, Any],
+        *,
+        game_name: str,
+        now_ts: float,
+        reference_kind: str,
+        source: str,
+    ) -> None:
+        normalized_name = normalize_memory_value(game_name, max_len=64)
+        if not normalized_name:
+            return
+        items = self._recent_game_candidates_items(profile)
+        folded = normalized_name.casefold()
+        items = [item for item in items if str(item.get("game_name") or "").strip().casefold() != folded]
+        items.insert(
+            0,
+            {
+                "game_name": normalized_name,
+                "ts": float(now_ts),
+                "kind": _normalize_game_context_kind(reference_kind),
+                "source": normalize_memory_value(source, max_len=32),
+            },
+        )
+        profile["recent_game_candidates"] = items[:_GAME_CONTEXT_MAX_CANDIDATES]
+
+    @staticmethod
+    def _fresh_game_context_value(profile: Dict[str, Any], field: str, *, now_ts: float, max_age_sec: float) -> str:
+        name = normalize_memory_value(str(profile.get(field) or ""), max_len=64)
+        if not name:
+            return ""
+        if max_age_sec <= 0.0:
+            return name
+        ts = float(profile.get(f"{field}_ts") or 0.0)
+        if ts > 0.0 and now_ts - ts > max_age_sec:
+            return ""
+        return name
 
     def _active_fact_records(self, profile: Dict[str, Any], field: Optional[str] = None) -> List[Dict[str, Any]]:
         items = self._fact_items(profile)
@@ -823,6 +931,63 @@ class UserMemoryStore:
             profile["last_game_reference_kind"] = "launch"
             profile["last_game_reference_source"] = normalize_memory_value(source, max_len=32) or "conversation"
             profile["last_game_reference_ts"] = event_ts
+            profile["last_game_launched"] = normalized_name
+            profile["last_game_launched_ts"] = event_ts
+            profile["last_game_mentioned"] = normalized_name
+            profile["last_game_mentioned_ts"] = event_ts
+            self._push_recent_game_candidate(
+                profile,
+                game_name=normalized_name,
+                now_ts=event_ts,
+                reference_kind="launch",
+                source=source,
+            )
+            self._save()
+
+    def remember_game_mentions(
+        self,
+        user_id: str,
+        game_names: List[str],
+        *,
+        reference_kind: str = "mentioned",
+        source: str = "assistant",
+        now_ts: Optional[float] = None,
+    ) -> None:
+        if not user_id:
+            return
+        cleaned_names: List[str] = []
+        seen = set()
+        for raw in game_names:
+            game_name = normalize_memory_value(str(raw or ""), max_len=64)
+            if not game_name:
+                continue
+            folded = game_name.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            cleaned_names.append(game_name)
+        if not cleaned_names:
+            return
+
+        reference_ts = float(now_ts if now_ts is not None else time.time())
+        normalized_kind = _normalize_game_context_kind(reference_kind)
+        normalized_source = normalize_memory_value(source, max_len=32) or "assistant"
+        with self._lock:
+            reload_ok = self._reload_if_external_change_unlocked()
+            if not reload_ok:
+                return
+            profile = self._ensure_profile(user_id, reference_ts)
+            profile["last_seen_ts"] = reference_ts
+            for game_name in cleaned_names:
+                profile["last_game_mentioned"] = game_name
+                profile["last_game_mentioned_ts"] = reference_ts
+                self._push_recent_game_candidate(
+                    profile,
+                    game_name=game_name,
+                    now_ts=reference_ts,
+                    reference_kind=normalized_kind,
+                    source=normalized_source,
+                )
             self._save()
 
     def set_game_reference(
@@ -838,7 +1003,7 @@ class UserMemoryStore:
         if not user_id or not normalized_name:
             return
         reference_ts = float(now_ts if now_ts is not None else time.time())
-        normalized_kind = normalize_memory_value(reference_kind, max_len=24) or "mentioned"
+        normalized_kind = _normalize_game_context_kind(reference_kind)
         normalized_source = normalize_memory_value(source, max_len=32) or "assistant"
         with self._lock:
             reload_ok = self._reload_if_external_change_unlocked()
@@ -850,9 +1015,24 @@ class UserMemoryStore:
             profile["last_game_reference_kind"] = normalized_kind
             profile["last_game_reference_source"] = normalized_source
             profile["last_game_reference_ts"] = reference_ts
+            profile["last_game_mentioned"] = normalized_name
+            profile["last_game_mentioned_ts"] = reference_ts
+            if normalized_kind == "recommend":
+                profile["last_game_recommended"] = normalized_name
+                profile["last_game_recommended_ts"] = reference_ts
+            elif normalized_kind == "launch":
+                profile["last_game_launched"] = normalized_name
+                profile["last_game_launched_ts"] = reference_ts
+            self._push_recent_game_candidate(
+                profile,
+                game_name=normalized_name,
+                now_ts=reference_ts,
+                reference_kind=normalized_kind,
+                source=normalized_source,
+            )
             self._save()
 
-    def get_game_reference(self, user_id: str, *, max_age_sec: float = 1800.0) -> str:
+    def get_game_reference(self, user_id: str, *, max_age_sec: float = _GAME_CONTEXT_MAX_AGE_SEC) -> str:
         if not user_id:
             return ""
         now_ts = time.time()
@@ -864,13 +1044,11 @@ class UserMemoryStore:
             profile = profiles.get(user_id)
             if not isinstance(profile, dict):
                 return ""
-            name = normalize_memory_value(str(profile.get("last_game_reference") or ""), max_len=64)
-            if not name:
-                return ""
-            reference_ts = float(profile.get("last_game_reference_ts") or 0.0)
-            if max_age_sec > 0.0 and reference_ts > 0.0 and now_ts - reference_ts > max_age_sec:
-                return ""
-            return name
+            for field in ("last_game_mentioned", "last_game_recommended", "last_game_launched", "last_game_reference"):
+                name = self._fresh_game_context_value(profile, field, now_ts=now_ts, max_age_sec=max_age_sec)
+                if name:
+                    return name
+            return ""
 
     def _upsert_fact(
         self,
@@ -1539,9 +1717,44 @@ class UserMemoryStore:
             if current_topic:
                 lines.append(f"Current topic: {current_topic}.")
 
+            last_game_mentioned = self._fresh_game_context_value(
+                profile,
+                "last_game_mentioned",
+                now_ts=time.time(),
+                max_age_sec=_GAME_CONTEXT_MAX_AGE_SEC,
+            )
+            if last_game_mentioned:
+                lines.append(f"Recent mentioned game: {last_game_mentioned}.")
+
+            last_game_recommended = self._fresh_game_context_value(
+                profile,
+                "last_game_recommended",
+                now_ts=time.time(),
+                max_age_sec=_GAME_CONTEXT_MAX_AGE_SEC,
+            )
+            if last_game_recommended:
+                lines.append(f"Recent recommended game: {last_game_recommended}.")
+
+            last_game_launched = self._fresh_game_context_value(
+                profile,
+                "last_game_launched",
+                now_ts=time.time(),
+                max_age_sec=_GAME_CONTEXT_MAX_AGE_SEC,
+            )
+            if last_game_launched:
+                lines.append(f"Recent launched game: {last_game_launched}.")
+
             last_game_reference = normalize_memory_value(str(profile.get("last_game_reference") or ""), max_len=64)
             if last_game_reference:
                 lines.append(f"Recent referenced game: {last_game_reference}.")
+
+            recent_candidates = [
+                normalize_memory_value(str(item.get("game_name") or ""), max_len=64)
+                for item in self._recent_game_candidates_items(profile)
+            ]
+            recent_candidates = [item for item in recent_candidates if item]
+            if recent_candidates:
+                lines.append("Recent game candidates: " + ", ".join(recent_candidates) + ".")
 
             open_question = normalize_dialog_text(str(profile.get("open_question") or ""), max_len=160)
             if open_question:
@@ -1615,7 +1828,41 @@ class UserMemoryStore:
             return context
 
     def build_facts_reply(self, user_id: str) -> str:
-        return self.answer_memory_query(user_id, "")
+        with self._lock:
+            self._reload_if_external_change_unlocked()
+            profiles = self._db.get("profiles")
+            if not isinstance(profiles, dict):
+                return ""
+            profile = profiles.get(user_id)
+            if not isinstance(profile, dict):
+                return ""
+            self._sync_legacy_profile_fields(profile)
+            facts: List[str] = []
+            name = self._latest_fact_value(profile, "name")
+            if name:
+                facts.append(f"your name is {name}")
+            favorite_game = self._latest_fact_value(profile, "favorite_game")
+            if favorite_game:
+                facts.append(f"your favorite game is {favorite_game}")
+            likes_clean = self._active_fact_values(profile, "like", limit=3)
+            if likes_clean:
+                facts.append("you like " + ", ".join(likes_clean))
+            dislikes_clean = self._active_fact_values(profile, "dislike", limit=3)
+            if dislikes_clean:
+                facts.append("you dislike " + ", ".join(dislikes_clean))
+            goals_clean = self._active_fact_values(profile, "goal", limit=2)
+            if goals_clean:
+                facts.append("your goals include " + ", ".join(goals_clean))
+            preferred_day = self._latest_fact_value(profile, "preferred_training_day")
+            if preferred_day:
+                facts.append(f"you prefer training on {preferred_day}")
+            preferred_time = self._latest_fact_value(profile, "preferred_training_time")
+            if preferred_time:
+                facts.append(f"you prefer training in the {preferred_time}")
+            origin = self._latest_fact_value(profile, "origin")
+            if origin:
+                facts.append(f"you are from {origin}")
+            return "; ".join(facts)
 
     def profile_snapshot(self, user_id: str) -> Dict[str, Any]:
         with self._lock:
@@ -1678,6 +1925,7 @@ class UserMemoryStore:
                             "ts": float(item.get("ts") or 0.0),
                         }
                     )
+            recent_candidates = self._recent_game_candidates_items(profile)
             return {
                 "display_name": str(profile.get("display_name") or user_id).strip() or user_id,
                 "name": str(profile.get("name") or "").strip(),
@@ -1691,6 +1939,15 @@ class UserMemoryStore:
                 "preferred_training_time": str(profile.get("preferred_training_time") or "").strip(),
                 "last_game_reference": str(profile.get("last_game_reference") or "").strip(),
                 "last_game_reference_kind": str(profile.get("last_game_reference_kind") or "").strip(),
+                "last_game_reference_source": str(profile.get("last_game_reference_source") or "").strip(),
+                "last_game_reference_ts": float(profile.get("last_game_reference_ts") or 0.0),
+                "last_game_mentioned": str(profile.get("last_game_mentioned") or "").strip(),
+                "last_game_mentioned_ts": float(profile.get("last_game_mentioned_ts") or 0.0),
+                "last_game_recommended": str(profile.get("last_game_recommended") or "").strip(),
+                "last_game_recommended_ts": float(profile.get("last_game_recommended_ts") or 0.0),
+                "last_game_launched": str(profile.get("last_game_launched") or "").strip(),
+                "last_game_launched_ts": float(profile.get("last_game_launched_ts") or 0.0),
+                "recent_game_candidates": recent_candidates,
                 "facts": facts_out,
                 "episodes": episode_out,
                 "recent_games": recent_games,
@@ -1711,7 +1968,7 @@ class UserMemoryStore:
             return prefix + f"{label} {clean[0]}."
         return prefix + f"{label} " + ", ".join(clean) + "."
 
-    def _episodic_memory_reply(self, profile: Dict[str, Any], query_text: str) -> str:
+    def _episodic_memory_matches(self, profile: Dict[str, Any], query_text: str) -> List[str]:
         normalized = " ".join((query_text or "").strip().lower().split())
         preferred_fields: List[str] = []
         if "name" in normalized:
@@ -1736,9 +1993,7 @@ class UserMemoryStore:
             if fact_source_hits:
                 break
         if fact_source_hits:
-            if len(fact_source_hits) == 1:
-                return f"You said: {fact_source_hits[0]}."
-            return "Here is what you said: " + " | ".join(fact_source_hits[:2]) + "."
+            return fact_source_hits[:2]
 
         relevant = self._retrieve_relevant_notes(profile, query_text)
         filtered_relevant = []
@@ -1764,22 +2019,97 @@ class UserMemoryStore:
                         relevant.append(text)
                         if len(relevant) >= 2:
                             break
-        relevant = [item for item in relevant if item]
+        return [item for item in relevant if item][:2]
+
+    def _episodic_memory_reply(self, profile: Dict[str, Any], query_text: str) -> str:
+        relevant = self._episodic_memory_matches(profile, query_text)
         if not relevant:
             return "I do not have a matching memory for that yet."
         if len(relevant) == 1:
             return f"You said: {relevant[0]}."
         return "Here is what you said: " + " | ".join(relevant[:2]) + "."
 
-    def answer_memory_query(self, user_id: str, query_text: str) -> str:
+    def _memory_query_payload_to_text(self, payload: Dict[str, Any]) -> str:
+        result_kind = str(payload.get("result_kind") or "").strip().lower()
+        facts = [item for item in payload.get("facts", []) or [] if isinstance(item, dict)]
+        notes = [normalize_dialog_text(str(item), max_len=120) for item in payload.get("notes", []) or []]
+        notes = [item for item in notes if item]
+        missing_field = str(payload.get("missing_field") or "").strip()
+        requested_label = str(payload.get("requested_label") or "").strip()
+
+        if result_kind == "known_specific_fact":
+            if facts:
+                spoken = str(facts[0].get("spoken_text") or "").strip()
+                if spoken:
+                    return f"I remember that {spoken}."
+            if notes:
+                if len(notes) == 1:
+                    return f"I remember you said {notes[0]}."
+                return "I remember you mentioned " + " and ".join(notes[:2]) + "."
+
+        if result_kind == "known_recent_notes":
+            if notes:
+                if len(notes) == 1:
+                    return f"I remember you said {notes[0]}."
+                return "I remember you mentioned " + " and ".join(notes[:2]) + "."
+
+        if result_kind == "known_profile_summary":
+            clauses = [str(item.get("spoken_text") or "").strip() for item in facts if str(item.get("spoken_text") or "").strip()]
+            if clauses:
+                if len(clauses) == 1:
+                    return f"So far I remember that {clauses[0]}."
+                if len(clauses) == 2:
+                    return f"So far I remember that {clauses[0]}, and {clauses[1]}."
+                return f"So far I remember that {clauses[0]}, {clauses[1]}, and {clauses[2]}."
+            if notes:
+                if len(notes) == 1:
+                    return f"So far I remember you mentioned {notes[0]}."
+                return "So far I remember you mentioned " + " and ".join(notes[:2]) + "."
+
+        if result_kind == "no_saved_profile":
+            if missing_field == "name":
+                return "I do not have your name saved yet."
+            if missing_field == "favorite_game":
+                return "I do not have your favorite game saved yet."
+            if missing_field == "origin":
+                return "I do not have where you are from saved yet."
+            if missing_field == "preferred_training_day":
+                return "I do not have your training day preference saved yet."
+            if missing_field == "preferred_training_time":
+                return "I do not have your preferred training time saved yet."
+            if requested_label:
+                return f"I do not have any saved {requested_label} yet."
+            return "I do not have much saved for you yet. Tell me a preference or goal and I will keep it in mind."
+
+        return normalize_dialog_text(str(payload.get("text") or ""), max_len=240)
+
+    def answer_memory_query_payload(self, user_id: str, query_text: str) -> Dict[str, Any]:
         with self._lock:
             self._reload_if_external_change_unlocked()
             profiles = self._db.get("profiles")
             if not isinstance(profiles, dict):
-                return "I do not have any saved details yet."
+                return {
+                    "type": "memory_query",
+                    "query_kind": "summary",
+                    "result_kind": "no_saved_profile",
+                    "binding_state": "bound_profile",
+                    "facts": [],
+                    "notes": [],
+                    "required_terms": [],
+                    "text": "I do not have much saved for you yet. Tell me a preference or goal and I will keep it in mind.",
+                }
             profile = profiles.get(user_id)
             if not isinstance(profile, dict):
-                return "I do not have any saved details yet."
+                return {
+                    "type": "memory_query",
+                    "query_kind": "summary",
+                    "result_kind": "no_saved_profile",
+                    "binding_state": "bound_profile",
+                    "facts": [],
+                    "notes": [],
+                    "required_terms": [],
+                    "text": "I do not have much saved for you yet. Tell me a preference or goal and I will keep it in mind.",
+                }
 
             self._sync_legacy_profile_fields(profile)
             normalized = " ".join((query_text or "").strip().lower().split())
@@ -1789,113 +2119,143 @@ class UserMemoryStore:
                     query_kind = kind
                     break
 
+            def fact_entry(field: str, value: str) -> Dict[str, str]:
+                clean = _normalize_fact_value(field, value)
+                return {
+                    "field": field,
+                    "value": clean,
+                    "spoken_text": _memory_fact_clause(field, clean),
+                }
+
+            payload: Dict[str, Any] = {
+                "type": "memory_query",
+                "query_kind": query_kind or "summary",
+                "result_kind": "no_saved_profile",
+                "binding_state": "bound_profile",
+                "facts": [],
+                "notes": [],
+                "required_terms": [],
+                "missing_field": "",
+                "requested_label": "",
+                "text": "",
+            }
+
             if query_kind == "name":
                 name = self._latest_fact_value(profile, "name")
-                return (
-                    f"From what I have saved: your name is {name}."
-                    if name
-                    else "I do not have your name saved yet."
-                )
+                if name:
+                    payload["result_kind"] = "known_specific_fact"
+                    payload["facts"] = [fact_entry("name", name)]
+                    payload["required_terms"] = [name]
+                else:
+                    payload["missing_field"] = "name"
 
-            if query_kind == "likes":
+            elif query_kind == "likes":
                 favorite_game = self._latest_fact_value(profile, "favorite_game")
                 if "favorite game" in normalized or "favourite game" in normalized:
-                    return (
-                        f"From what I have saved: your favorite game is {favorite_game}."
-                        if favorite_game
-                        else "I do not have your favorite game saved yet."
-                    )
-                likes = self._active_fact_values(profile, "like", limit=4)
-                if favorite_game and favorite_game.casefold() not in {value.casefold() for value in likes}:
-                    likes.append(favorite_game)
-                return self._answer_values(
-                    label="you like",
-                    values=likes,
-                    empty_text="I do not have any saved likes yet.",
-                )
+                    if favorite_game:
+                        payload["result_kind"] = "known_specific_fact"
+                        payload["facts"] = [fact_entry("favorite_game", favorite_game)]
+                        payload["required_terms"] = [favorite_game]
+                    else:
+                        payload["missing_field"] = "favorite_game"
+                else:
+                    likes = self._active_fact_values(profile, "like", limit=3)
+                    if favorite_game and favorite_game.casefold() not in {value.casefold() for value in likes}:
+                        likes.append(favorite_game)
+                    if likes:
+                        payload["result_kind"] = "known_profile_summary"
+                        payload["facts"] = [fact_entry("like", value) for value in likes[:3]]
+                        payload["required_terms"] = [str(item.get("value") or "") for item in payload["facts"][:2]]
+                    else:
+                        payload["missing_field"] = "like"
+                        payload["requested_label"] = "likes"
 
-            if query_kind == "dislikes":
-                return self._answer_values(
-                    label="you dislike",
-                    values=self._active_fact_values(profile, "dislike", limit=4),
-                    empty_text="I do not have any saved dislikes yet.",
-                )
+            elif query_kind == "dislikes":
+                dislikes = self._active_fact_values(profile, "dislike", limit=3)
+                if dislikes:
+                    payload["result_kind"] = "known_profile_summary"
+                    payload["facts"] = [fact_entry("dislike", value) for value in dislikes[:3]]
+                    payload["required_terms"] = [str(item.get("value") or "") for item in payload["facts"][:2]]
+                else:
+                    payload["missing_field"] = "dislike"
+                    payload["requested_label"] = "dislikes"
 
-            if query_kind == "goals":
+            elif query_kind == "goals":
                 values = self._active_fact_values(profile, "goal", limit=3)
-                if not values:
-                    return "I do not have any saved goals yet."
-                if len(values) == 1:
-                    return f"From what I have saved: your goal is {values[0]}."
-                return "From what I have saved: your goals are " + ", ".join(values) + "."
+                if values:
+                    payload["result_kind"] = "known_profile_summary"
+                    payload["facts"] = [fact_entry("goal", value) for value in values[:3]]
+                    payload["required_terms"] = [str(item.get("value") or "") for item in payload["facts"][:2]]
+                else:
+                    payload["missing_field"] = "goal"
+                    payload["requested_label"] = "goals"
 
-            if query_kind == "origin":
+            elif query_kind == "origin":
                 origin = self._latest_fact_value(profile, "origin")
-                return (
-                    f"From what I have saved: you are from {origin}."
-                    if origin
-                    else "I do not have your origin saved yet."
-                )
+                if origin:
+                    payload["result_kind"] = "known_specific_fact"
+                    payload["facts"] = [fact_entry("origin", origin)]
+                    payload["required_terms"] = [origin]
+                else:
+                    payload["missing_field"] = "origin"
 
-            if query_kind == "schedule":
+            elif query_kind == "schedule":
                 preferred_day = self._latest_fact_value(profile, "preferred_training_day")
                 preferred_time = self._latest_fact_value(profile, "preferred_training_time")
-                parts: List[str] = []
+                facts: List[Dict[str, str]] = []
                 if preferred_day:
-                    parts.append(f"you prefer training on {preferred_day}")
+                    facts.append(fact_entry("preferred_training_day", preferred_day))
                 if preferred_time:
-                    parts.append(f"you prefer training in the {preferred_time}")
-                if not parts:
-                    return "I do not have your training schedule preference saved yet."
-                return "From what I have saved: " + "; ".join(parts) + "."
+                    facts.append(fact_entry("preferred_training_time", preferred_time))
+                if facts:
+                    payload["result_kind"] = "known_profile_summary"
+                    payload["facts"] = facts
+                    payload["required_terms"] = [str(item.get("value") or "") for item in facts]
+                else:
+                    payload["missing_field"] = "preferred_training_day"
+                    payload["requested_label"] = "training schedule preferences"
 
-            if query_kind == "episodic":
-                return self._episodic_memory_reply(profile, query_text)
+            elif query_kind == "episodic":
+                notes = self._episodic_memory_matches(profile, query_text)
+                if notes:
+                    payload["result_kind"] = "known_recent_notes"
+                    payload["notes"] = notes[:2]
+                else:
+                    payload["requested_label"] = "matching memories"
 
-            include_notes = query_kind == ""
-            facts: List[str] = []
-            name = self._latest_fact_value(profile, "name")
-            if name:
-                facts.append(f"your name is {name}")
+            else:
+                facts: List[Dict[str, str]] = []
+                name = self._latest_fact_value(profile, "name")
+                if name:
+                    facts.append(fact_entry("name", name))
+                favorite_game = self._latest_fact_value(profile, "favorite_game")
+                if favorite_game:
+                    facts.append(fact_entry("favorite_game", favorite_game))
+                likes_clean = self._active_fact_values(profile, "like", limit=2)
+                for value in likes_clean[:1]:
+                    facts.append(fact_entry("like", value))
+                goals_clean = self._active_fact_values(profile, "goal", limit=2)
+                for value in goals_clean[:1]:
+                    facts.append(fact_entry("goal", value))
+                preferred_day = self._latest_fact_value(profile, "preferred_training_day")
+                if preferred_day and len(facts) < 3:
+                    facts.append(fact_entry("preferred_training_day", preferred_day))
+                notes = profile.get("recent_notes")
+                notes_clean: List[str] = []
+                if isinstance(notes, list):
+                    notes_clean = [normalize_memory_value(str(item), max_len=90) for item in notes[-3:]]
+                    notes_clean = [item for item in notes_clean if item]
+                if facts:
+                    payload["result_kind"] = "known_profile_summary"
+                    payload["facts"] = facts[:3]
+                    payload["required_terms"] = [str(item.get("value") or "") for item in facts[:2]]
+                elif notes_clean:
+                    payload["result_kind"] = "known_recent_notes"
+                    payload["notes"] = notes_clean[:2]
 
-            favorite_game = self._latest_fact_value(profile, "favorite_game")
-            if favorite_game:
-                facts.append(f"your favorite game is {favorite_game}")
+            payload["text"] = self._memory_query_payload_to_text(payload)
+            return payload
 
-            likes_clean = self._active_fact_values(profile, "like", limit=3)
-            if likes_clean:
-                facts.append("you like " + ", ".join(likes_clean))
-
-            dislikes_clean = self._active_fact_values(profile, "dislike", limit=3)
-            if dislikes_clean:
-                facts.append("you dislike " + ", ".join(dislikes_clean))
-
-            goals_clean = self._active_fact_values(profile, "goal", limit=2)
-            if goals_clean:
-                facts.append("your goals include " + ", ".join(goals_clean))
-
-            preferred_day = self._latest_fact_value(profile, "preferred_training_day")
-            if preferred_day:
-                facts.append(f"you prefer training on {preferred_day}")
-
-            preferred_time = self._latest_fact_value(profile, "preferred_training_time")
-            if preferred_time:
-                facts.append(f"you prefer training in the {preferred_time}")
-
-            origin = self._latest_fact_value(profile, "origin")
-            if origin:
-                facts.append(f"you are from {origin}")
-
-            notes = profile.get("recent_notes")
-            notes_clean: List[str] = []
-            if isinstance(notes, list):
-                notes_clean = [normalize_memory_value(str(item), max_len=90) for item in notes[-3:]]
-                notes_clean = [item for item in notes_clean if item]
-
-            if include_notes and notes_clean and not facts:
-                facts.append("recently you said " + " | ".join(notes_clean[:2]))
-
-            if not facts:
-                return "I only have a small amount of saved info so far. You can tell me your preferences and goals and I will remember them."
-
-            return "From what I have saved: " + "; ".join(facts) + "."
+    def answer_memory_query(self, user_id: str, query_text: str) -> str:
+        payload = self.answer_memory_query_payload(user_id, query_text)
+        return normalize_dialog_text(str(payload.get("text") or ""), max_len=240)

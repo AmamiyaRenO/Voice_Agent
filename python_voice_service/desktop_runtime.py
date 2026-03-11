@@ -32,6 +32,10 @@ from desktop_audio_agent import (
     normalize_streaming_asr_mode,
 )
 try:
+    from .speaker_id import resolve_speaker_profiles_path
+except Exception:
+    from speaker_id import resolve_speaker_profiles_path
+try:
     from .game_grounding import normalize_manifest_payload
     from .qmd_documents import (
         export_game_qmd,
@@ -88,6 +92,54 @@ def _safe_json_float(value: Any, default: float) -> float:
     if not math.isfinite(number):
         return float(default)
     return number
+
+
+def _parse_user_sequence(user_id: str) -> Optional[int]:
+    normalized = str(user_id or "").strip().lower()
+    if not normalized.startswith("user_"):
+        return None
+    suffix = normalized[5:]
+    if not suffix.isdigit():
+        return None
+    try:
+        return max(1, int(suffix))
+    except Exception:
+        return None
+
+
+def _format_user_id(index: int) -> str:
+    return f"user_{max(1, int(index)):03d}"
+
+
+def _next_memory_user_id(root: Dict[str, Any]) -> Tuple[str, int]:
+    profiles = root.get("profiles", {})
+    used_ids = {
+        str(key or "").strip().lower()
+        for key in (profiles.keys() if isinstance(profiles, dict) else [])
+        if str(key or "").strip()
+    }
+    try:
+        next_index = max(1, int(root.get("next_user_index") or 1))
+    except Exception:
+        next_index = 1
+    candidate = next_index
+    candidate_id = _format_user_id(candidate)
+    while candidate_id.lower() in used_ids:
+        candidate += 1
+        candidate_id = _format_user_id(candidate)
+    return candidate_id, candidate
+
+
+def _advance_memory_next_user_index(root: Dict[str, Any], user_id: str) -> None:
+    try:
+        current = max(1, int(root.get("next_user_index") or 1))
+    except Exception:
+        current = 1
+    sequence = _parse_user_sequence(user_id)
+    if sequence is None:
+        root["next_user_index"] = current
+        return
+    root["next_user_index"] = max(current, sequence + 1)
 
 
 def _choose_existing_path(preferred: Path, *fallbacks: Path) -> Path:
@@ -613,6 +665,36 @@ def _save_memory_root(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _load_speaker_profiles_root(path: Path) -> Dict[str, Any]:
+    payload = _load_json_object(path)
+    if not payload:
+        payload = {"version": 1, "users": {}}
+    payload.setdefault("version", 1)
+    payload.setdefault("users", {})
+    if not isinstance(payload["users"], dict):
+        payload["users"] = {}
+    return payload
+
+
+def _speaker_profiles_summary(memory_path: Path) -> Dict[str, Dict[str, Any]]:
+    root = _load_speaker_profiles_root(resolve_speaker_profiles_path(memory_path=str(memory_path)))
+    users = root.get("users", {}) if isinstance(root, dict) else {}
+    output: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(users, dict):
+        return output
+    for user_id, payload in users.items():
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id or not isinstance(payload, dict):
+            continue
+        output[normalized_user_id] = {
+            "clip_count": int(payload.get("clip_count") or 0),
+            "updated_ts": float(payload.get("updated_ts") or 0.0),
+            "created_ts": float(payload.get("created_ts") or 0.0),
+            "has_profile": bool(payload.get("centroid")),
+        }
+    return output
+
+
 def _legacy_profile_to_facts(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
     now_ts = float(time.time())
     facts: List[Dict[str, Any]] = []
@@ -664,6 +746,30 @@ def _normalize_memory_profile(user_id: str, incoming: Dict[str, Any], existing: 
             base[key] = []
     for key in ("preferred_training_day", "preferred_training_time", "current_topic", "open_question", "dialog_summary", "origin", "favorite_game"):
         base[key] = str(incoming.get(key) or base.get(key) or "").strip()
+    for key in (
+        "last_game_reference",
+        "last_game_reference_kind",
+        "last_game_reference_source",
+        "last_game_mentioned",
+        "last_game_recommended",
+        "last_game_launched",
+    ):
+        base[key] = str(incoming.get(key) or base.get(key) or "").strip()
+    for key in (
+        "last_game_reference_ts",
+        "last_game_mentioned_ts",
+        "last_game_recommended_ts",
+        "last_game_launched_ts",
+    ):
+        try:
+            base[key] = float(incoming.get(key) or base.get(key) or 0.0)
+        except Exception:
+            base[key] = float(base.get(key) or 0.0)
+    recent_game_candidates = incoming.get("recent_game_candidates", base.get("recent_game_candidates", []))
+    if isinstance(recent_game_candidates, list):
+        base["recent_game_candidates"] = recent_game_candidates
+    else:
+        base["recent_game_candidates"] = list(base.get("recent_game_candidates") or [])
     now_ts = float(time.time())
     base["first_seen_ts"] = float(incoming.get("first_seen_ts") or base.get("first_seen_ts") or now_ts)
     base["last_seen_ts"] = float(incoming.get("last_seen_ts") or base.get("last_seen_ts") or now_ts)
@@ -677,15 +783,18 @@ def _memory_payload(path: Path, selected_user_id: str, message: str) -> Dict[str
     root = _load_memory_root(path)
     profiles = root.get("profiles", {})
     identity_map = root.get("identity_map", {})
+    speaker_profiles = _speaker_profiles_summary(path)
+    suggested_user_id, next_user_index = _next_memory_user_id(root)
     users: List[Dict[str, Any]] = []
     for user_id in sorted([str(key).strip() for key in profiles.keys() if str(key).strip()], key=str.lower):
         profile = profiles.get(user_id) if isinstance(profiles, dict) else {}
         if not isinstance(profile, dict):
             profile = {}
-        sample_count = 0
+        identity_hits = 0
         for identity in identity_map.values() if isinstance(identity_map, dict) else []:
             if isinstance(identity, dict) and str(identity.get("user_id") or "").strip() == user_id:
-                sample_count += int(identity.get("sample_count") or 0)
+                identity_hits += int(identity.get("sample_count") or 0)
+        speaker_profile = speaker_profiles.get(user_id) or {}
         users.append(
             {
                 "user_id": user_id,
@@ -698,7 +807,9 @@ def _memory_payload(path: Path, selected_user_id: str, message: str) -> Dict[str
                 "facts_count": len([item for item in profile.get("facts", []) or [] if isinstance(item, dict) and str(item.get("status") or "active").strip().lower() == "active"]),
                 "episodes_count": len(profile.get("episodes", []) or []),
                 "utterance_count": int(profile.get("utterance_count") or 0),
-                "sample_count": sample_count,
+                "identity_hits": identity_hits,
+                "enrollment_clip_count": int(speaker_profile.get("clip_count") or 0),
+                "speaker_profile_ready": bool(speaker_profile.get("has_profile")),
                 "last_seen_iso": (
                     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(profile.get("last_seen_ts") or 0)))
                     if float(profile.get("last_seen_ts") or 0) > 0
@@ -709,6 +820,7 @@ def _memory_payload(path: Path, selected_user_id: str, message: str) -> Dict[str
     selected_profile = profiles.get(selected_user_id) if isinstance(profiles, dict) else {}
     if not isinstance(selected_profile, dict):
         selected_profile = {}
+    selected_speaker_profile = speaker_profiles.get(selected_user_id) or {}
     selected_identity_keys = []
     for key, identity in identity_map.items() if isinstance(identity_map, dict) else []:
         if isinstance(identity, dict) and str(identity.get("user_id") or "").strip() == selected_user_id:
@@ -718,10 +830,13 @@ def _memory_payload(path: Path, selected_user_id: str, message: str) -> Dict[str
         "message": message,
         "path": str(path),
         "user_count": len(users),
+        "next_user_index": int(next_user_index),
+        "suggested_user_id": str(suggested_user_id),
         "users": users,
         "selected_user_id": selected_user_id,
         "selected_profile": selected_profile,
         "selected_identity_keys": selected_identity_keys,
+        "selected_speaker_profile": selected_speaker_profile,
     }
 
 
@@ -1465,6 +1580,13 @@ async def _build_asr_status_payload() -> Dict[str, Any]:
         "last_error": str(status.last_error or ""),
         "live_captions_available": bool(getattr(status, "live_captions_available", False)),
         "live_captions_output_path": str(getattr(status, "live_captions_output_path", "") or ""),
+        "live_captions_status": str(getattr(status, "live_captions_status", "") or ""),
+        "live_captions_error": str(getattr(status, "live_captions_error", "") or ""),
+        "speaker_id_enabled": bool(getattr(status, "speaker_id_enabled", False)),
+        "speaker_id_ready": bool(getattr(status, "speaker_id_ready", False)),
+        "active_user_id": str(getattr(status, "active_user_id", "") or ""),
+        "last_speaker_match": dict(getattr(status, "last_speaker_match", {}) or {}),
+        "live_capture_enabled": bool(getattr(status, "live_capture_enabled", False)),
     }
     try:
         response = await panel_http.get(f"{DEFAULT_ASR_BASE_URL}/transcribe/config")
@@ -1858,13 +1980,31 @@ async def api_memory_post(request: Request) -> Dict[str, Any]:
     root = _load_memory_root(path)
     profiles = root["profiles"]
     identity_map = root["identity_map"]
+    if action == "create_user":
+        requested_user_id = str(payload.get("user_id") or "").strip()
+        created_user_id = requested_user_id
+        if not created_user_id:
+            created_user_id, _ = _next_memory_user_id(root)
+        if created_user_id in profiles:
+            raise HTTPException(status_code=400, detail=f"user already exists: {created_user_id}")
+        profiles[created_user_id] = _normalize_memory_profile(
+            created_user_id,
+            {"display_name": created_user_id},
+            None,
+        )
+        _advance_memory_next_user_index(root, created_user_id)
+        _save_memory_root(path, root)
+        return _memory_payload(path, created_user_id, "memory user created")
     if action == "update_user_raw":
         if not user_id:
             raise HTTPException(status_code=400, detail="user_id is required")
         profile = payload.get("profile")
         if not isinstance(profile, dict):
             raise HTTPException(status_code=400, detail="profile object is required")
+        created = user_id not in profiles
         profiles[user_id] = _normalize_memory_profile(user_id, profile, profiles.get(user_id))
+        if created:
+            _advance_memory_next_user_index(root, user_id)
         _save_memory_root(path, root)
         return _memory_payload(path, user_id, "memory user updated")
     if action == "delete_user":
@@ -1878,6 +2018,61 @@ async def api_memory_post(request: Request) -> Dict[str, Any]:
                     identity_map.pop(key, None)
         _save_memory_root(path, root)
         return _memory_payload(path, "", "memory user deleted")
+    raise HTTPException(status_code=400, detail="unknown action")
+
+
+@app.get("/api/speaker-profiles")
+async def api_speaker_profiles_get() -> Dict[str, Any]:
+    payload = await audio_agent.speaker_profiles_status()
+    payload["status"] = "ok"
+    payload["message"] = "speaker profiles loaded"
+    return payload
+
+
+@app.post("/api/speaker-profiles")
+async def api_speaker_profiles_post(request: Request) -> Dict[str, Any]:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="json object body is required")
+    action = str(payload.get("action") or "").strip().lower()
+    user_id = str(payload.get("user_id") or "").strip()
+    try:
+        if action in {"", "status"}:
+            result = await audio_agent.speaker_profiles_status()
+            result["status"] = "ok"
+            result["message"] = "speaker profiles loaded"
+            return result
+        if action == "record_sample":
+            timeout_seconds = _safe_json_float(payload.get("timeout_seconds"), 20.0)
+            sample_summary = await audio_agent.record_speaker_profile_sample(
+                user_id=user_id,
+                timeout_seconds=timeout_seconds,
+            )
+            result = await audio_agent.speaker_profiles_status()
+            result["status"] = "ok"
+            result["message"] = "speaker enrollment clip captured"
+            result["sample"] = sample_summary
+            return result
+        if action == "commit_profile":
+            summary = await audio_agent.commit_speaker_profile(user_id=user_id)
+            result = await audio_agent.speaker_profiles_status()
+            result["status"] = "ok"
+            result["message"] = "speaker profile committed"
+            result["profile"] = summary
+            return result
+        if action == "clear_profile":
+            summary = await audio_agent.clear_speaker_profile(user_id=user_id)
+            result = await audio_agent.speaker_profiles_status()
+            result["status"] = "ok"
+            result["message"] = "speaker profile cleared"
+            result["profile"] = summary
+            return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=408, detail="timed out waiting for next enrollment clip") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     raise HTTPException(status_code=400, detail="unknown action")
 
 

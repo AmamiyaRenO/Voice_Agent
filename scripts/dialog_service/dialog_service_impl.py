@@ -294,6 +294,13 @@ def _normalize_policy_text(text: str) -> str:
     return _POLICY_WHITESPACE.sub(" ", (text or "").strip().lower())
 
 
+def _normalize_identity_resolution(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "none":
+        return "none"
+    return "auto"
+
+
 def _tokenize_policy_text(text: str) -> Set[str]:
     normalized = _normalize_policy_text(text)
     if not normalized:
@@ -377,6 +384,40 @@ class DialogService:
         self._prepare_memory_query_semantic_vectors()
         if os.environ.get("DIALOG_SPEAK_AUDIO"):
             print("[dialog] NOTE: DIALOG_SPEAK_AUDIO is set but will be ignored (forced off for AEC).")
+
+    def _remember_game_context(
+        self,
+        *,
+        user_id: Optional[str],
+        text: str,
+        primary_game_name: str = "",
+        reference_kind: str = "mentioned",
+        source: str = "assistant",
+    ) -> None:
+        if not user_id or self.user_memory is None or self.game_catalog is None:
+            return
+        mention_names = self.game_catalog.extract_game_mentions(text, limit=3)
+        primary_name = str(primary_game_name or "").strip()
+        mention_names = [
+            name
+            for name in mention_names
+            if name and name.casefold() != primary_name.casefold()
+        ]
+        if mention_names:
+            self.user_memory.remember_game_mentions(
+                user_id,
+                mention_names,
+                reference_kind="mentioned",
+                source=source,
+            )
+        target_name = primary_name or (mention_names[-1] if mention_names else "")
+        if target_name:
+            self.user_memory.set_game_reference(
+                user_id,
+                game_name=target_name,
+                reference_kind=reference_kind if primary_name else "mentioned",
+                source=source,
+            )
 
     def start(self) -> None:
         print(f"[dialog] connecting to mqtt {self.cfg.host}:{self.cfg.port}")
@@ -592,7 +633,18 @@ class DialogService:
             "current_topic": "",
             "open_question": "",
         }
-        if not user_id or self.user_memory is None or not self.cfg.enable_dialog_context:
+        if not user_id or self.user_memory is None:
+            return result
+        try:
+            self._remember_game_context(
+                user_id=user_id,
+                text=user_text,
+                reference_kind="mentioned",
+                source="user",
+            )
+        except Exception as exc:
+            print(f"[dialog] game context update failed: {exc}")
+        if not self.cfg.enable_dialog_context:
             return result
 
         slots = self.user_memory.get_dialog_slots(user_id)
@@ -710,6 +762,7 @@ class DialogService:
             return
         corr_id = payload.get("corr_id")
         user_id = str(payload.get("user_id") or "").strip() or None
+        identity_resolution = _normalize_identity_resolution(payload.get("identity_resolution"))
         barge_in = bool(payload.get("barge_in"))
         interrupted_tts_text = str(payload.get("interrupted_tts_text") or "").strip()
         memory_context = ""
@@ -728,13 +781,21 @@ class DialogService:
         }
         if self.user_memory is not None:
             try:
-                identity_key = speaker_identity_key(payload)
-                user_id = self.user_memory.resolve_user(identity_key)
-                memory_update = self.user_memory.remember_utterance(user_id, text)
-                memory_context = self.user_memory.build_memory_context(user_id, query_text=text)
-                dialog_request_ctx = self._build_dialog_request_context(user_id=user_id, user_text=text)
-                if dialog_request_ctx.get("dialog_policy") == "switch_topic":
-                    memory_context = ""
+                resolved_user_id = user_id
+                if (
+                    not resolved_user_id
+                    and identity_resolution != "none"
+                    and speaker_identity_key is not None
+                ):
+                    identity_key = speaker_identity_key(payload)
+                    resolved_user_id = self.user_memory.resolve_user(identity_key)
+                user_id = resolved_user_id
+                if user_id:
+                    memory_update = self.user_memory.remember_utterance(user_id, text)
+                    memory_context = self.user_memory.build_memory_context(user_id, query_text=text)
+                    dialog_request_ctx = self._build_dialog_request_context(user_id=user_id, user_text=text)
+                    if dialog_request_ctx.get("dialog_policy") == "switch_topic":
+                        memory_context = ""
             except Exception as exc:
                 print(f"[dialog] user memory resolve failed: {exc}")
                 memory_context = ""
@@ -833,11 +894,12 @@ class DialogService:
             grounded_reply = sanitize_tts_text(str(grounded.get("text") or "").strip())
             if grounded_reply:
                 grounded_game_name = str(grounded.get("game_name") or "").strip()
-                if user_id and self.user_memory is not None and grounded_game_name:
+                if user_id and self.user_memory is not None:
                     try:
-                        self.user_memory.set_game_reference(
-                            user_id,
-                            game_name=grounded_game_name,
+                        self._remember_game_context(
+                            user_id=user_id,
+                            text=grounded_reply,
+                            primary_game_name=grounded_game_name,
                             reference_kind=str(grounded.get("type") or "game_reply").strip() or "game_reply",
                             source="game_catalog",
                         )
@@ -986,6 +1048,16 @@ class DialogService:
             tts_speaker=tts_speaker,
             user_id=user_id,
         )
+        if user_id and self.user_memory is not None:
+            try:
+                self._remember_game_context(
+                    user_id=user_id,
+                    text=answer_text,
+                    reference_kind="mentioned",
+                    source="assistant",
+                )
+            except Exception as exc:
+                print(f"[dialog] game context update failed: {exc}")
         if user_id and self.user_memory is not None and self.cfg.enable_dialog_context:
             try:
                 self.user_memory.remember_dialog_turn(
