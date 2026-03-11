@@ -5,6 +5,9 @@
     "transcribe_model": "gpt-4o-mini-transcribe",
     "transcribe_prompt": ""
   },
+  "gemini": {
+    "api_key": ""
+  },
   "intent": {
     "use_llm_classifier": false,
     "use_moonshine_intent_recognizer": false,
@@ -39,7 +42,13 @@
     "VOICE_ASR_HOTWORD_STRATEGY": "commands_games_memory",
     "VOICE_ASR_STABLE_PARTIAL_REPEATS": "2",
     "VOICE_CLOUD_RESPONSE_PROVIDER": "openai",
+    "VOICE_AGENT_TTS_BACKEND": "piper",
     "OPENAI_RESPONSE_MODEL": "gpt-4o-mini",
+    "GEMINI_LIVE_MODEL": "models/gemini-2.5-flash-native-audio-latest",
+    "GEMINI_LIVE_VOICE": "Kore",
+    "KOKORO_TTS_VOICE": "af_heart",
+    "KOKORO_TTS_LANG_CODE": "a",
+    "KOKORO_TTS_SPEED": "1.0",
     "OLLAMA_MODEL": "qwen3.5:0.8b",
     "OLLAMA_THINK": "0",
     "OLLAMA_TEMPERATURE": "0.7",

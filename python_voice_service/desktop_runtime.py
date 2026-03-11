@@ -103,12 +103,16 @@ BUNDLE_ROOT = _resolve_bundle_root(APP_ROOT)
 STATE_DIR = _resolve_state_dir(APP_ROOT)
 REPO_ROOT = APP_ROOT
 SCRIPTS_DIR = APP_ROOT / "scripts"
-PANEL_DIR = _choose_existing_path(
+PANEL_DIR_CANDIDATES = [
     APP_ROOT / "runtime" / "panel",
     APP_ROOT / "Assets" / "StreamingAssets" / "panel",
     BUNDLE_ROOT / "runtime" / "panel",
     BUNDLE_ROOT / "Assets" / "StreamingAssets" / "panel",
-)
+]
+PANEL_LEGACY_DIR_CANDIDATES = [
+    APP_ROOT / "Assets" / "StreamingAssets" / "panel",
+    BUNDLE_ROOT / "Assets" / "StreamingAssets" / "panel",
+]
 DEFAULT_LAUNCHER_CONFIG = (
     STATE_DIR / "local_services.user.json"
     if bool(getattr(sys, "frozen", False))
@@ -135,7 +139,15 @@ DEFAULT_QMD_ROOT = (
 DEFAULT_PANEL_PORT = int(os.getenv("PANEL_PORT", "8787") or "8787")
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_OPENAI_RESPONSE_MODEL = "gpt-4o-mini"
+DEFAULT_GEMINI_LIVE_MODEL = "models/gemini-2.5-flash-native-audio-latest"
+DEFAULT_GEMINI_LIVE_VOICE = "Kore"
 DEFAULT_OLLAMA_MODEL = "qwen3.5:0.8b"
+OLLAMA_MODEL_OPTIONS = [
+    "qwen3.5:0.8b",
+    "qwen3.5:2b",
+    "qwen3.5:4b",
+    "qwen3.5:9b",
+]
 DEFAULT_LAUNCH_TRIGGERS = ["open", "start", "launch", "play", "begin", "load"]
 CORE_EXIT_KEYWORDS = ["back home", "go home", "return home", "go back"]
 DEFAULT_EXIT_KEYWORDS = [*CORE_EXIT_KEYWORDS, "quit", "exit", "stop", "cancel", "close", "close game"]
@@ -162,11 +174,83 @@ QWEN_SPEAKERS = [
     "Ono_Anna",
     "Sohee",
 ]
+KOKORO_VOICES = [
+    "af_alloy",
+    "af_aoede",
+    "af_bella",
+    "af_heart",
+    "af_jessica",
+    "af_kore",
+    "af_nicole",
+    "af_nova",
+    "af_river",
+    "af_sarah",
+    "af_sky",
+    "am_adam",
+    "am_echo",
+    "am_eric",
+    "am_fenrir",
+    "am_liam",
+    "am_michael",
+    "am_onyx",
+    "am_puck",
+    "am_santa",
+    "bf_alice",
+    "bf_emma",
+    "bf_isabella",
+    "bf_lily",
+    "bm_daniel",
+    "bm_fable",
+    "bm_george",
+    "bm_lewis",
+    "ef_dora",
+    "em_alex",
+    "em_santa",
+    "ff_siwis",
+    "hf_alpha",
+    "hf_beta",
+    "hm_omega",
+    "hm_psi",
+    "if_sara",
+    "im_nicola",
+    "jf_alpha",
+    "jf_gongitsune",
+    "jf_nezumi",
+    "jf_tebukuro",
+    "jm_kumo",
+    "pf_dora",
+    "pm_alex",
+    "pm_santa",
+    "zf_xiaobei",
+    "zf_xiaoni",
+    "zf_xiaoxiao",
+    "zf_xiaoyi",
+    "zm_yunjian",
+    "zm_yunxi",
+    "zm_yunxia",
+    "zm_yunyang",
+]
+KOKORO_LANG_CODES = {
+    "a": "American English",
+    "b": "British English",
+    "e": "Spanish",
+    "f": "French",
+    "h": "Hindi",
+    "i": "Italian",
+    "j": "Japanese",
+    "p": "Brazilian Portuguese",
+    "z": "Mandarin Chinese",
+}
+DEFAULT_KOKORO_VOICE = "af_heart"
 
 
 def _env(name: str, default: str = "") -> str:
     value = os.getenv(name)
     return value.strip() if value else default
+
+
+def _gemini_api_key_from_env() -> str:
+    return _env("GEMINI_API_KEY", "") or _env("GEMINI_KEY", "")
 
 
 def _resolve_launcher_config_path() -> Path:
@@ -282,9 +366,41 @@ def _normalize_pipeline_mode(value: Optional[str]) -> str:
 
 def _normalize_profile(value: Optional[str]) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"cloud", "openai", "online"}:
+    if normalized in {"cloud", "openai", "gemini", "online"}:
         return "cloud"
     return "local"
+
+
+def _normalize_cloud_response_provider(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"gemini", "google", "google-ai", "google_ai"}:
+        return "gemini"
+    return "openai"
+
+
+def _normalize_tts_backend(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"qwen", "qwen_tts", "qwen-tts"}:
+        return "qwen"
+    if normalized in {"kokoro", "kokoro_tts", "kokoro-tts"}:
+        return "kokoro"
+    return "piper"
+
+
+def _coerce_cloud_pipeline_for_provider(
+    *,
+    profile: str,
+    cloud_response_provider: str,
+    cloud_asr_mode: str,
+    cloud_streaming_asr_mode: str,
+) -> Tuple[str, str]:
+    normalized_profile = _normalize_profile(profile)
+    normalized_provider = _normalize_cloud_response_provider(cloud_response_provider)
+    normalized_cloud_asr = normalize_asr_mode(cloud_asr_mode)
+    normalized_cloud_streaming = normalize_streaming_asr_mode(cloud_streaming_asr_mode)
+    if normalized_profile == "cloud" and normalized_provider == "gemini":
+        return normalize_asr_mode("api"), normalize_streaming_asr_mode("gemini-live")
+    return normalized_cloud_asr, normalized_cloud_streaming
 
 
 def _read_env_string(merged: Dict[str, Any], key: str, fallback: str) -> str:
@@ -356,6 +472,7 @@ def _read_bool(node: Dict[str, Any], key: str, fallback: bool) -> bool:
 
 def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_path: Path, message: str) -> Dict[str, Any]:
     openai_obj = _ensure_dict(merged, "openai")
+    gemini_obj = _ensure_dict(merged, "gemini")
     intent_obj = _ensure_dict(merged, "intent")
     env_obj = _ensure_dict(merged, "env")
     paths_obj = _ensure_dict(merged, "paths")
@@ -363,6 +480,26 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
     openai_base_url = str(openai_obj.get("base_url") or _env("OPENAI_BASE_URL", "")).strip()
     openai_transcribe_model = str(openai_obj.get("transcribe_model") or _env("OPENAI_TRANSCRIBE_MODEL", "")).strip()
     openai_transcribe_prompt = str(openai_obj.get("transcribe_prompt") or _env("OPENAI_TRANSCRIBE_PROMPT", "")).strip()
+    gemini_api_key = str(gemini_obj.get("api_key") or _gemini_api_key_from_env()).strip()
+    gemini_live_model = str(
+        env_obj.get("GEMINI_LIVE_MODEL")
+        or env_obj.get("GEMINI_RESPONSE_MODEL")
+        or DEFAULT_GEMINI_LIVE_MODEL
+    ).strip() or DEFAULT_GEMINI_LIVE_MODEL
+    gemini_live_voice = str(env_obj.get("GEMINI_LIVE_VOICE") or DEFAULT_GEMINI_LIVE_VOICE).strip() or DEFAULT_GEMINI_LIVE_VOICE
+    tts_backend = _normalize_tts_backend(env_obj.get("VOICE_AGENT_TTS_BACKEND"))
+    kokoro_voice = str(env_obj.get("KOKORO_TTS_VOICE") or DEFAULT_KOKORO_VOICE).strip() or DEFAULT_KOKORO_VOICE
+    kokoro_lang_code = str(env_obj.get("KOKORO_TTS_LANG_CODE") or "a").strip().lower() or "a"
+    conversation_profile = _normalize_profile(env_obj.get("VOICE_CONVERSATION_PROFILE"))
+    cloud_response_provider = _normalize_cloud_response_provider(env_obj.get("VOICE_CLOUD_RESPONSE_PROVIDER"))
+    cloud_asr_mode, cloud_streaming_asr_mode = _coerce_cloud_pipeline_for_provider(
+        profile=conversation_profile,
+        cloud_response_provider=cloud_response_provider,
+        cloud_asr_mode=normalize_asr_mode(env_obj.get("VOICE_CLOUD_ASR_MODE")),
+        cloud_streaming_asr_mode=normalize_streaming_asr_mode(
+            env_obj.get("VOICE_CLOUD_STREAMING_ASR_MODE") or env_obj.get("VOICE_CLOUD_ASR_MODE")
+        ),
+    )
     return {
         "status": "ok",
         "message": message,
@@ -375,17 +512,25 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
         "openai_transcribe_model": openai_transcribe_model,
         "openai_base_url": openai_base_url,
         "openai_transcribe_prompt": openai_transcribe_prompt,
+        "gemini_api_key": gemini_api_key,
+        "gemini_api_key_set": bool(gemini_api_key),
+        "gemini_live_model": gemini_live_model,
+        "gemini_live_voice": gemini_live_voice,
+        "cloud_response_provider": cloud_response_provider,
+        "tts_backend": tts_backend,
+        "kokoro_voice": kokoro_voice,
+        "kokoro_lang_code": kokoro_lang_code,
+        "kokoro_supported_lang_codes": dict(KOKORO_LANG_CODES),
         "ollama_model": str(env_obj.get("OLLAMA_MODEL") or DEFAULT_OLLAMA_MODEL).strip() or DEFAULT_OLLAMA_MODEL,
+        "ollama_model_options": list(OLLAMA_MODEL_OPTIONS),
         "conversation_pipeline_mode": _normalize_pipeline_mode(env_obj.get("VOICE_PIPELINE_MODE")),
-        "conversation_profile": _normalize_profile(env_obj.get("VOICE_CONVERSATION_PROFILE")),
+        "conversation_profile": conversation_profile,
         "local_asr_mode": normalize_asr_mode(env_obj.get("VOICE_LOCAL_ASR_MODE")),
-        "cloud_asr_mode": normalize_asr_mode(env_obj.get("VOICE_CLOUD_ASR_MODE")),
+        "cloud_asr_mode": cloud_asr_mode,
         "local_streaming_asr_mode": normalize_streaming_asr_mode(
             env_obj.get("VOICE_LOCAL_STREAMING_ASR_MODE") or env_obj.get("VOICE_LOCAL_ASR_MODE")
         ),
-        "cloud_streaming_asr_mode": normalize_streaming_asr_mode(
-            env_obj.get("VOICE_CLOUD_STREAMING_ASR_MODE") or env_obj.get("VOICE_CLOUD_ASR_MODE")
-        ),
+        "cloud_streaming_asr_mode": cloud_streaming_asr_mode,
         "asr_hotword_strategy": normalize_hotword_strategy(env_obj.get("VOICE_ASR_HOTWORD_STRATEGY")),
         "asr_stable_partial_repeats": max(
             1,
@@ -799,6 +944,9 @@ async def _on_startup() -> None:
     await audio_agent.start()
     try:
         _, _, _, _, merged = _load_launcher_config_pair()
+        note = await _apply_runtime_live(merged)
+        if note:
+            log_store.add("system", note, source="desktop_runtime")
         note = await _ensure_ollama_running(merged)
         if note:
             log_store.add("system", note, source="desktop_runtime")
@@ -813,11 +961,20 @@ async def _on_shutdown() -> None:
     await audio_agent.stop()
 
 
+def _panel_file_response_from_candidates(name: str, panel_dirs: List[Path]) -> FileResponse:
+    for panel_dir in panel_dirs:
+        path = panel_dir / name
+        if path.exists():
+            return FileResponse(path)
+    raise HTTPException(status_code=404, detail="panel asset not found")
+
+
 def _panel_file_response(name: str) -> FileResponse:
-    path = PANEL_DIR / name
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="panel asset not found")
-    return FileResponse(path)
+    return _panel_file_response_from_candidates(name, PANEL_DIR_CANDIDATES)
+
+
+def _panel_legacy_file_response(name: str) -> FileResponse:
+    return _panel_file_response_from_candidates(name, PANEL_LEGACY_DIR_CANDIDATES)
 
 
 async def _probe_ollama(model: str) -> Dict[str, Any]:
@@ -965,12 +1122,22 @@ async def _apply_runtime_live(merged: Dict[str, Any]) -> str:
     os.environ["VOICE_CLOUD_STREAMING_ASR_MODE"] = runtime["cloud_streaming_asr_mode"]
     os.environ["VOICE_ASR_HOTWORD_STRATEGY"] = runtime["asr_hotword_strategy"]
     os.environ["VOICE_ASR_STABLE_PARTIAL_REPEATS"] = str(runtime["asr_stable_partial_repeats"])
+    os.environ["VOICE_CLOUD_RESPONSE_PROVIDER"] = runtime["cloud_response_provider"]
+    os.environ["VOICE_AGENT_TTS_BACKEND"] = runtime["tts_backend"]
+    os.environ["KOKORO_TTS_VOICE"] = runtime["kokoro_voice"]
+    os.environ["KOKORO_TTS_LANG_CODE"] = runtime["kokoro_lang_code"]
+    if runtime["gemini_api_key"]:
+        os.environ["GEMINI_API_KEY"] = runtime["gemini_api_key"]
+    else:
+        os.environ.pop("GEMINI_API_KEY", None)
+    os.environ["GEMINI_LIVE_MODEL"] = runtime["gemini_live_model"]
+    os.environ["GEMINI_LIVE_VOICE"] = runtime["gemini_live_voice"]
     request_payload = {
         "pipeline_mode": runtime["conversation_pipeline_mode"],
         "profile": runtime["conversation_profile"],
         "local_asr_mode": runtime["local_asr_mode"],
         "cloud_asr_mode": runtime["cloud_asr_mode"],
-        "cloud_response_provider": "openai",
+        "cloud_response_provider": runtime["cloud_response_provider"],
         "openai_api_key": runtime["openai_api_key"],
         "openai_base_url": runtime["openai_base_url"],
         "openai_transcribe_model": runtime["openai_transcribe_model"],
@@ -979,12 +1146,16 @@ async def _apply_runtime_live(merged: Dict[str, Any]) -> str:
         "local_response_model": runtime["ollama_model"],
     }
     notes: List[str] = []
-    try:
-        response = await panel_http.post(f"{DEFAULT_ASR_BASE_URL}/conversation/config", json=request_payload)
-        if not response.is_success:
-            notes.append(response.text.strip() or f"conversation config HTTP {response.status_code}")
-    except Exception as exc:
-        notes.append(f"conversation config failed: {exc}")
+    if not (
+        runtime["conversation_profile"] == "cloud"
+        and runtime["cloud_response_provider"] == "gemini"
+    ):
+        try:
+            response = await panel_http.post(f"{DEFAULT_ASR_BASE_URL}/conversation/config", json=request_payload)
+            if not response.is_success:
+                notes.append(response.text.strip() or f"conversation config HTTP {response.status_code}")
+        except Exception as exc:
+            notes.append(f"conversation config failed: {exc}")
 
     try:
         await audio_agent.apply_runtime_config(
@@ -1038,6 +1209,12 @@ async def _pick_file_dialog(title: str, filter_text: str, initial_dir: str, init
 @app.get("/panel.html")
 async def panel_index() -> FileResponse:
     return _panel_file_response("panel.html")
+
+
+@app.get("/panel-legacy")
+@app.get("/panel-legacy.html")
+async def panel_legacy() -> FileResponse:
+    return _panel_legacy_file_response("panel.html")
 
 
 @app.get("/games")
@@ -1140,12 +1317,31 @@ async def api_voice_options() -> Dict[str, Any]:
         "current": audio_agent.active_voice_code,
         "models": models or ([current_model] if current_model else []),
         "modelCurrent": current_model,
+        "backends": ["piper", "qwen", "kokoro"],
+        "backendCurrent": audio_agent.active_tts_backend,
+        "qwenSpeakerCurrent": audio_agent.active_qwen_speaker,
+        "kokoroVoiceCurrent": audio_agent.active_kokoro_voice,
     }
 
 
 @app.get("/api/qwen/options")
 async def api_qwen_options() -> Dict[str, Any]:
     return {"speakers": QWEN_SPEAKERS, "current": audio_agent.active_qwen_speaker}
+
+
+@app.get("/api/kokoro/options")
+async def api_kokoro_options() -> Dict[str, Any]:
+    configured = _coerce_string_list(_env("KOKORO_TTS_VOICES", ""))
+    current = str(audio_agent.active_kokoro_voice or DEFAULT_KOKORO_VOICE).strip() or DEFAULT_KOKORO_VOICE
+    voices = configured or list(KOKORO_VOICES)
+    if current and current not in voices:
+        voices.append(current)
+    return {
+        "voices": voices,
+        "current": current,
+        "langCode": _env("KOKORO_TTS_LANG_CODE", "a"),
+        "supportedLangCodes": dict(KOKORO_LANG_CODES),
+    }
 
 
 @app.post("/api/voice")
@@ -1164,6 +1360,22 @@ async def api_voice(request: Request) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="model identifier required")
         await audio_agent.set_tts_options(model=model)
         return {"status": "ok", "message": f"tts model set to {model}"}
+    if action in {"set_backend", "backend"}:
+        backend = _normalize_tts_backend(payload.get("backend") or payload.get("value"))
+        await audio_agent.set_tts_options(backend=backend)
+        return {"status": "ok", "message": f"tts backend set to {backend}"}
+    if action in {"set_qwen_speaker", "qwen_speaker"}:
+        qwen_speaker = str(payload.get("speaker") or payload.get("voice") or payload.get("value") or "").strip()
+        if not qwen_speaker:
+            raise HTTPException(status_code=400, detail="qwen speaker required")
+        await audio_agent.set_tts_options(qwen_speaker=qwen_speaker)
+        return {"status": "ok", "message": f"qwen speaker set to {qwen_speaker}"}
+    if action in {"set_kokoro_voice", "kokoro_voice"}:
+        kokoro_voice = str(payload.get("voice") or payload.get("value") or "").strip()
+        if not kokoro_voice:
+            raise HTTPException(status_code=400, detail="kokoro voice required")
+        await audio_agent.set_tts_options(kokoro_voice=kokoro_voice)
+        return {"status": "ok", "message": f"kokoro voice set to {kokoro_voice}"}
     raise HTTPException(status_code=400, detail="unknown voice action")
 
 
@@ -1173,15 +1385,16 @@ async def api_speak(request: Request) -> Dict[str, Any]:
     text = str(payload.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text required")
+    backend = _normalize_tts_backend(payload.get("backend") or audio_agent.active_tts_backend)
     await audio_agent.manual_speak(
         text=text,
-        voice=str(payload.get("voice") or "").strip() or audio_agent.active_voice_code,
+        voice=str(payload.get("voice") or "").strip() or None,
         model=str(payload.get("model") or "").strip() or audio_agent.active_tts_model,
         instruct=str(payload.get("instruct") or "").strip(),
-        backend="piper",
+        backend=backend,
         source="tester_panel",
     )
-    return {"status": "ok", "message": "playing locally"}
+    return {"status": "ok", "message": f"playing locally ({backend})"}
 
 
 @app.post("/api/qwen/speak")
@@ -1201,6 +1414,23 @@ async def api_qwen_speak(request: Request) -> Dict[str, Any]:
     return {"status": "ok", "message": "playing locally (qwen)"}
 
 
+@app.post("/api/kokoro/speak")
+async def api_kokoro_speak(request: Request) -> Dict[str, Any]:
+    payload = await request.json()
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text required")
+    voice = str(payload.get("voice") or payload.get("speaker") or "").strip() or audio_agent.active_kokoro_voice
+    await audio_agent.manual_speak(
+        text=text,
+        voice=voice,
+        instruct=str(payload.get("instruct") or "").strip(),
+        backend="kokoro",
+        source="tester_panel_kokoro",
+    )
+    return {"status": "ok", "message": "playing locally (kokoro)"}
+
+
 @app.get("/api/asr")
 async def api_asr_status() -> Dict[str, Any]:
     return await _build_asr_status_payload()
@@ -1213,6 +1443,7 @@ async def _build_asr_status_payload() -> Dict[str, Any]:
         "message": "streaming asr status",
         "mode": str(status.asr_mode or ""),
         "streaming_backend": str(status.streaming_backend or ""),
+        "tts_backend": str(status.tts_backend or ""),
         "available_modes": [str(item or "") for item in list(status.streaming_available_modes or [])],
         "listening": bool(status.listening),
         "assistant_speaking": bool(status.assistant_speaking),
@@ -1354,6 +1585,7 @@ async def api_runtime_config_post(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="json object body is required")
     user_path, default_path, _, user_cfg, merged = _load_launcher_config_pair()
     openai_obj = _ensure_dict(user_cfg, "openai")
+    gemini_obj = _ensure_dict(user_cfg, "gemini")
     intent_obj = _ensure_dict(user_cfg, "intent")
     env_obj = _ensure_dict(user_cfg, "env")
     paths_obj = _ensure_dict(user_cfg, "paths")
@@ -1370,12 +1602,22 @@ async def api_runtime_config_post(request: Request) -> Dict[str, Any]:
         openai_obj["base_url"] = str(payload.get("openai_base_url") or "").strip()
     if "openai_transcribe_prompt" in payload:
         openai_obj["transcribe_prompt"] = str(payload.get("openai_transcribe_prompt") or "").strip()
+    if "gemini_api_key" in payload:
+        gemini_obj["api_key"] = str(payload.get("gemini_api_key") or "").strip()
     if "ollama_model" in payload:
         env_obj["OLLAMA_MODEL"] = str(payload.get("ollama_model") or "").strip()
     if "conversation_pipeline_mode" in payload:
         env_obj["VOICE_PIPELINE_MODE"] = _normalize_pipeline_mode(payload.get("conversation_pipeline_mode"))
     if "conversation_profile" in payload:
         env_obj["VOICE_CONVERSATION_PROFILE"] = _normalize_profile(payload.get("conversation_profile"))
+    if "cloud_response_provider" in payload:
+        env_obj["VOICE_CLOUD_RESPONSE_PROVIDER"] = _normalize_cloud_response_provider(payload.get("cloud_response_provider"))
+    if "tts_backend" in payload:
+        env_obj["VOICE_AGENT_TTS_BACKEND"] = _normalize_tts_backend(payload.get("tts_backend"))
+    if "kokoro_voice" in payload:
+        env_obj["KOKORO_TTS_VOICE"] = str(payload.get("kokoro_voice") or "").strip()
+    if "kokoro_lang_code" in payload:
+        env_obj["KOKORO_TTS_LANG_CODE"] = str(payload.get("kokoro_lang_code") or "").strip().lower()
     if "local_asr_mode" in payload:
         env_obj["VOICE_LOCAL_ASR_MODE"] = normalize_asr_mode(payload.get("local_asr_mode"))
     if "cloud_asr_mode" in payload:
@@ -1394,6 +1636,20 @@ async def api_runtime_config_post(request: Request) -> Dict[str, Any]:
         env_obj["VOICE_ASR_STABLE_PARTIAL_REPEATS"] = str(repeats)
     if "openai_response_model" in payload:
         env_obj["OPENAI_RESPONSE_MODEL"] = str(payload.get("openai_response_model") or "").strip()
+    if "gemini_live_model" in payload or "gemini_response_model" in payload:
+        env_obj["GEMINI_LIVE_MODEL"] = str(
+            payload.get("gemini_live_model") or payload.get("gemini_response_model") or ""
+        ).strip()
+    if "gemini_live_voice" in payload:
+        env_obj["GEMINI_LIVE_VOICE"] = str(payload.get("gemini_live_voice") or "").strip()
+    coerced_cloud_asr_mode, coerced_cloud_streaming_asr_mode = _coerce_cloud_pipeline_for_provider(
+        profile=env_obj.get("VOICE_CONVERSATION_PROFILE"),
+        cloud_response_provider=env_obj.get("VOICE_CLOUD_RESPONSE_PROVIDER"),
+        cloud_asr_mode=env_obj.get("VOICE_CLOUD_ASR_MODE"),
+        cloud_streaming_asr_mode=env_obj.get("VOICE_CLOUD_STREAMING_ASR_MODE") or env_obj.get("VOICE_CLOUD_ASR_MODE"),
+    )
+    env_obj["VOICE_CLOUD_ASR_MODE"] = coerced_cloud_asr_mode
+    env_obj["VOICE_CLOUD_STREAMING_ASR_MODE"] = coerced_cloud_streaming_asr_mode
     if "launch_triggers" in payload:
         intent_obj["launch_triggers"] = [part.strip() for part in str(payload.get("launch_triggers") or "").replace(";", ",").split(",") if part.strip()]
     if "exit_keywords" in payload:

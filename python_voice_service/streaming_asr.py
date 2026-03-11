@@ -27,10 +27,14 @@ except Exception:  # pragma: no cover - optional at runtime
 STREAMING_ASR_MODE_MOONSHINE_SMALL = "moonshine-small"
 STREAMING_ASR_MODE_MOONSHINE_MEDIUM = "moonshine-medium"
 STREAMING_ASR_MODE_LIVE_CAPTIONS = "live-captions"
+STREAMING_ASR_MODE_API = "api"
+STREAMING_ASR_MODE_GEMINI_LIVE = "gemini-live"
 STREAMING_ASR_SUPPORTED_MODES = [
     STREAMING_ASR_MODE_MOONSHINE_SMALL,
     STREAMING_ASR_MODE_MOONSHINE_MEDIUM,
     STREAMING_ASR_MODE_LIVE_CAPTIONS,
+    STREAMING_ASR_MODE_API,
+    STREAMING_ASR_MODE_GEMINI_LIVE,
 ]
 WAKE_WORD = (os.getenv("WAKE_WORD", "rachel") or "rachel").strip().lower()
 WAKE_WORD_ALIASES = [
@@ -79,6 +83,23 @@ def normalize_streaming_asr_mode(value: Optional[str]) -> str:
         "livecaptions",
     }:
         return STREAMING_ASR_MODE_LIVE_CAPTIONS
+    if normalized in {
+        STREAMING_ASR_MODE_API,
+        "cloud-api",
+        "service-api",
+        "openai",
+        "online",
+    }:
+        return STREAMING_ASR_MODE_API
+    if normalized in {
+        STREAMING_ASR_MODE_GEMINI_LIVE,
+        "gemini-live-native-audio",
+        "gemini-native-audio",
+        "native-audio",
+        "native_audio",
+        "gemini",
+    }:
+        return STREAMING_ASR_MODE_GEMINI_LIVE
     if normalized in {
         "sherpa",
         "sherpa-onnx-en",

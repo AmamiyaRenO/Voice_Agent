@@ -77,6 +77,14 @@ textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0
 </div>
 </section>
 <section>
+<h2>Local Qwen Model</h2>
+<div class="controls">
+<label for="llmModelSelect">Model</label>
+<select id="llmModelSelect" onchange="setRuntimeModel(this.value)"></select>
+<span id="llmModelStatus" style="font-size:0.85rem;opacity:0.75;">Loading model options...</span>
+</div>
+</section>
+<section>
 <h2>Expressions</h2>
 <div class="controls">
 <label for="faceSeconds">Duration (s)</label>
@@ -182,10 +190,12 @@ textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0
 <section>
 <h2>Voice &amp; TTS</h2>
 <div class="controls">
-<label for="voiceSelect">Voice</label>
+<label id="ttsVoiceLabel" for="voiceSelect">Voice</label>
 <select id="voiceSelect" onchange="setVoice(this.value)"></select>
-<label for="ttsModelSelect">TTS Model</label>
+<label id="ttsModelLabel" for="ttsModelSelect">TTS Model</label>
 <select id="ttsModelSelect" onchange="setTtsModel(this.value)"></select>
+<label for="ttsBackendSelect">TTS Backend</label>
+<select id="ttsBackendSelect" onchange="setTtsBackend(this.value)"></select>
 </div>
 <div class="controls" style="flex-direction:column;align-items:stretch;">
 <textarea id="speakText" placeholder="Type the phrase you want the robot to say"></textarea>
@@ -259,6 +269,19 @@ textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0
 </div>
 </section>
 <section>
+<h2>Kokoro TTS</h2>
+<div class="controls">
+<label for="kokoroVoiceSelect">Voice</label>
+<select id="kokoroVoiceSelect" onchange="setKokoroVoice(this.value)"></select>
+</div>
+<div class="controls" style="flex-direction:column;align-items:stretch;">
+<textarea id="kokoroSpeakText" placeholder="Text to synthesize with Kokoro TTS"></textarea>
+<div class="controls" style="width:100%;">
+<button onclick="kokoroSpeakNow()">Speak (Kokoro)</button>
+</div>
+</div>
+</section>
+<section>
 <h2>Game Control</h2>
 <div class="controls">
 <input id="gameName" type="text" placeholder="Game ID (e.g. cornhole)">
@@ -270,8 +293,12 @@ textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0
 <script>
 const statusEl = document.getElementById('status');
 const voiceSelect = document.getElementById('voiceSelect');
+const ttsVoiceLabel = document.getElementById('ttsVoiceLabel');
 const modelSelect = document.getElementById('ttsModelSelect');
+const ttsModelLabel = document.getElementById('ttsModelLabel');
+const ttsBackendSelect = document.getElementById('ttsBackendSelect');
 const qwenSpeakerSelect = document.getElementById('qwenSpeakerSelect');
+const kokoroVoiceSelect = document.getElementById('kokoroVoiceSelect');
 const asrModeSelect = document.getElementById('asrModeSelect');
 const serverAsrModeSelect = document.getElementById('serverAsrModeSelect');
 const asrStateEl = document.getElementById('asrState');
@@ -290,11 +317,71 @@ const asrDropBadgeEl = document.getElementById('asrDropBadge');
 const asrCurrentPartialTextEl = document.getElementById('asrCurrentPartialText');
 const asrStablePartialTextEl = document.getElementById('asrStablePartialText');
 const llmPromptEl = document.getElementById('llmPromptText');
+const llmModelSelect = document.getElementById('llmModelSelect');
+const llmModelStatusEl = document.getElementById('llmModelStatus');
 const logContainer = document.getElementById('transcriptLog');
 const cameraView = document.getElementById('cameraView');
 let liveLogVersion = -1;
 let liveLogEventSource = null;
 let liveLogPollTimer = null;
+let cachedVoiceOptions = null;
+const DEFAULT_LOCAL_QWEN_MODELS = ['qwen3.5:0.8b', 'qwen3.5:2b', 'qwen3.5:4b', 'qwen3.5:9b'];
+const DEFAULT_KOKORO_VOICES = [
+  'af_alloy',
+  'af_aoede',
+  'af_bella',
+  'af_heart',
+  'af_jessica',
+  'af_kore',
+  'af_nicole',
+  'af_nova',
+  'af_river',
+  'af_sarah',
+  'af_sky',
+  'am_adam',
+  'am_echo',
+  'am_eric',
+  'am_fenrir',
+  'am_liam',
+  'am_michael',
+  'am_onyx',
+  'am_puck',
+  'am_santa',
+  'bf_alice',
+  'bf_emma',
+  'bf_isabella',
+  'bf_lily',
+  'bm_daniel',
+  'bm_fable',
+  'bm_george',
+  'bm_lewis',
+  'ef_dora',
+  'em_alex',
+  'em_santa',
+  'ff_siwis',
+  'hf_alpha',
+  'hf_beta',
+  'hm_omega',
+  'hm_psi',
+  'if_sara',
+  'im_nicola',
+  'jf_alpha',
+  'jf_gongitsune',
+  'jf_nezumi',
+  'jf_tebukuro',
+  'jm_kumo',
+  'pf_dora',
+  'pm_alex',
+  'pm_santa',
+  'zf_xiaobei',
+  'zf_xiaoni',
+  'zf_xiaoxiao',
+  'zf_xiaoyi',
+  'zm_yunjian',
+  'zm_yunxi',
+  'zm_yunxia',
+  'zm_yunyang'
+];
 const logRoleStyles = {
   user:{icon:'\uD83D\uDC64',bg:'rgba(59,130,246,0.18)',color:'#60a5fa'},
   coach:{icon:'\uD83E\uDD16',bg:'rgba(251,146,60,0.18)',color:'#fb923c'},
@@ -493,13 +580,124 @@ function ledRandom(){
   const duration = parseFloat(document.getElementById('ledDuration').value)||0;
   send('/api/led',{mode:'random',duration:duration});
 }
-function setVoice(value){
+function currentTtsBackend(){
+  if(!ttsBackendSelect) return 'piper';
+  return String(ttsBackendSelect.value || 'piper').trim() || 'piper';
+}
+function setTtsModelEnabled(enabled){
+  if(modelSelect){ modelSelect.disabled = !enabled; }
+  if(ttsModelLabel){ ttsModelLabel.style.opacity = enabled ? '1' : '0.55'; }
+}
+function populateSelectOptions(selectEl, values, current){
+  if(!selectEl) return;
+  const options = Array.isArray(values) ? values.filter(Boolean) : [];
+  selectEl.innerHTML = options.map(v => `<option value="${v}">${v}</option>`).join('');
+  if(current && options.includes(current)){
+    selectEl.value = current;
+  } else if(options.length){
+    selectEl.value = options[0];
+  }
+}
+function mergeUniqueOptions(){
+  const seen = new Set();
+  const merged = [];
+  for(const list of arguments){
+    if(!Array.isArray(list)) continue;
+    for(const item of list){
+      const value = String(item || '').trim();
+      if(!value || seen.has(value)) continue;
+      seen.add(value);
+      merged.push(value);
+    }
+  }
+  return merged;
+}
+function kokoroOptionsFromPayload(data){
+  const current = typeof (data && data.current) === 'string' ? String(data.current).trim() : '';
+  const remoteVoices = Array.isArray(data && data.voices) ? data.voices : [];
+  const voices = mergeUniqueOptions(
+    remoteVoices.length <= 1 ? DEFAULT_KOKORO_VOICES : [],
+    remoteVoices,
+    current ? [current] : []
+  );
+  return { voices, current };
+}
+function populateKokoroVoiceOptions(data, syncPrimary){
+  const options = kokoroOptionsFromPayload(data);
+  if(syncPrimary && voiceSelect){
+    populateSelectOptions(voiceSelect, options.voices, options.current);
+  }
+  if(kokoroVoiceSelect){ populateSelectOptions(kokoroVoiceSelect, options.voices, options.current); }
+}
+async function refreshPrimaryVoiceOptions(){
+  const backend = currentTtsBackend();
+  if(ttsVoiceLabel){ ttsVoiceLabel.textContent = backend === 'qwen' ? 'Speaker' : 'Voice'; }
+  setTtsModelEnabled(backend === 'piper');
+  if(backend === 'qwen'){
+    try {
+      const resp = await fetch('/api/qwen/options');
+      if(!resp.ok){ return; }
+      const data = await resp.json();
+      const speakers = Array.isArray(data.speakers) ? data.speakers : [];
+      const current = typeof data.current === 'string' ? data.current : '';
+      populateSelectOptions(voiceSelect, speakers, current);
+      if(qwenSpeakerSelect){ populateSelectOptions(qwenSpeakerSelect, speakers, current); }
+      return;
+    } catch(err) {
+      console.warn('primary qwen options failed', err);
+      return;
+    }
+  }
+  if(backend === 'kokoro'){
+    try {
+      const resp = await fetch('/api/kokoro/options');
+      if(!resp.ok){
+        populateKokoroVoiceOptions({ current: cachedVoiceOptions && cachedVoiceOptions.kokoroVoiceCurrent }, true);
+        return;
+      }
+      const data = await resp.json();
+      populateKokoroVoiceOptions(data, true);
+      return;
+    } catch(err) {
+      console.warn('primary kokoro options failed', err);
+      populateKokoroVoiceOptions({ current: cachedVoiceOptions && cachedVoiceOptions.kokoroVoiceCurrent }, true);
+      return;
+    }
+  }
+  const data = cachedVoiceOptions || {};
+  const voices = Array.isArray(data.voices) ? data.voices : [];
+  const current = typeof data.current === 'string' ? data.current : '';
+  populateSelectOptions(voiceSelect, voices, current);
+}
+async function setVoice(value){
   if(!value) return;
-  send('/api/voice',{action:'set',voice:value});
+  const backend = currentTtsBackend();
+  if(backend === 'qwen'){
+    await send('/api/voice',{action:'set_qwen_speaker',speaker:value});
+    if(qwenSpeakerSelect){ qwenSpeakerSelect.value = value; }
+    return;
+  }
+  if(backend === 'kokoro'){
+    await send('/api/voice',{action:'set_kokoro_voice',voice:value});
+    if(kokoroVoiceSelect){ kokoroVoiceSelect.value = value; }
+    return;
+  }
+  await send('/api/voice',{action:'set',voice:value});
+}
+async function setKokoroVoice(value){
+  if(!value) return;
+  await send('/api/voice',{action:'set_kokoro_voice',voice:value});
+  if(kokoroVoiceSelect){ kokoroVoiceSelect.value = value; }
+  if(currentTtsBackend() === 'kokoro' && voiceSelect){ voiceSelect.value = value; }
 }
 function setTtsModel(value){
   if(!value) return;
   send('/api/voice',{action:'set_model',model:value});
+}
+async function setTtsBackend(value){
+  if(!value) return;
+  await send('/api/voice',{action:'set_backend',backend:value});
+  await refreshPrimaryVoiceOptions();
 }
 function speakNow(){
   const text = document.getElementById('speakText').value;
@@ -510,7 +708,8 @@ function speakNow(){
   const speed = parseFloat(document.getElementById('voiceSpeed').value)||1;
   const volume = parseFloat(document.getElementById('voiceVolume').value)||1;
   const model = modelSelect ? modelSelect.value : '';
-  send('/api/speak',{text:text,voice:voiceSelect.value,model:model,speed:speed,volume:volume});
+  const backend = ttsBackendSelect ? String(ttsBackendSelect.value || '').trim() : '';
+  send('/api/speak',{text:text,voice:voiceSelect.value,model:model,backend:backend,speed:speed,volume:volume});
 }
 function qwenSpeakNow(){
   const text = document.getElementById('qwenSpeakText').value;
@@ -518,6 +717,12 @@ function qwenSpeakNow(){
   const speaker = qwenSpeakerSelect ? qwenSpeakerSelect.value : '';
   const instruct = (document.getElementById('qwenInstruct').value||'').trim();
   send('/api/qwen/speak',{text:text,speaker:speaker,instruct:instruct});
+}
+function kokoroSpeakNow(){
+  const text = document.getElementById('kokoroSpeakText').value;
+  if(!text.trim()){ statusEl.textContent = 'error: enter text to speak'; return; }
+  const voice = kokoroVoiceSelect ? String(kokoroVoiceSelect.value || '').trim() : '';
+  send('/api/kokoro/speak',{text:text,voice:voice});
 }
 async function describeCameraNow(){
   const promptEl = document.getElementById('visionPrompt');
@@ -596,6 +801,37 @@ async function saveLlmPrompt(){
 async function resetLlmPrompt(){
   await send('/api/llm/prompt',{reset:true});
   await loadLlmPrompt();
+}
+async function loadRuntimeModelOptions(){
+  if(!llmModelSelect) return;
+  if(llmModelStatusEl){ llmModelStatusEl.textContent = 'Loading model options...'; }
+  try {
+    const resp = await fetch('/api/runtime/config');
+    const data = await parseApiResponse(resp);
+    if(!resp.ok || data.status !== 'ok'){
+      const msg = (data && data.message) ? data.message : ('HTTP ' + resp.status);
+      if(llmModelStatusEl){ llmModelStatusEl.textContent = 'Error: ' + msg; }
+      populateSelectOptions(llmModelSelect, DEFAULT_LOCAL_QWEN_MODELS, '');
+      return;
+    }
+    const models = Array.isArray(data.ollama_model_options) && data.ollama_model_options.length
+      ? data.ollama_model_options
+      : DEFAULT_LOCAL_QWEN_MODELS;
+    const current = typeof data.ollama_model === 'string' ? data.ollama_model : '';
+    populateSelectOptions(llmModelSelect, models, current);
+    if(llmModelStatusEl){
+      llmModelStatusEl.textContent = current ? ('Current: ' + current) : 'Select a local model.';
+    }
+  } catch(err) {
+    populateSelectOptions(llmModelSelect, DEFAULT_LOCAL_QWEN_MODELS, '');
+    if(llmModelStatusEl){ llmModelStatusEl.textContent = 'Error: ' + err; }
+  }
+}
+async function setRuntimeModel(value){
+  const model = String(value || '').trim();
+  if(!model) return;
+  await send('/api/runtime/config',{ollama_model:model});
+  if(llmModelStatusEl){ llmModelStatusEl.textContent = 'Current: ' + model; }
 }
 function launchGame(){
   const name = document.getElementById('gameName').value||'';
@@ -708,17 +944,10 @@ async function loadVoiceOptions(){
     const resp = await fetch('/api/voice/options');
     if(!resp.ok){ return; }
     const data = await resp.json();
-    const voices = Array.isArray(data.voices) ? data.voices : [];
-    voiceSelect.innerHTML = voices.map(v => `<option value="${v}">${v}</option>`).join('');
-    const current = typeof data.current === 'string' ? data.current : '';
-    if(current && voices.includes(current)){
-      voiceSelect.value = current;
-    } else if(voices.length){
-      voiceSelect.value = voices[0];
-    }
+    cachedVoiceOptions = data;
     const models = Array.isArray(data.models) ? data.models : [];
     if(modelSelect){
-      modelSelect.innerHTML = models.map(v => `<option value="${v}">${v}</option>`).join('');
+      populateSelectOptions(modelSelect, models, typeof data.modelCurrent === 'string' ? data.modelCurrent : '');
       const modelCurrent = typeof data.modelCurrent === 'string' ? data.modelCurrent : '';
       if(modelCurrent && models.includes(modelCurrent)){
         modelSelect.value = modelCurrent;
@@ -726,6 +955,17 @@ async function loadVoiceOptions(){
         modelSelect.value = models[0];
       }
     }
+    const backends = Array.isArray(data.backends) ? data.backends : [];
+    if(ttsBackendSelect){
+      populateSelectOptions(ttsBackendSelect, backends, typeof data.backendCurrent === 'string' ? data.backendCurrent : '');
+      const backendCurrent = typeof data.backendCurrent === 'string' ? data.backendCurrent : '';
+      if(backendCurrent && backends.includes(backendCurrent)){
+        ttsBackendSelect.value = backendCurrent;
+      } else if(backends.length){
+        ttsBackendSelect.value = backends[0];
+      }
+    }
+    await refreshPrimaryVoiceOptions();
   } catch(err) {
     console.warn('voice options failed', err);
   }
@@ -743,14 +983,31 @@ async function loadQwenOptions(){
     else if(speakers.length){ qwenSpeakerSelect.value = speakers[0]; }
   } catch(err) { console.warn('qwen options failed', err); }
 }
+async function loadKokoroOptions(){
+  if(!kokoroVoiceSelect) return;
+  try {
+    const resp = await fetch('/api/kokoro/options');
+    if(!resp.ok){
+      populateKokoroVoiceOptions({ current: cachedVoiceOptions && cachedVoiceOptions.kokoroVoiceCurrent }, false);
+      return;
+    }
+    const data = await resp.json();
+    populateKokoroVoiceOptions(data, false);
+  } catch(err) {
+    console.warn('kokoro options failed', err);
+    populateKokoroVoiceOptions({ current: cachedVoiceOptions && cachedVoiceOptions.kokoroVoiceCurrent }, false);
+  }
+}
 if(logContainer){ renderLog([]); }
 refreshLog();
 connectLiveLogStream();
 loadVoiceOptions();
 loadQwenOptions();
+loadKokoroOptions();
 refreshAsrStatus();
 setInterval(refreshAsrStatus, 5000);
 loadLlmPrompt();
+loadRuntimeModelOptions();
 let cameraPolling = false;
 let cameraSeq = 0;
 let cameraLastLoadAt = 0;

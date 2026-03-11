@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import importlib
 import io
 import json
 import logging
@@ -20,6 +21,13 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 import httpx
 import numpy as np
 import paho.mqtt.client as mqtt
+
+try:
+    genai = importlib.import_module("google.genai")
+    genai_types = importlib.import_module("google.genai.types")
+except Exception:  # pragma: no cover - optional at runtime
+    genai = None
+    genai_types = None
 
 try:
     import sounddevice as sd
@@ -49,6 +57,8 @@ try:
         create_streaming_asr_backend,
         moonshine_streaming_available,
         normalize_streaming_asr_mode,
+        STREAMING_ASR_MODE_API,
+        STREAMING_ASR_MODE_GEMINI_LIVE,
         STREAMING_ASR_MODE_LIVE_CAPTIONS,
         supported_streaming_asr_modes,
     )
@@ -60,6 +70,8 @@ except Exception:
         create_streaming_asr_backend,
         moonshine_streaming_available,
         normalize_streaming_asr_mode,
+        STREAMING_ASR_MODE_API,
+        STREAMING_ASR_MODE_GEMINI_LIVE,
         STREAMING_ASR_MODE_LIVE_CAPTIONS,
         supported_streaming_asr_modes,
     )
@@ -69,6 +81,7 @@ logger = logging.getLogger("desktop_audio_agent")
 DEFAULT_ASR_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_PIPER_BASE_URL = "http://127.0.0.1:5005"
 DEFAULT_QWEN_BASE_URL = "http://127.0.0.1:5006"
+DEFAULT_KOKORO_BASE_URL = "http://127.0.0.1:5007"
 
 DEFAULT_CAPTURE_SAMPLE_RATE = 16000
 DEFAULT_OUTPUT_SAMPLE_RATE = int(os.getenv("AUDIO_AGENT_OUTPUT_SAMPLE_RATE", "22050") or "22050")
@@ -103,6 +116,23 @@ DEFAULT_PARTIAL_COMMIT_DELAY_SECONDS = float(
     os.getenv("AUDIO_AGENT_PARTIAL_COMMIT_DELAY_SECONDS", "0.55") or "0.55"
 )
 DEFAULT_PARTIAL_COMMIT_MIN_CHARS = int(os.getenv("AUDIO_AGENT_PARTIAL_COMMIT_MIN_CHARS", "3") or "3")
+DEFAULT_API_ASR_PREROLL_MS = float(os.getenv("AUDIO_AGENT_API_ASR_PREROLL_MS", "220") or "220")
+DEFAULT_API_ASR_MIN_TURN_MS = float(os.getenv("AUDIO_AGENT_API_ASR_MIN_TURN_MS", "260") or "260")
+DEFAULT_GEMINI_LIVE_MODEL = (
+    os.getenv("GEMINI_LIVE_MODEL", "models/gemini-2.5-flash-native-audio-latest")
+    or "models/gemini-2.5-flash-native-audio-latest"
+)
+DEFAULT_GEMINI_LIVE_VOICE = os.getenv("GEMINI_LIVE_VOICE", "Kore") or "Kore"
+DEFAULT_GEMINI_LIVE_OUTPUT_SAMPLE_RATE = 24000
+DEFAULT_GEMINI_LIVE_QUEUE_MAX_FRAMES = int(os.getenv("GEMINI_LIVE_QUEUE_MAX_FRAMES", "96") or "96")
+DEFAULT_GEMINI_LIVE_SYSTEM_PROMPT = (
+    "You are Rachel, a warm voice companion in a rehabilitation and exercise game system. "
+    "Sound natural and supportive. Keep spoken replies concise and clear. "
+    "Treat each user turn as part of an ongoing conversation. "
+    "Do not force every topic back to exercise. "
+    "If the user asks to open, start, launch, or close a game, acknowledge briefly in one sentence. "
+    "If intent is unclear, ask one short clarification question instead of guessing."
+)
 DEFAULT_LIVE_CAPTIONS_EXE = os.getenv(
     "LIVE_CAPTIONS_LISTENER_EXE",
     r"D:\unityproject\LiveCaptionsListener\temp_build\win-x64-single\EnableLcMic.exe",
@@ -131,6 +161,12 @@ PIPELINE_MODE_DIRECT_UNIFIED = "direct_unified"
 PIPELINE_MODE_LEGACY_MQTT = "legacy_mqtt"
 CONVERSATION_PROFILE_LOCAL = "local"
 CONVERSATION_PROFILE_CLOUD = "cloud"
+RESPONSE_PROVIDER_OPENAI = "openai"
+RESPONSE_PROVIDER_GEMINI = "gemini"
+TTS_BACKEND_PIPER = "piper"
+TTS_BACKEND_QWEN = "qwen"
+TTS_BACKEND_KOKORO = "kokoro"
+TTS_BACKENDS = [TTS_BACKEND_PIPER, TTS_BACKEND_QWEN, TTS_BACKEND_KOKORO]
 
 TRANSCRIBE_MODE_WHISPER = "whisper-large-v3"
 TRANSCRIBE_MODE_MOONSHINE_SMALL = "moonshine-small"
@@ -174,6 +210,26 @@ def _env(name: str, default: str = "") -> str:
     return value.strip() if value else default
 
 
+def _gemini_api_key() -> str:
+    return _env("GEMINI_API_KEY", "") or _env("GEMINI_KEY", "")
+
+
+def _normalize_cloud_response_provider(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"gemini", "google", "google-ai", "google_ai"}:
+        return RESPONSE_PROVIDER_GEMINI
+    return RESPONSE_PROVIDER_OPENAI
+
+
+def _normalize_tts_backend(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {TTS_BACKEND_QWEN, "qwen_tts", "qwen-tts"}:
+        return TTS_BACKEND_QWEN
+    if normalized in {TTS_BACKEND_KOKORO, "kokoro_tts", "kokoro-tts"}:
+        return TTS_BACKEND_KOKORO
+    return TTS_BACKEND_PIPER
+
+
 def _normalize_pipeline_mode(value: Optional[str]) -> str:
     normalized = (value or "").strip().lower()
     if normalized in {"legacy", "mqtt", "legacy_mqtt"}:
@@ -183,7 +239,7 @@ def _normalize_pipeline_mode(value: Optional[str]) -> str:
 
 def _normalize_profile(value: Optional[str]) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"cloud", "openai", "online"}:
+    if normalized in {"cloud", "openai", "gemini", "online"}:
         return CONVERSATION_PROFILE_CLOUD
     return CONVERSATION_PROFILE_LOCAL
 
@@ -196,9 +252,19 @@ def normalize_asr_mode(value: Optional[str]) -> str:
         return TRANSCRIBE_MODE_MOONSHINE_SMALL
     if normalized in {"moonshine-medium", "moonshine_medium", "moonshine", "medium"}:
         return TRANSCRIBE_MODE_MOONSHINE_MEDIUM
-    if normalized in {"api", "openai", "online"}:
+    if normalized in {"api", "openai", "gemini", "online", "cloud-api", "service-api"}:
         return TRANSCRIBE_MODE_API
     return TRANSCRIBE_MODE_MOONSHINE_MEDIUM
+
+
+def _parse_pcm_sample_rate(mime_type: str, default: int) -> int:
+    match = re.search(r"rate\s*=\s*(\d+)", str(mime_type or ""), flags=re.IGNORECASE)
+    if match is None:
+        return int(default)
+    try:
+        return max(1, int(match.group(1)))
+    except Exception:
+        return int(default)
 
 
 def _coerce_string_list(value: Any) -> List[str]:
@@ -1127,6 +1193,7 @@ class AudioAgentStatus:
     asr_mode: str
     pipeline_mode: str
     profile: str
+    tts_backend: str
     assistant_speaking: bool
     sounddevice_available: bool
     moonshine_available: bool
@@ -1160,17 +1227,22 @@ class DesktopAudioAgent:
         asr_base_url: str = DEFAULT_ASR_BASE_URL,
         piper_base_url: str = DEFAULT_PIPER_BASE_URL,
         qwen_base_url: str = DEFAULT_QWEN_BASE_URL,
+        kokoro_base_url: str = DEFAULT_KOKORO_BASE_URL,
     ) -> None:
         self.log_store = log_store
         self.asr_base_url = asr_base_url.rstrip("/")
         self.piper_base_url = piper_base_url.rstrip("/")
         self.qwen_base_url = qwen_base_url.rstrip("/")
+        self.kokoro_base_url = kokoro_base_url.rstrip("/")
 
         self.capture_sample_rate = DEFAULT_CAPTURE_SAMPLE_RATE
         self.output_sample_rate = DEFAULT_OUTPUT_SAMPLE_RATE
         self.input_blocksize = DEFAULT_INPUT_BLOCKSIZE
         self.pipeline_mode = _normalize_pipeline_mode(_env("VOICE_PIPELINE_MODE", PIPELINE_MODE_DIRECT_UNIFIED))
         self.profile = _normalize_profile(_env("VOICE_CONVERSATION_PROFILE", CONVERSATION_PROFILE_LOCAL))
+        self.cloud_response_provider = _normalize_cloud_response_provider(
+            _env("VOICE_CLOUD_RESPONSE_PROVIDER", RESPONSE_PROVIDER_OPENAI)
+        )
         self.local_asr_mode = normalize_asr_mode(_env("VOICE_LOCAL_ASR_MODE", TRANSCRIBE_MODE_MOONSHINE_MEDIUM))
         self.cloud_asr_mode = normalize_asr_mode(_env("VOICE_CLOUD_ASR_MODE", TRANSCRIBE_MODE_API))
         self.local_streaming_asr_mode = normalize_streaming_asr_mode(
@@ -1182,7 +1254,11 @@ class DesktopAudioAgent:
         self.current_asr_mode = self._preferred_streaming_asr_mode(self.profile)
         self.active_voice_code = _env("VOICE_AGENT_DEFAULT_VOICE", "en_US")
         self.active_tts_model = _env("VOICE_AGENT_DEFAULT_TTS_MODEL", "").strip()
+        self.active_tts_backend = _normalize_tts_backend(_env("VOICE_AGENT_TTS_BACKEND", TTS_BACKEND_PIPER))
         self.active_qwen_speaker = _env("QWEN_TTS_SPEAKER", "Ryan")
+        self.active_kokoro_voice = _env("KOKORO_TTS_VOICE", "af_heart")
+        self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
+        self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
         self.hotword_strategy = normalize_hotword_strategy(
             _env("VOICE_ASR_HOTWORD_STRATEGY", HOTWORD_STRATEGY_COMMANDS_GAMES_MEMORY)
         )
@@ -1218,6 +1294,14 @@ class DesktopAudioAgent:
         self._manual_task: Optional[asyncio.Task[Any]] = None
         self._conversation_task: Optional[asyncio.Task[Any]] = None
         self._active_tts_tasks: set[asyncio.Task[Any]] = set()
+        self._active_api_asr_tasks: set[asyncio.Task[Any]] = set()
+        self._gemini_live_session_task: Optional[asyncio.Task[Any]] = None
+        self._gemini_live_send_queue: Optional[asyncio.Queue[Optional[bytes]]] = None
+        self._gemini_live_output_open = False
+        self._gemini_live_connected = False
+        self._gemini_live_output_text = ""
+        self._gemini_live_logged_output_text = ""
+        self._gemini_live_last_input_text = ""
 
         self._player = PcmPlayer(
             output_sample_rate=self.output_sample_rate,
@@ -1258,6 +1342,25 @@ class DesktopAudioAgent:
         self._last_final_event_at = 0.0
         self._last_user_submit_text = ""
         self._last_user_submit_at = 0.0
+        self._api_asr_preroll_frames: Deque[np.ndarray] = deque(
+            maxlen=max(
+                1,
+                int(
+                    round(
+                        max(0.0, DEFAULT_API_ASR_PREROLL_MS)
+                        * self.capture_sample_rate
+                        / max(1, self.input_blocksize)
+                        / 1000.0
+                    )
+                ),
+            )
+        )
+        self._api_asr_turn_active = False
+        self._api_asr_turn_frames: List[np.ndarray] = []
+        self._api_asr_min_samples = max(
+            1,
+            int(round(max(0.0, DEFAULT_API_ASR_MIN_TURN_MS) * self.capture_sample_rate / 1000.0)),
+        )
 
     def _preferred_asr_mode(self, profile: str) -> str:
         normalized = _normalize_profile(profile)
@@ -1273,6 +1376,317 @@ class DesktopAudioAgent:
 
     def _sanitize_streaming_mode(self, mode: str) -> str:
         return normalize_streaming_asr_mode(mode)
+
+    def _reset_api_asr_turn(self, *, clear_preroll: bool = False) -> None:
+        self._api_asr_turn_active = False
+        self._api_asr_turn_frames = []
+        if clear_preroll:
+            self._api_asr_preroll_frames.clear()
+
+    def _cancel_api_asr_tasks(self) -> None:
+        for task in list(self._active_api_asr_tasks):
+            task.cancel()
+        self._active_api_asr_tasks.clear()
+
+    def _reload_provider_settings_from_env(self) -> None:
+        self.cloud_response_provider = _normalize_cloud_response_provider(
+            _env("VOICE_CLOUD_RESPONSE_PROVIDER", RESPONSE_PROVIDER_OPENAI)
+        )
+        self.active_tts_backend = _normalize_tts_backend(_env("VOICE_AGENT_TTS_BACKEND", self.active_tts_backend))
+        self.active_qwen_speaker = _env("QWEN_TTS_SPEAKER", self.active_qwen_speaker)
+        self.active_kokoro_voice = _env("KOKORO_TTS_VOICE", self.active_kokoro_voice)
+        self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
+        self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
+
+    def _close_gemini_live_output(self, *, clear_player: bool) -> None:
+        if self._gemini_live_output_open:
+            self._player.end_stream()
+            self._gemini_live_output_open = False
+        if clear_player:
+            self._player.clear()
+
+    def _stop_gemini_live_session(self) -> None:
+        queue = self._gemini_live_send_queue
+        self._gemini_live_send_queue = None
+        if queue is not None:
+            try:
+                queue.put_nowait(None)
+            except Exception:
+                pass
+        task = self._gemini_live_session_task
+        self._gemini_live_session_task = None
+        if task is not None:
+            task.cancel()
+        self._gemini_live_connected = False
+        self._close_gemini_live_output(clear_player=True)
+        self._assistant_buffer_text = ""
+        self._assistant_corr_id = ""
+        self._gemini_live_output_text = ""
+        self._gemini_live_logged_output_text = ""
+        self._last_partial_text = ""
+        self._last_stable_partial_text = ""
+
+    def _start_gemini_live_session(self) -> None:
+        self._stop_gemini_live_session()
+        if self._loop is None:
+            return
+        self._reload_provider_settings_from_env()
+        if genai is None or genai_types is None:
+            self._last_error = "Gemini Live requires dependency 'google-genai'"
+            return
+        api_key = _gemini_api_key()
+        if not api_key:
+            self._last_error = "Gemini key is not set (expected GEMINI_API_KEY or GEMINI_KEY)"
+            return
+        self._gemini_live_send_queue = asyncio.Queue(maxsize=max(8, DEFAULT_GEMINI_LIVE_QUEUE_MAX_FRAMES))
+        self._gemini_live_session_task = asyncio.create_task(self._run_gemini_live_supervisor(api_key))
+        self._last_error = ""
+
+    def _queue_gemini_live_audio(self, raw_pcm: bytes) -> None:
+        queue = self._gemini_live_send_queue
+        if queue is None:
+            return
+        payload = bytes(raw_pcm or b"")
+        if not payload:
+            return
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            self._last_error = "Gemini Live audio queue overflow; dropping input audio"
+
+    def _handle_gemini_live_frame(self, audio: np.ndarray) -> None:
+        frame = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if frame.size <= 0 or self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(self._queue_gemini_live_audio, _float32_to_pcm16_bytes(frame))
+
+    async def _run_gemini_live_supervisor(self, api_key: str) -> None:
+        backoff_seconds = 1.0
+        while self._running and self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
+            try:
+                await self._run_gemini_live_session_once(api_key)
+                if not self._running or self.current_asr_mode != STREAMING_ASR_MODE_GEMINI_LIVE:
+                    return
+                await asyncio.sleep(0.3)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._gemini_live_connected = False
+                self._last_error = f"Gemini Live session failed: {exc}"
+                self.log_store.add("system", self._last_error, speaker="system", source="gemini_live")
+                if not self._running or self.current_asr_mode != STREAMING_ASR_MODE_GEMINI_LIVE:
+                    return
+                await asyncio.sleep(backoff_seconds)
+                backoff_seconds = min(5.0, backoff_seconds + 1.0)
+
+    async def _run_gemini_live_session_once(self, api_key: str) -> None:
+        client = genai.Client(api_key=api_key)
+        config = genai_types.LiveConnectConfig(
+            response_modalities=[genai_types.Modality.AUDIO],
+            system_instruction=DEFAULT_GEMINI_LIVE_SYSTEM_PROMPT,
+            input_audio_transcription=genai_types.AudioTranscriptionConfig(),
+            output_audio_transcription=genai_types.AudioTranscriptionConfig(),
+            realtime_input_config=genai_types.RealtimeInputConfig(
+                automatic_activity_detection=genai_types.AutomaticActivityDetection(
+                    prefix_padding_ms=180,
+                    silence_duration_ms=320,
+                    start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_HIGH,
+                    end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_LOW,
+                ),
+                activity_handling=genai_types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+                turn_coverage=genai_types.TurnCoverage.TURN_INCLUDES_ALL_INPUT,
+            ),
+        )
+        voice_name = str(self.gemini_live_voice or "").strip()
+        if voice_name:
+            config.speech_config = genai_types.SpeechConfig(
+                voice_config=genai_types.VoiceConfig(
+                    prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(voice_name=voice_name)
+                )
+            )
+
+        try:
+            async with client.aio.live.connect(model=self.gemini_live_model, config=config) as session:
+                self._gemini_live_connected = True
+                self._last_error = ""
+                sender = asyncio.create_task(self._gemini_live_sender(session))
+                receiver = asyncio.create_task(self._gemini_live_receiver(session))
+                try:
+                    done, pending = await asyncio.wait(
+                        {sender, receiver},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                    for task in done:
+                        task.result()
+                finally:
+                    for task in (sender, receiver):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(sender, receiver, return_exceptions=True)
+                    self._gemini_live_connected = False
+                    self._close_gemini_live_output(clear_player=False)
+        finally:
+            try:
+                await client.aio.aclose()
+            except Exception:
+                pass
+
+    async def _gemini_live_sender(self, session: Any) -> None:
+        while self._running and self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
+            queue = self._gemini_live_send_queue
+            if queue is None:
+                return
+            payload = await queue.get()
+            if payload is None:
+                return
+            await session.send_realtime_input(
+                audio=genai_types.Blob(
+                    data=payload,
+                    mime_type=f"audio/pcm;rate={self.capture_sample_rate}",
+                )
+            )
+
+    async def _gemini_live_receiver(self, session: Any) -> None:
+        async for message in session.receive():
+            server_content = getattr(message, "server_content", None)
+            if server_content is None:
+                continue
+            await self._handle_gemini_live_server_content(server_content)
+
+    async def _handle_gemini_live_server_content(self, server_content: Any) -> None:
+        input_transcription = getattr(server_content, "input_transcription", None)
+        if input_transcription is not None:
+            await self._handle_gemini_live_input_transcription(input_transcription)
+
+        output_transcription = getattr(server_content, "output_transcription", None)
+        if output_transcription is not None:
+            self._handle_gemini_live_output_transcription(output_transcription)
+
+        model_turn = getattr(server_content, "model_turn", None)
+        if model_turn is not None:
+            for part in getattr(model_turn, "parts", []) or []:
+                inline_data = getattr(part, "inline_data", None)
+                if inline_data is None:
+                    inline_data = getattr(part, "inlineData", None)
+                raw_audio = getattr(inline_data, "data", b"") if inline_data is not None else b""
+                if not raw_audio:
+                    continue
+                mime_type = str(
+                    getattr(inline_data, "mime_type", "") or getattr(inline_data, "mimeType", "") or ""
+                ).strip()
+                if "audio/pcm" not in mime_type.lower():
+                    continue
+                if not self._gemini_live_output_open:
+                    self._player.begin_stream()
+                    self._gemini_live_output_open = True
+                self._player.enqueue_pcm16(
+                    raw_audio,
+                    _parse_pcm_sample_rate(mime_type, DEFAULT_GEMINI_LIVE_OUTPUT_SAMPLE_RATE),
+                )
+
+        if bool(getattr(server_content, "interrupted", False)):
+            interrupted_text = str(self._assistant_buffer_text or self._gemini_live_output_text or "").strip()
+            if interrupted_text and interrupted_text != self._gemini_live_logged_output_text:
+                self._remember_assistant_text(interrupted_text)
+                self.log_store.add(
+                    "coach",
+                    interrupted_text,
+                    speaker="RACHEL",
+                    source="gemini_live_partial",
+                    metadata="interrupted",
+                )
+                self._gemini_live_logged_output_text = interrupted_text
+            self._assistant_buffer_text = ""
+            self._assistant_corr_id = ""
+            self._gemini_live_output_text = ""
+            self._close_gemini_live_output(clear_player=True)
+
+        if bool(getattr(server_content, "turn_complete", False)):
+            if self._gemini_live_output_open:
+                await self._wait_for_playback_drain()
+            self._close_gemini_live_output(clear_player=False)
+            final_text = str(self._assistant_buffer_text or self._gemini_live_output_text or "").strip()
+            if final_text and final_text != self._gemini_live_logged_output_text:
+                self._remember_assistant_text(final_text)
+                self.log_store.add("coach", final_text, speaker="RACHEL", source="gemini_live")
+                self._gemini_live_logged_output_text = final_text
+            self._assistant_buffer_text = ""
+            self._assistant_corr_id = ""
+            self._gemini_live_output_text = ""
+
+    async def _handle_gemini_live_input_transcription(self, transcription: Any) -> None:
+        text = str(getattr(transcription, "text", "") or "").strip()
+        finished = bool(getattr(transcription, "finished", False))
+        if not finished:
+            self._last_partial_text = text
+            self._last_stable_partial_text = text
+            return
+        self._last_partial_text = ""
+        self._last_stable_partial_text = ""
+        if not text:
+            return
+        await self._handle_gemini_live_user_turn(text)
+
+    def _handle_gemini_live_output_transcription(self, transcription: Any) -> None:
+        text = str(getattr(transcription, "text", "") or "").strip()
+        finished = bool(getattr(transcription, "finished", False))
+        if not text:
+            return
+        self._assistant_buffer_text = text
+        self._gemini_live_output_text = text
+        if finished and text != self._gemini_live_logged_output_text:
+            self._remember_assistant_text(text)
+            self.log_store.add("coach", text, speaker="RACHEL", source="gemini_live")
+            self._gemini_live_logged_output_text = text
+
+    async def _handle_gemini_live_user_turn(self, raw_text: str) -> None:
+        normalized = str(raw_text or "").strip()
+        if not normalized or not self._listening:
+            return
+        now = time.time()
+        if normalized == self._gemini_live_last_input_text and (now - self._last_final_event_at) <= 1.0:
+            return
+        self._gemini_live_last_input_text = normalized
+        self._last_final_event_at = now
+        if normalized == self._last_user_submit_text and (now - self._last_user_submit_at) <= 2.0:
+            return
+        self._last_user_submit_text = normalized
+        self._last_user_submit_at = now
+
+        grammar_match = self._command_grammar.canonicalize(normalized)
+        final_text = str(grammar_match.canonical_text or normalized).strip()
+        metadata_parts: List[str] = ["asr=gemini_live:high"]
+        if grammar_match.route_type and grammar_match.route_type != "QUERY":
+            metadata_parts.append(f"grammar={grammar_match.route_type}:{grammar_match.confidence:.2f}")
+        self.log_store.add(
+            "user",
+            final_text,
+            speaker="User",
+            source="gemini_live",
+            metadata=" | ".join(metadata_parts),
+        )
+        if grammar_match.route_type not in {"LAUNCH_GAME", "BACK_HOME"} or grammar_match.confidence < 0.86:
+            return
+        payload: Dict[str, Any] = {
+            "type": grammar_match.route_type,
+            "source": "gemini_live",
+            "corr_id": uuid.uuid4().hex,
+            "ts": int(time.time() * 1000),
+            "text": final_text,
+        }
+        if grammar_match.route_type == "LAUNCH_GAME" and grammar_match.game_name:
+            payload["game_name"] = grammar_match.game_name
+        try:
+            await self._publish_mqtt("robot/intent", payload)
+        except Exception as exc:
+            self.log_store.add(
+                "system",
+                f"Gemini Live command dispatch failed: {exc}",
+                speaker="system",
+                source="gemini_live",
+            )
 
     def _current_hotword_entries(self) -> List[HotwordEntry]:
         if self.hotword_strategy == HOTWORD_STRATEGY_OFF:
@@ -1377,9 +1791,24 @@ class DesktopAudioAgent:
 
     def _rebuild_asr_backend(self) -> None:
         self._close_asr_backend()
+        self._cancel_api_asr_tasks()
+        self._reset_api_asr_turn(clear_preroll=True)
+        self._stop_gemini_live_session()
+        self._reload_provider_settings_from_env()
         self._rebuild_hotword_pack()
         self._rebuild_command_grammar()
         if self.current_asr_mode == STREAMING_ASR_MODE_LIVE_CAPTIONS:
+            self._last_error = ""
+            self._last_partial_text = ""
+            self._last_stable_partial_text = ""
+            return
+        if self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
+            self._last_error = ""
+            self._last_partial_text = ""
+            self._last_stable_partial_text = ""
+            self._start_gemini_live_session()
+            return
+        if self.current_asr_mode == STREAMING_ASR_MODE_API:
             self._last_error = ""
             self._last_partial_text = ""
             self._last_stable_partial_text = ""
@@ -1477,10 +1906,13 @@ class DesktopAudioAgent:
         self._running = False
         self._cancel_partial_commit()
         self._speech_active_last = False
+        self._reset_api_asr_turn(clear_preroll=True)
         self.cancel_current_turn(reason="shutdown", capture_barge_in=False)
         if self._manual_task is not None:
             self._manual_task.cancel()
             self._manual_task = None
+        self._cancel_api_asr_tasks()
+        self._stop_gemini_live_session()
         self._stop_input_stream()
         self._close_asr_backend()
         self._player.stop()
@@ -1571,11 +2003,16 @@ class DesktopAudioAgent:
         streaming_backend = backend.backend_name if backend is not None else ""
         if self.current_asr_mode == STREAMING_ASR_MODE_LIVE_CAPTIONS:
             streaming_backend = "live-captions"
+        elif self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
+            streaming_backend = "gemini-live"
+        elif self.current_asr_mode == STREAMING_ASR_MODE_API:
+            streaming_backend = "service-api"
         return AudioAgentStatus(
             listening=self._listening,
             asr_mode=self.current_asr_mode,
             pipeline_mode=self.pipeline_mode,
             profile=self.profile,
+            tts_backend=self.active_tts_backend,
             assistant_speaking=self.is_assistant_speaking(),
             sounddevice_available=sd is not None,
             moonshine_available=moonshine_streaming_available(),
@@ -1615,6 +2052,8 @@ class DesktopAudioAgent:
             self._speech_active_last = False
             self._last_partial_text = ""
             self._last_stable_partial_text = ""
+            self._cancel_api_asr_tasks()
+            self._reset_api_asr_turn(clear_preroll=True)
 
     async def set_asr_mode(self, mode: str) -> None:
         restart_input = self._running
@@ -1644,6 +2083,7 @@ class DesktopAudioAgent:
         hotword_strategy: Optional[str] = None,
         stable_partial_repeats: Optional[int] = None,
     ) -> None:
+        self._reload_provider_settings_from_env()
         self.pipeline_mode = _normalize_pipeline_mode(pipeline_mode)
         self.profile = _normalize_profile(profile)
         self.local_asr_mode = normalize_asr_mode(local_asr_mode)
@@ -1667,15 +2107,36 @@ class DesktopAudioAgent:
             if restart_input:
                 self._start_input_stream()
 
-    async def set_tts_options(self, *, voice: Optional[str] = None, model: Optional[str] = None, qwen_speaker: Optional[str] = None) -> None:
+    async def set_tts_options(
+        self,
+        *,
+        voice: Optional[str] = None,
+        model: Optional[str] = None,
+        backend: Optional[str] = None,
+        qwen_speaker: Optional[str] = None,
+        kokoro_voice: Optional[str] = None,
+    ) -> None:
         if voice is not None:
             self.active_voice_code = str(voice or "").strip() or self.active_voice_code
         if model is not None:
             self.active_tts_model = str(model or "").strip()
+        if backend is not None:
+            self.active_tts_backend = _normalize_tts_backend(backend)
         if qwen_speaker is not None:
             self.active_qwen_speaker = str(qwen_speaker or "").strip() or self.active_qwen_speaker
+        if kokoro_voice is not None:
+            self.active_kokoro_voice = str(kokoro_voice or "").strip() or self.active_kokoro_voice
         try:
-            await self._publish_mqtt("robot/tts/options", {"voice": self.active_voice_code, "model": self.active_tts_model})
+            await self._publish_mqtt(
+                "robot/tts/options",
+                {
+                    "voice": self.active_voice_code,
+                    "model": self.active_tts_model,
+                    "backend": self.active_tts_backend,
+                    "qwen_speaker": self.active_qwen_speaker,
+                    "kokoro_voice": self.active_kokoro_voice,
+                },
+            )
         except Exception:
             pass
 
@@ -1686,7 +2147,7 @@ class DesktopAudioAgent:
         voice: Optional[str] = None,
         model: Optional[str] = None,
         instruct: Optional[str] = None,
-        backend: str = "piper",
+        backend: str = TTS_BACKEND_PIPER,
         source: str = "wizard_panel",
         speaker_label: str = "Wizard Override",
     ) -> None:
@@ -1695,21 +2156,12 @@ class DesktopAudioAgent:
         if not normalized_text:
             return
         self.log_store.add("wizard", normalized_text, speaker=speaker_label, source=source)
-        if backend == "qwen":
-            self._manual_task = asyncio.create_task(
-                self._play_qwen_text(
-                    text=normalized_text,
-                    speaker=voice or self.active_qwen_speaker,
-                    instruct=instruct or "",
-                    source=source,
-                    log_message=False,
-                )
-            )
-            return
+        selected_backend = _normalize_tts_backend(backend or self.active_tts_backend)
         self._manual_task = asyncio.create_task(
-            self._play_piper_text(
+            self._play_tts_text(
                 text=normalized_text,
-                voice=voice or self.active_voice_code,
+                backend=selected_backend,
+                voice=voice,
                 model=model or self.active_tts_model or None,
                 instruct=instruct,
                 source=source,
@@ -1769,7 +2221,12 @@ class DesktopAudioAgent:
         self._assistant_corr_id = ""
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
-        self._player.clear()
+        if self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
+            self._close_gemini_live_output(clear_player=True)
+            self._gemini_live_output_text = ""
+            self._gemini_live_logged_output_text = ""
+        else:
+            self._player.clear()
 
     def _consume_barge_in(self) -> Tuple[bool, str, str]:
         barge_in = self._pending_barge_in
@@ -1833,12 +2290,29 @@ class DesktopAudioAgent:
             frame = self._input_buffer.pop(timeout=0.2)
             if frame is None:
                 continue
-            if not self._running or not self._listening or self.is_assistant_speaking():
+            if not self._running or not self._listening:
+                continue
+            if self.current_asr_mode != STREAMING_ASR_MODE_GEMINI_LIVE and self.is_assistant_speaking():
                 continue
             render = self._player.pop_render_block(frame.size)
             processed = self._aec.process(frame, render)
             processed = self._frontend.process(processed)
-            self._update_speech_activity(self._frontend.status().speech_active)
+            speech_active = self._frontend.status().speech_active
+            self._update_speech_activity(speech_active)
+            if self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
+                try:
+                    self._handle_gemini_live_frame(processed)
+                except Exception as exc:
+                    self._last_error = f"Gemini Live capture failed: {exc}"
+                    logger.warning(self._last_error)
+                continue
+            if self.current_asr_mode == STREAMING_ASR_MODE_API:
+                try:
+                    self._handle_api_asr_frame(processed, speech_active=speech_active)
+                except Exception as exc:
+                    self._last_error = f"service api ASR capture failed: {exc}"
+                    logger.warning(self._last_error)
+                continue
             try:
                 with self._asr_backend_lock:
                     backend = self._asr_backend
@@ -1900,7 +2374,7 @@ class DesktopAudioAgent:
     def _input_callback(self, indata, frames, time_info, status) -> None:  # pragma: no cover - runtime callback
         if not self._running or not self._listening:
             return
-        if self.is_assistant_speaking():
+        if self.current_asr_mode != STREAMING_ASR_MODE_GEMINI_LIVE and self.is_assistant_speaking():
             return
         if status:
             logger.debug("input stream status: %s", status)
@@ -2017,6 +2491,77 @@ class DesktopAudioAgent:
             ),
         )
 
+    def _handle_api_asr_frame(self, audio: np.ndarray, *, speech_active: bool) -> None:
+        frame = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if frame.size <= 0:
+            return
+        frame_copy = np.asarray(frame, dtype=np.float32).copy()
+        if speech_active:
+            if not self._api_asr_turn_active:
+                self._api_asr_turn_frames = [
+                    np.asarray(item, dtype=np.float32).copy() for item in self._api_asr_preroll_frames
+                ]
+                self._api_asr_turn_active = True
+                self._api_asr_preroll_frames.clear()
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(
+                        self._handle_streaming_started,
+                        AsrEvent(event_type="started", backend="service-api"),
+                    )
+            self._api_asr_turn_frames.append(frame_copy)
+            return
+
+        if self._api_asr_turn_active:
+            self._api_asr_turn_frames.append(frame_copy)
+            full_audio = (
+                np.concatenate(self._api_asr_turn_frames).astype(np.float32, copy=False)
+                if self._api_asr_turn_frames
+                else np.zeros(0, dtype=np.float32)
+            )
+            self._reset_api_asr_turn(clear_preroll=True)
+            if full_audio.size >= self._api_asr_min_samples and self._loop is not None:
+                self._loop.call_soon_threadsafe(
+                    self._start_api_asr_task,
+                    np.asarray(full_audio, dtype=np.float32),
+                )
+            return
+
+        self._api_asr_preroll_frames.append(frame_copy)
+
+    def _start_api_asr_task(self, audio: np.ndarray) -> None:
+        task = asyncio.create_task(self._run_api_asr_turn(np.asarray(audio, dtype=np.float32)))
+        self._active_api_asr_tasks.add(task)
+        task.add_done_callback(lambda completed: self._active_api_asr_tasks.discard(completed))
+
+    async def _run_api_asr_turn(self, audio: np.ndarray) -> None:
+        normalized_audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if normalized_audio.size <= 0 or not self._listening:
+            return
+
+        try:
+            response = await self._client.post(
+                f"{self.asr_base_url}/transcribe",
+                params={
+                    "sample_rate": self.capture_sample_rate,
+                    "mode": TRANSCRIBE_MODE_API,
+                },
+                content=_float32_to_pcm16_bytes(normalized_audio),
+                timeout=DEFAULT_TURN_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = response.json() if response.content else {}
+        except Exception as exc:
+            self._last_error = f"service API transcription failed: {exc}"
+            self.log_store.add("system", self._last_error, speaker="system", source="service_api_asr")
+            return
+
+        transcript = str(payload.get("text") or "").strip() if isinstance(payload, dict) else ""
+        if not transcript:
+            return
+        self._last_error = ""
+        provider = str(payload.get("provider") or "api").strip().lower() if isinstance(payload, dict) else "api"
+        await self._handle_external_transcript_final(transcript, source=f"api_{provider or 'api'}")
+
     def _cancel_partial_commit(self) -> None:
         task = self._partial_commit_task
         self._partial_commit_task = None
@@ -2034,6 +2579,8 @@ class DesktopAudioAgent:
         if self._speech_active_last:
             self._speech_ended_at = now
             self._speech_active_last = False
+            if self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
+                return
             if self._loop is not None and self._listening and not self.is_assistant_speaking():
                 self._cancel_partial_commit()
                 self._partial_commit_task = asyncio.run_coroutine_threadsafe(
@@ -2043,6 +2590,8 @@ class DesktopAudioAgent:
 
     async def _commit_partial_after_delay(self, speech_ended_at: float) -> None:
         try:
+            if self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
+                return
             await asyncio.sleep(DEFAULT_PARTIAL_COMMIT_DELAY_SECONDS)
             if not self._listening or self.is_assistant_speaking():
                 return
@@ -2296,10 +2845,12 @@ class DesktopAudioAgent:
                 buffer = buffer[boundary:].lstrip()
                 if not segment:
                     continue
-                await self._play_piper_text(
+                await self._play_tts_text(
                     text=segment,
-                    voice=self.active_voice_code,
+                    backend=self.active_tts_backend,
+                    voice=None,
                     model=self.active_tts_model or None,
+                    instruct=None,
                     source="direct_tts",
                     log_message=False,
                     wait_for_drain=False,
@@ -2326,6 +2877,48 @@ class DesktopAudioAgent:
                 continue
             buffer = _append_stream_text(buffer, normalized)
             await flush_buffer(final=False, idle=False)
+
+    async def _play_tts_text(
+        self,
+        *,
+        text: str,
+        backend: str,
+        voice: Optional[str],
+        model: Optional[str],
+        instruct: Optional[str],
+        source: str,
+        log_message: bool,
+        wait_for_drain: bool = True,
+    ) -> None:
+        selected_backend = _normalize_tts_backend(backend or self.active_tts_backend)
+        if selected_backend == TTS_BACKEND_QWEN:
+            await self._play_qwen_text(
+                text=text,
+                speaker=voice or self.active_qwen_speaker,
+                instruct=instruct,
+                source=source,
+                log_message=log_message,
+                wait_for_drain=wait_for_drain,
+            )
+            return
+        if selected_backend == TTS_BACKEND_KOKORO:
+            await self._play_kokoro_text(
+                text=text,
+                voice=voice or self.active_kokoro_voice,
+                source=source,
+                log_message=log_message,
+                wait_for_drain=wait_for_drain,
+            )
+            return
+        await self._play_piper_text(
+            text=text,
+            voice=voice or self.active_voice_code,
+            model=model or self.active_tts_model or None,
+            instruct=instruct,
+            source=source,
+            log_message=log_message,
+            wait_for_drain=wait_for_drain,
+        )
 
     async def _play_piper_text(
         self,
@@ -2369,6 +2962,39 @@ class DesktopAudioAgent:
                 usable = len(remainder) - (len(remainder) % 2)
                 if usable > 0:
                     self._player.enqueue_pcm16(remainder[:usable], sample_rate)
+            if log_message:
+                self.log_store.add("coach", normalized, speaker="RACHEL", source=source)
+            if wait_for_drain:
+                await self._wait_for_playback_drain()
+        finally:
+            self._player.end_stream()
+
+    async def _play_kokoro_text(
+        self,
+        *,
+        text: str,
+        voice: Optional[str],
+        source: str,
+        log_message: bool,
+        wait_for_drain: bool = True,
+    ) -> None:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return
+        self._remember_assistant_text(normalized)
+        params: Dict[str, str] = {"text": normalized}
+        if voice:
+            params["voice"] = str(voice)
+        response = await self._client.get(
+            f"{self.kokoro_base_url}/speak",
+            params=params,
+            timeout=DEFAULT_TURN_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        audio, sample_rate = _decode_wav_bytes(response.content)
+        self._player.begin_stream()
+        try:
+            self._player.enqueue_audio(audio, sample_rate)
             if log_message:
                 self.log_store.add("coach", normalized, speaker="RACHEL", source=source)
             if wait_for_drain:

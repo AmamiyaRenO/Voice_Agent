@@ -204,16 +204,18 @@ curl -X POST "http://127.0.0.1:8000/respond/config" \
      -d '{"reset":true}'
 ```
 
-## TTS backends (Piper main + Qwen test)
+## TTS backends (Piper main + Qwen test + Kokoro)
 
 Unity can fetch speech from:
 
 - Piper main: `GET http://127.0.0.1:5005/speak?text=...`
 - Qwen test: `GET http://127.0.0.1:5006/speak?text=...`
-This repo ships two compatible HTTP wrappers:
+- Kokoro test: `GET http://127.0.0.1:5007/speak?text=...`
+This repo ships three compatible HTTP wrappers:
 
 - `piper_http.py`: wraps the Piper CLI (`piper.exe`) and ONNX voice models.
 - `qwen_tts_http.py`: wraps **Qwen3-TTS 0.6B** (`Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`) via the `qwen-tts` Python package.
+- `kokoro_tts_http.py`: wraps **Kokoro-82M** via the `kokoro` Python package.
 
 Both expose:
 
@@ -224,18 +226,20 @@ Piper wrapper additionally exposes true streaming:
 
 - `GET /speak_stream?text=...&voice=...` -> chunked `audio/L16` (PCM s16le mono) with `X-Audio-Sample-Rate` header.
 
-### Start both backends together (recommended)
+### Start the backends together (recommended)
 
-The local launcher now supports two independent commands:
+The local launcher now supports three independent commands:
 
 - `VOICE_AGENT_PIPER_HTTP_CMD` -> Piper on `5005`
 - `VOICE_AGENT_QWEN_HTTP_CMD` -> Qwen on `5006`
+- `VOICE_AGENT_KOKORO_HTTP_CMD` -> Kokoro on `5007`
 
 Example:
 
 ```powershell
 $env:VOICE_AGENT_PIPER_HTTP_CMD="uvicorn piper_http:app --host 0.0.0.0 --port 5005"
 $env:VOICE_AGENT_QWEN_HTTP_CMD="uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5006"
+$env:VOICE_AGENT_KOKORO_HTTP_CMD="uvicorn kokoro_tts_http:app --host 0.0.0.0 --port 5007"
 $env:QWEN_TTS_MODEL="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 $env:QWEN_TTS_DEVICE_MAP="cpu"
 $env:QWEN_TTS_DTYPE="float32"
@@ -245,6 +249,8 @@ $env:QWEN_TTS_NUM_INTEROP="1"
 $env:QWEN_TTS_SPEED_PROFILE="fast"
 $env:QWEN_TTS_MAX_TEXT_CHARS="0"
 $env:QWEN_TTS_FAST_SHORT_MAX_NEW_TOKENS="240"
+$env:KOKORO_TTS_VOICE="af_heart"
+$env:KOKORO_TTS_LANG_CODE="a"
 python scripts/start_local_services.py
 ```
 
@@ -291,7 +297,7 @@ Dialog latency knobs (dialog_service):
 pins an older `tokenizers` version. Install them into **separate virtual environments**:
 
 - **ASR/LLM venv** (port 8000): uses `requirements.txt`
-- **TTS venv** (port 5005): uses `requirements_qwen_tts.txt`
+- **TTS venv** (ports 5005/5006/5007): uses `requirements_qwen_tts.txt`
 
 Example:
 
@@ -303,11 +309,13 @@ py -3.12 -m venv .venv_asr
 .\.venv_asr\Scripts\python.exe -m pip install -U pip
 .\.venv_asr\Scripts\python.exe -m pip install -r requirements.txt
 
-# Qwen TTS (/speak on 5005)
+# Local TTS wrappers (Piper/Qwen/Kokoro)
 py -3.12 -m venv .venv_tts
 .\.venv_tts\Scripts\python.exe -m pip install -U pip
 .\.venv_tts\Scripts\python.exe -m pip install -r requirements_qwen_tts.txt
 ```
+
+For Kokoro on Windows, install `espeak-ng` as well if you want better English fallback or non-English G2P support.
 
 Then point the launcher to the right Python executables:
 
@@ -315,7 +323,9 @@ Then point the launcher to the right Python executables:
 $asrPy="D:\unityproject\Voice_Agent\python_voice_service\.venv_asr\Scripts\python.exe"
 $ttsPy="D:\unityproject\Voice_Agent\python_voice_service\.venv_tts\Scripts\python.exe"
 $env:VOICE_AGENT_VOICE_CMD="$asrPy -m uvicorn main:app --host 0.0.0.0 --port 8000"
-$env:VOICE_AGENT_PIPER_HTTP_CMD="$ttsPy -m uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5005"
+$env:VOICE_AGENT_PIPER_HTTP_CMD="$ttsPy -m uvicorn piper_http:app --host 0.0.0.0 --port 5005"
+$env:VOICE_AGENT_QWEN_HTTP_CMD="$ttsPy -m uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5006"
+$env:VOICE_AGENT_KOKORO_HTTP_CMD="$ttsPy -m uvicorn kokoro_tts_http:app --host 0.0.0.0 --port 5007"
 ```
 
 ### Benchmark

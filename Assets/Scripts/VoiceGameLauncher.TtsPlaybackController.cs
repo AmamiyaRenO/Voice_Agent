@@ -375,11 +375,11 @@ namespace RobotVoice
 
             var trimmed = merged.TrimEnd();
             var endsWithTerminal = trimmed.EndsWith(".") || trimmed.EndsWith("!") || trimmed.EndsWith("?")
-                || trimmed.EndsWith("銆?) || trimmed.EndsWith("锛?) || trimmed.EndsWith("锛?);
-            var endsWithContinuationPunct = trimmed.EndsWith(",") || trimmed.EndsWith("锛?)
-                || trimmed.EndsWith(";") || trimmed.EndsWith("锛?)
-                || trimmed.EndsWith(":") || trimmed.EndsWith("锛?)
-                || trimmed.EndsWith("-") || trimmed.EndsWith("鈥?);
+                || trimmed.EndsWith("\u3002") || trimmed.EndsWith("\uFF01") || trimmed.EndsWith("\uFF1F");
+            var endsWithContinuationPunct = trimmed.EndsWith(",") || trimmed.EndsWith("\uFF0C")
+                || trimmed.EndsWith(";") || trimmed.EndsWith("\uFF1B")
+                || trimmed.EndsWith(":") || trimmed.EndsWith("\uFF1A")
+                || trimmed.EndsWith("-") || trimmed.EndsWith("\u2014");
             if (pendingSpeechSegments.Count == 1 &&
                 (endpointReason.StartsWith("max_length", StringComparison.Ordinal) || endsWithContinuationPunct))
             {
@@ -435,7 +435,7 @@ namespace RobotVoice
             {
                 var merged = string.Join(" ", pendingSpeechSegments).Trim();
                 var hasTerminal = merged.EndsWith(".") || merged.EndsWith("!") || merged.EndsWith("?")
-                    || merged.EndsWith("銆?) || merged.EndsWith("锛?) || merged.EndsWith("锛?);
+                    || merged.EndsWith("\u3002") || merged.EndsWith("\uFF01") || merged.EndsWith("\uFF1F");
                 if (hasTerminal)
                 {
                     return Mathf.Clamp(Mathf.Min(maxWait, quietWindow + 0.9f), quietWindow, 8f);
