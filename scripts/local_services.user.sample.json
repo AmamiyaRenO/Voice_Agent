@@ -39,6 +39,8 @@
     "VOICE_CONVERSATION_PROFILE": "local",
     "VOICE_LOCAL_ASR_MODE": "moonshine-medium",
     "VOICE_CLOUD_ASR_MODE": "api",
+    "VOICE_LOCAL_STREAMING_ASR_MODE": "live-captions",
+    "VOICE_CLOUD_STREAMING_ASR_MODE": "live-captions",
     "VOICE_CLOUD_RESPONSE_PROVIDER": "openai",
     "VOICE_AGENT_TTS_BACKEND": "piper",
     "KOKORO_TTS_VOICE": "af_heart",

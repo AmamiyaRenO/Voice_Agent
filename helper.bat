@@ -5,6 +5,11 @@ cd /d "%~dp0"
 set "VOICE_AGENT_DEFAULT_CONFIG=%CD%\scripts\local_services.default.json"
 set "VOICE_AGENT_LAUNCHER_CONFIG=%CD%\scripts\local_services.user.json"
 set "VOICE_AGENT_LAUNCH_ARGS="
+set "VOICE_AGENT_MQTT_PORT=1883"
+
+for /f %%I in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$port='1883'; $cfgPath='%VOICE_AGENT_LAUNCHER_CONFIG%'; if (Test-Path $cfgPath) { try { $cfg = Get-Content -Path $cfgPath -Raw | ConvertFrom-Json; $candidate = [string]$cfg.env.MQTT_PORT; if ($candidate) { $port = $candidate.Trim() } } catch {} }; Write-Output $port"') do (
+  set "VOICE_AGENT_MQTT_PORT=%%I"
+)
 
 echo [voice-agent] clearing existing service processes...
 for %%P in (
@@ -48,9 +53,9 @@ if exist "C:\Program Files\mosquitto\mosquitto.exe" (
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$c = New-Object System.Net.Sockets.TcpClient; try { $c.Connect('127.0.0.1',1883); exit 0 } catch { exit 1 } finally { $c.Dispose() }" >nul 2>nul
+  "$port = [int]('%VOICE_AGENT_MQTT_PORT%'); $c = New-Object System.Net.Sockets.TcpClient; try { $c.Connect('127.0.0.1',$port); exit 0 } catch { exit 1 } finally { $c.Dispose() }" >nul 2>nul
 if %errorlevel%==0 (
-  echo [voice-agent] detected existing MQTT broker on 1883, using --no-hub.
+  echo [voice-agent] detected existing MQTT broker on %VOICE_AGENT_MQTT_PORT%, using --no-hub.
   set "VOICE_AGENT_LAUNCH_ARGS=--no-hub"
 )
 
@@ -80,6 +85,11 @@ if exist "%ASR_VENV_PY%" (
 
 where py >nul 2>nul
 if %errorlevel%==0 (
+  py -3.12 -c "import sys" >nul 2>nul
+  if %errorlevel%==0 (
+    py -3.12 scripts\start_local_services.py %VOICE_AGENT_LAUNCH_ARGS%
+    exit /b %errorlevel%
+  )
   py -3 scripts\start_local_services.py %VOICE_AGENT_LAUNCH_ARGS%
   exit /b %errorlevel%
 )

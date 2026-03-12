@@ -432,6 +432,229 @@ def test_desktop_audio_agent_relaxes_short_live_captions_queries():
     ) == audio_agent_module.TRANSCRIPT_CONFIDENCE_LOW
 
 
+def test_sanitize_tts_text_strips_keycap_and_symbol_emoji():
+    if str(DIALOG_DIR) not in sys.path:
+        sys.path.insert(0, str(DIALOG_DIR))
+
+    text_utils_module = _load_module("dialog_text_utils_sanitize_module", DIALOG_DIR / "text_utils.py")
+
+    assert text_utils_module.sanitize_tts_text("Hi 1️⃣ 😊 ™️ there") == "Hi there"
+
+
+def test_desktop_audio_agent_partial_fallback_skips_incomplete_query(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module("desktop_audio_agent_partial_incomplete_module", PYTHON_VOICE_DIR / "desktop_audio_agent.py")
+    monkeypatch.setattr(audio_agent_module, "DEFAULT_PARTIAL_COMMIT_DELAY_SECONDS", 0.0)
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    submitted = []
+    log_lines = []
+
+    async def fake_submit_user_turn(**kwargs):
+        submitted.append(kwargs)
+
+    agent.current_asr_mode = "moonshine"
+    agent._listening = True
+    agent.is_assistant_speaking = lambda: False
+    agent._suppress_transcript_during_enrollment = lambda source, text=None: False
+    agent._speech_active_last = False
+    agent._speech_ended_at = 10.0
+    agent._partial_commit_anchor_at = 10.0
+    agent._last_final_event_at = 0.0
+    agent._last_partial_text = "help me with"
+    agent._last_stable_partial_text = "help me with"
+    agent._last_partial_text_changed_at = 10.0
+    agent._last_stable_partial_text_changed_at = 10.0
+    agent._command_grammar = SimpleNamespace(
+        canonicalize=lambda text: SimpleNamespace(
+            canonical_text=text,
+            route_type="QUERY",
+            game_name="",
+            confidence=0.0,
+        )
+    )
+    agent.log_store = SimpleNamespace(add=lambda *_args, **_kwargs: log_lines.append((_args, _kwargs)))
+    agent._submit_user_turn = fake_submit_user_turn
+
+    asyncio.run(agent._commit_partial_after_delay(10.0, 10.0))
+
+    assert submitted == []
+    assert log_lines == []
+
+
+def test_desktop_audio_agent_partial_fallback_respects_later_final(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module("desktop_audio_agent_partial_final_guard_module", PYTHON_VOICE_DIR / "desktop_audio_agent.py")
+    monkeypatch.setattr(audio_agent_module, "DEFAULT_PARTIAL_COMMIT_DELAY_SECONDS", 0.0)
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    submitted = []
+
+    async def fake_submit_user_turn(**kwargs):
+        submitted.append(kwargs)
+
+    agent.current_asr_mode = "moonshine"
+    agent._listening = True
+    agent.is_assistant_speaking = lambda: False
+    agent._suppress_transcript_during_enrollment = lambda source, text=None: False
+    agent._speech_active_last = False
+    agent._speech_ended_at = 10.0
+    agent._partial_commit_anchor_at = 10.0
+    agent._last_final_event_at = 10.1
+    agent._last_partial_text = "Can you hear me"
+    agent._last_stable_partial_text = "Can you hear me"
+    agent._last_partial_text_changed_at = 10.0
+    agent._last_stable_partial_text_changed_at = 10.0
+    agent._command_grammar = SimpleNamespace(
+        canonicalize=lambda text: SimpleNamespace(
+            canonical_text=text,
+            route_type="QUERY",
+            game_name="",
+            confidence=0.0,
+        )
+    )
+    agent.log_store = SimpleNamespace(add=lambda *_args, **_kwargs: None)
+    agent._submit_user_turn = fake_submit_user_turn
+
+    asyncio.run(agent._commit_partial_after_delay(10.0, 10.0))
+
+    assert submitted == []
+
+
+def test_desktop_audio_agent_partial_fallback_commits_balanced_query(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module("desktop_audio_agent_partial_balanced_query_module", PYTHON_VOICE_DIR / "desktop_audio_agent.py")
+    monkeypatch.setattr(audio_agent_module, "DEFAULT_PARTIAL_COMMIT_DELAY_SECONDS", 0.0)
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    submitted = []
+
+    async def fake_submit_user_turn(**kwargs):
+        submitted.append(kwargs)
+
+    agent.current_asr_mode = "moonshine"
+    agent._listening = True
+    agent.is_assistant_speaking = lambda: False
+    agent._suppress_transcript_during_enrollment = lambda source, text=None: False
+    agent._speech_active_last = False
+    agent._speech_ended_at = 10.0
+    agent._partial_commit_anchor_at = 10.0
+    agent._last_final_event_at = 0.0
+    agent._last_partial_text = "Can you hear me"
+    agent._last_stable_partial_text = "Can you hear me"
+    agent._last_partial_text_changed_at = 10.0
+    agent._last_stable_partial_text_changed_at = 10.0
+    agent._command_grammar = SimpleNamespace(
+        canonicalize=lambda text: SimpleNamespace(
+            canonical_text=text,
+            route_type="QUERY",
+            game_name="",
+            confidence=0.0,
+        )
+    )
+    agent.log_store = SimpleNamespace(add=lambda *_args, **_kwargs: None)
+    agent._submit_user_turn = fake_submit_user_turn
+
+    asyncio.run(agent._commit_partial_after_delay(10.0, 10.0))
+
+    assert len(submitted) == 1
+    assert submitted[0]["text"] == "Can you hear me"
+    assert submitted[0]["transcript_source"] == audio_agent_module.TRANSCRIPT_SOURCE_STABLE_PARTIAL_FALLBACK
+
+
+def test_desktop_audio_agent_play_piper_text_sanitizes_assistant_log():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module("desktop_audio_agent_piper_sanitize_module", PYTHON_VOICE_DIR / "desktop_audio_agent.py")
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    logs = []
+
+    class _DummyStreamResponse:
+        headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            if False:
+                yield b""
+
+    class _DummyClient:
+        def stream(self, *_args, **_kwargs):
+            return _DummyStreamResponse()
+
+    agent._client = _DummyClient()
+    agent._player = SimpleNamespace(
+        begin_stream=lambda: None,
+        enqueue_pcm16=lambda *_args, **_kwargs: None,
+        end_stream=lambda: None,
+    )
+    agent._recent_assistant_texts = deque()
+    agent._last_assistant_spoke_at = 0.0
+    agent.output_sample_rate = 22050
+    agent.piper_base_url = "http://example.test"
+    agent.log_store = SimpleNamespace(add=lambda *_args, **_kwargs: logs.append((_args, _kwargs)))
+    agent._wait_for_playback_drain = lambda: asyncio.sleep(0)
+
+    asyncio.run(
+        agent._play_piper_text(
+            text="Hi 1️⃣ 😊 ™️ there",
+            voice=None,
+            model=None,
+            instruct=None,
+            source="test",
+            log_message=True,
+            wait_for_drain=False,
+        )
+    )
+
+    assert logs[0][0][1] == "Hi there"
+
+
+def test_desktop_audio_agent_frozen_live_captions_defaults_use_installed_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    app_root = tmp_path / "VoiceAgent"
+    services_dir = app_root / "runtime" / "services"
+    live_captions_dir = app_root / "runtime" / "live_captions"
+    state_dir = tmp_path / "state"
+    services_dir.mkdir(parents=True)
+    live_captions_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    exe_path = services_dir / "desktop_runtime.exe"
+    helper_path = live_captions_dir / "EnableLcMic.exe"
+    exe_path.write_text("stub", encoding="utf-8")
+    helper_path.write_text("stub", encoding="utf-8")
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_path), raising=False)
+    monkeypatch.delenv("LIVE_CAPTIONS_LISTENER_EXE", raising=False)
+    monkeypatch.delenv("LIVE_CAPTIONS_OUTPUT_DIR", raising=False)
+    monkeypatch.setenv("VOICE_AGENT_STATE_DIR", str(state_dir))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_frozen_live_captions_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+
+    assert Path(audio_agent_module.DEFAULT_LIVE_CAPTIONS_EXE) == helper_path.resolve()
+    assert Path(audio_agent_module.DEFAULT_LIVE_CAPTIONS_OUTPUT_DIR) == (state_dir / "live_captions").resolve()
+
+
 def test_voice_service_skips_uncertain_turn_guard_for_live_captions_final():
     pytest.importorskip("fastapi")
     pytest.importorskip("httpx")
@@ -814,6 +1037,229 @@ def test_desktop_audio_agent_input_callback_resamples_to_capture_rate():
 
     assert len(pushed) == 1
     assert pushed[0].size == pytest.approx(160, abs=2)
+
+
+def test_desktop_audio_agent_publish_face_normalizes_panel_payload():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_publish_face_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    published = []
+
+    async def fake_publish(topic, payload):
+        published.append((topic, payload))
+
+    agent._publish_mqtt = fake_publish
+
+    asyncio.run(agent.publish_face({"mode": "happy", "seconds": 3}))
+
+    assert published == [("robot/pi/face/cmd", {"action": "face", "value": "happy:3"})]
+
+
+def test_desktop_audio_agent_publish_led_normalizes_panel_payload():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_publish_led_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    published = []
+
+    async def fake_publish(topic, payload):
+        published.append((topic, payload))
+
+    agent._publish_mqtt = fake_publish
+
+    asyncio.run(
+        agent.publish_led(
+            {
+                "mode": "breathe",
+                "color": "#00BFFF",
+                "brightness": 0.8,
+                "period": 2.5,
+                "duration": 3,
+            }
+        )
+    )
+
+    assert published == [
+        (
+            "robot/pi/led/cmd",
+            {"action": "led", "value": "breathe:#00BFFF:3:0.8:2.5"},
+        )
+    ]
+
+
+def test_desktop_audio_agent_publish_flower_normalizes_panel_payload():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_publish_flower_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    published = []
+
+    async def fake_publish(topic, payload):
+        published.append((topic, payload))
+
+    agent._publish_mqtt = fake_publish
+
+    asyncio.run(agent.publish_flower({"action": "open_hold"}))
+
+    assert published == [("robot/pi/servo/cmd", {"action": "servo", "value": "open"})]
+
+
+def test_live_captions_source_defaults_to_hide_after_mic_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    monkeypatch.delenv("LIVE_CAPTIONS_MINIMIZE_WINDOW", raising=False)
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_live_captions_hide_default_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+
+    exe_path = tmp_path / "EnableLcMic.exe"
+    exe_path.write_text("stub", encoding="utf-8")
+    output_dir = tmp_path / "captions"
+    launched = {"args": None}
+
+    class DummyProcess:
+        def poll(self):
+            return None
+
+        @property
+        def stdout(self):
+            return None
+
+        @property
+        def stderr(self):
+            return None
+
+    class DummyThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return None
+
+    def fake_popen(args, **kwargs):
+        launched["args"] = list(args)
+        return DummyProcess()
+
+    monkeypatch.setattr(audio_agent_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(audio_agent_module.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(audio_agent_module.threading, "Thread", DummyThread)
+
+    source = audio_agent_module.LiveCaptionsTranscriptSource(
+        exe_path=str(exe_path),
+        output_dir=str(output_dir),
+        on_caption=lambda *_args: None,
+        on_error=lambda *_args: None,
+    )
+    source.start()
+
+    assert audio_agent_module.DEFAULT_LIVE_CAPTIONS_MINIMIZE_WINDOW is True
+    assert launched["args"] is not None
+    assert "--headless" in launched["args"]
+    assert "--show-live-captions" not in launched["args"]
+
+
+def test_live_captions_source_exit_error_includes_recent_stderr_tail(tmp_path: Path):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_live_captions_exit_error_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+
+    source = audio_agent_module.LiveCaptionsTranscriptSource(
+        exe_path=str(tmp_path / "EnableLcMic.exe"),
+        output_dir=str(tmp_path / "captions"),
+        on_caption=lambda *_args: None,
+        on_error=lambda *_args: None,
+    )
+    source._stderr_tail.extend(
+        [
+            "first line",
+            "second line",
+            "at MS.Internal.WindowsBase.NativeMethodsSetLastError.SetWindowLongPtrWndProc(...)",
+            "final line",
+        ]
+    )
+
+    message = source._build_exit_error_message(3221226525)
+
+    assert "3221226525" in message
+    assert "first line" not in message
+    assert "second line" in message
+    assert "at MS.Internal.WindowsBase.NativeMethodsSetLastError.SetWindowLongPtrWndProc(...)" in message
+    assert "final line" in message
+
+
+def test_live_captions_source_retries_visible_window_after_quick_hidden_crash(tmp_path: Path):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_live_captions_retry_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    errors = []
+    launches = []
+
+    source = audio_agent_module.LiveCaptionsTranscriptSource(
+        exe_path=str(tmp_path / "EnableLcMic.exe"),
+        output_dir=str(tmp_path / "captions"),
+        on_caption=lambda *_args: None,
+        on_error=lambda message: errors.append(message),
+    )
+    source._launch_started_at = time.monotonic()
+    source._current_show_live_captions = False
+    source._visible_retry_attempted = False
+    source._launch_process = lambda *, show_live_captions, restart_reason: launches.append(
+        (show_live_captions, restart_reason)
+    )
+
+    restarted = source._restart_visible_fallback("live captions listener exited with code 3221226525")
+
+    assert restarted is True
+    assert launches == [(True, "retrying live captions with visible window")]
+    assert errors
+    assert "retrying with visible Live Captions window" in errors[-1]
+
+
+def test_local_service_templates_default_to_live_captions_streaming_modes():
+    default_payload = json.loads((ROOT / "scripts" / "local_services.default.json").read_text(encoding="utf-8-sig"))
+    sample_payload = json.loads((ROOT / "scripts" / "local_services.user.sample.json").read_text(encoding="utf-8-sig"))
+
+    assert default_payload["env"]["VOICE_LOCAL_STREAMING_ASR_MODE"] == "live-captions"
+    assert default_payload["env"]["VOICE_CLOUD_STREAMING_ASR_MODE"] == "live-captions"
+    assert sample_payload["env"]["VOICE_LOCAL_STREAMING_ASR_MODE"] == "live-captions"
+    assert sample_payload["env"]["VOICE_CLOUD_STREAMING_ASR_MODE"] == "live-captions"
+
+
+def test_packaging_bundles_live_captions_runtime_directory():
+    packaging_module = _load_module(
+        "build_services_exe_packaging_module",
+        ROOT / "scripts" / "packaging" / "build_services_exe.py",
+    )
+    specs = packaging_module._service_specs()
+    desktop_spec = specs["desktop_runtime"]
+
+    assert (
+        ROOT / "runtime" / "live_captions",
+        "runtime/live_captions",
+    ) in desktop_spec.add_data
 
 
 def test_desktop_runtime_clear_speaker_profile_for_user(tmp_path: Path):

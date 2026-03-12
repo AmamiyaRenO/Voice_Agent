@@ -10,6 +10,8 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..\..")
 $InstallerScript = Join-Path $RepoRoot "installer\voice_agent_setup.iss"
+$LiveCaptionsProject = Join-Path $RepoRoot "..\LiveCaptionsListener\EnableLcMic.csproj"
+$LiveCaptionsRuntimeDir = Join-Path $RepoRoot "runtime\live_captions"
 
 function Resolve-IsccPath {
     param([string]$RequestedPath)
@@ -83,6 +85,28 @@ function Resolve-IsccPath {
     return ""
 }
 
+function Publish-LiveCaptionsHelper {
+    $outputExe = Join-Path $LiveCaptionsRuntimeDir "EnableLcMic.exe"
+
+    if (Test-Path $LiveCaptionsProject) {
+        Write-Host "[installer] publishing Live Captions helper..."
+        if (Test-Path $LiveCaptionsRuntimeDir) {
+            Remove-Item -Recurse -Force $LiveCaptionsRuntimeDir
+        }
+        New-Item -ItemType Directory -Force -Path $LiveCaptionsRuntimeDir | Out-Null
+        & dotnet publish $LiveCaptionsProject -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o $LiveCaptionsRuntimeDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to publish Live Captions helper (exit=$LASTEXITCODE)."
+        }
+    }
+
+    if (-not (Test-Path $outputExe)) {
+        throw "Live Captions helper not found: $outputExe"
+    }
+
+    return (Resolve-Path $outputExe).Path
+}
+
 if (-not (Test-Path $InstallerScript)) {
     throw "Installer script not found: $InstallerScript"
 }
@@ -113,6 +137,7 @@ if ($PiperRuntimeDir) {
 }
 
 $IsccPath = Resolve-IsccPath -RequestedPath $IsccPath
+$LiveCaptionsHelperExe = Publish-LiveCaptionsHelper
 
 if (-not $IsccPath) {
     throw "ISCC.exe not found. Install Inno Setup 6 and pass -IsccPath."
@@ -121,6 +146,7 @@ if (-not $IsccPath) {
 Write-Host "[installer] ISCC: $IsccPath"
 Write-Host "[installer] Unity build: $UnityBuildDir"
 Write-Host "[installer] Services: $ServicesDir"
+Write-Host "[installer] Live Captions helper: $LiveCaptionsHelperExe"
 if ($PiperRuntimeDir) {
     Write-Host "[installer] Piper runtime: $PiperRuntimeDir"
 }

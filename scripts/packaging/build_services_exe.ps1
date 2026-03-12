@@ -13,6 +13,8 @@ $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..\..")
 $BuildRoot = Join-Path $RepoRoot ".build\pyinstaller"
 $VenvDir = Join-Path $BuildRoot "venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+$LiveCaptionsProject = Join-Path $RepoRoot "..\LiveCaptionsListener\EnableLcMic.csproj"
+$LiveCaptionsRuntimeDir = Join-Path $RepoRoot "runtime\live_captions"
 
 function Resolve-BootstrapPython {
     param([string]$Preferred)
@@ -96,6 +98,26 @@ function New-PackagingVenv {
     }
 }
 
+function Publish-LiveCaptionsHelper {
+    $outputExe = Join-Path $LiveCaptionsRuntimeDir "EnableLcMic.exe"
+
+    if (Test-Path $LiveCaptionsProject) {
+        Write-Host "[build-exe] publish Live Captions helper"
+        if (Test-Path $LiveCaptionsRuntimeDir) {
+            Remove-Item -Recurse -Force $LiveCaptionsRuntimeDir
+        }
+        New-Item -ItemType Directory -Force -Path $LiveCaptionsRuntimeDir | Out-Null
+        & dotnet publish $LiveCaptionsProject -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o $LiveCaptionsRuntimeDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "Live Captions helper publish failed (exit=$LASTEXITCODE)."
+        }
+    }
+
+    if (-not (Test-Path $outputExe)) {
+        throw "Live Captions helper not found: $outputExe"
+    }
+}
+
 $requestedPythonPath = Resolve-PythonExecutablePath -Candidate $PythonExe
 $requestedPyVer = $null
 if ($requestedPythonPath) {
@@ -150,6 +172,8 @@ $BuildScript = Join-Path $RepoRoot "scripts\packaging\build_services_exe.py"
 $args = @($BuildScript, "--services", $Services)
 if ($IncludeQwen) { $args += "--include-qwen" }
 if ($Clean) { $args += "--clean" }
+
+Publish-LiveCaptionsHelper
 
 Write-Host "[build-exe] run build script"
 Invoke-Checked $VenvPython @args

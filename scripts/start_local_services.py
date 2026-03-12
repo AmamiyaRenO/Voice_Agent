@@ -394,7 +394,7 @@ def _detect_mosquitto_executable() -> Optional[str]:
     return None
 
 
-def _resolve_default_hub_command(repo_root: Path) -> Optional[str]:
+def _resolve_default_hub_command(repo_root: Path, mqtt_port: Optional[str] = None) -> Optional[str]:
     """Resolve a default local MQTT broker command without Robot_opr dependency."""
     broker_cmd = os.environ.get("VOICE_AGENT_BROKER_CMD", "").strip()
     if broker_cmd:
@@ -404,9 +404,18 @@ def _resolve_default_hub_command(repo_root: Path) -> Optional[str]:
     if not mosquitto_exe:
         return None
 
-    conf = repo_root / "scripts" / "mqtt" / "mosquitto.conf"
-    if conf.exists():
-        return f'"{mosquitto_exe}" -c "{conf}" -v'
+    normalized_port = _normalize_string(mqtt_port)
+    conf_candidates: List[Path] = []
+    if normalized_port and normalized_port != "1883":
+        conf_candidates.append(repo_root / "scripts" / "mqtt" / f"mosquitto_{normalized_port}.conf")
+    conf_candidates.append(repo_root / "scripts" / "mqtt" / "mosquitto.conf")
+
+    for conf in conf_candidates:
+        if conf.exists():
+            return f'"{mosquitto_exe}" -c "{conf}" -v'
+
+    if normalized_port and normalized_port != "1883":
+        return f'"{mosquitto_exe}" -p {normalized_port} -v'
     return f'"{mosquitto_exe}" -v'
 
 
@@ -478,6 +487,78 @@ def _env_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _python_major_minor(python_exe: str) -> Optional[Tuple[int, int]]:
+    try:
+        result = subprocess.run(
+            [python_exe, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return None
+    parts = raw.split(".", 1)
+    if len(parts) != 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
+def _python_from_py_launcher(tag: str) -> str:
+    if os.name != "nt":
+        return ""
+    try:
+        result = subprocess.run(
+            ["py", f"-{tag}", "-c", "import sys; print(sys.executable)"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    path = (result.stdout or "").strip()
+    if not path:
+        return ""
+    candidate = Path(path)
+    if candidate.exists():
+        return str(candidate)
+    return ""
+
+
+def _pick_bootstrap_python(default_python: str) -> str:
+    override = _resolve_executable_override(
+        os.environ.get("VOICE_AGENT_BOOTSTRAP_PYTHON", ""),
+        base_dir=Path.cwd(),
+    )
+    if override:
+        return override
+
+    default_version = _python_major_minor(default_python)
+    if os.name == "nt" and default_version and default_version >= (3, 13):
+        for tag in ("3.12", "3.11", "3.10"):
+            candidate = _python_from_py_launcher(tag)
+            if not candidate:
+                continue
+            candidate_version = _python_major_minor(candidate)
+            if not candidate_version:
+                continue
+            print(f"[voice-agent] bootstrap: using Python {tag} for venv setup ({candidate})")
+            return candidate
+        print("[voice-agent] bootstrap: Python 3.13 detected and no 3.12/3.11/3.10 launcher found.")
+    return default_python
+
+
 def _venv_python_path(venv_dir: Path) -> Path:
     if os.name == "nt":
         return venv_dir / "Scripts" / "python.exe"
@@ -520,8 +601,22 @@ def _ensure_python_venv(
     cwd: Path,
 ) -> bool:
     venv_python = _venv_python_path(venv_dir)
-    if venv_python.exists() and _python_imports_ok(venv_python, import_checks):
-        return True
+    bootstrap_version = _python_major_minor(bootstrap_python)
+    if venv_python.exists():
+        if _python_imports_ok(venv_python, import_checks):
+            return True
+        venv_version = _python_major_minor(str(venv_python))
+        if bootstrap_version and venv_version and venv_version != bootstrap_version:
+            print(
+                f"[voice-agent] bootstrap: recreating {venv_dir.name} "
+                f"(found Python {venv_version[0]}.{venv_version[1]}, expected {bootstrap_version[0]}.{bootstrap_version[1]})"
+            )
+            try:
+                shutil.rmtree(venv_dir)
+            except Exception as exc:
+                print(f"[voice-agent] bootstrap: failed to remove stale venv {venv_dir}: {exc}")
+                return False
+            venv_python = _venv_python_path(venv_dir)
 
     if not venv_python.exists():
         if not _run_bootstrap_command([bootstrap_python, "-m", "venv", str(venv_dir)], cwd):
@@ -569,6 +664,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
     )
 
     running_frozen = bool(getattr(sys, "frozen", False))
+    bootstrap_python = _pick_bootstrap_python(sys.executable)
     auto_bootstrap_venv = _env_bool("VOICE_AGENT_AUTO_BOOTSTRAP_VENV", True)
     if running_frozen:
         # In packaged mode we prefer bundled service executables and should not
@@ -579,7 +675,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
             venv_dir=service_dir / ".venv_asr",
             requirements_files=[service_dir / "requirements.txt"],
             import_checks=["fastapi", "uvicorn", "numpy", "httpx", "paho.mqtt.client", "yaml", "sounddevice", "cv2"],
-            bootstrap_python=sys.executable,
+            bootstrap_python=bootstrap_python,
             cwd=service_dir,
         )
         if not asr_ok:
@@ -590,7 +686,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
             venv_dir=service_dir / ".venv_tts",
             requirements_files=[service_dir / "requirements_qwen_tts.txt"],
             import_checks=["fastapi", "uvicorn", "numpy", "kokoro"],
-            bootstrap_python=sys.executable,
+            bootstrap_python=bootstrap_python,
             cwd=service_dir,
         )
         if not tts_ok:
@@ -604,7 +700,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         config_override=asr_override,
         config_base_dir=repo_root,
         env_var="VOICE_AGENT_ASR_PYTHON",
-        fallback="python" if running_frozen else sys.executable,
+        fallback="python" if running_frozen else bootstrap_python,
     )
     tts_python = _resolve_python_executable(
         preferred_paths=[
@@ -803,13 +899,18 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         else str(script_dir / "dialog_service")
     )
 
+    default_hub_cmd = _normalize_string(env_cfg.get("VOICE_AGENT_BROKER_CMD")) or _resolve_default_hub_command(
+        repo_root,
+        mqtt_port=_normalize_string(env_cfg.get("MQTT_PORT")),
+    )
+
     return LauncherDefaults(
         repo_root=repo_root,
         script_dir=script_dir,
         service_dir=service_dir,
         launcher_config_path=config_path,
         launcher_default_config_path=default_config_path,
-        default_hub_cmd=_resolve_default_hub_command(repo_root),
+        default_hub_cmd=default_hub_cmd,
         asr_python=asr_python,
         tts_python=tts_python,
         intent_manifest_path=intent_manifest,

@@ -428,8 +428,7 @@ class DialogService:
                     "[dialog] dialog context enabled "
                     f"turns={self.cfg.dialog_history_turns} "
                     f"summary_chars={self.cfg.dialog_summary_max_chars} "
-                    f"context_chars={self.cfg.dialog_context_max_chars} "
-                    f"policy={'on' if self.cfg.enable_dialog_policy else 'off'}"
+                    f"context_chars={self.cfg.dialog_context_max_chars}"
                 )
             if self.user_memory_embedder is not None:
                 if self.user_memory_embedder.ready:
@@ -599,21 +598,13 @@ class DialogService:
         user_id: str,
         user_text: str,
         answer_text: str,
-        dialog_policy: str,
         previous_topic: str,
     ) -> None:
         if self.user_memory is None or not self.cfg.enable_dialog_context:
             return
 
         topic_hint = _extract_topic_hint(user_text)
-        next_topic = previous_topic
-        if dialog_policy == "switch_topic":
-            next_topic = topic_hint or previous_topic
-        elif dialog_policy == "continue_topic" and topic_hint:
-            next_topic = topic_hint
-        elif dialog_policy == "ask_clarify" and not next_topic:
-            next_topic = topic_hint
-
+        next_topic = topic_hint or previous_topic
         next_open_question = _extract_open_question(answer_text)
         self.user_memory.update_dialog_slots(
             user_id,
@@ -629,7 +620,6 @@ class DialogService:
     ) -> Dict[str, str]:
         result: Dict[str, str] = {
             "dialog_context": "",
-            "dialog_policy": "switch_topic",
             "current_topic": "",
             "open_question": "",
         }
@@ -650,11 +640,6 @@ class DialogService:
         slots = self.user_memory.get_dialog_slots(user_id)
         current_topic = str(slots.get("current_topic") or "").strip()
         open_question = str(slots.get("open_question") or "").strip()
-        dialog_policy = self._classify_dialog_policy(
-            user_text=user_text,
-            current_topic=current_topic,
-            open_question=open_question,
-        )
 
         self.user_memory.remember_dialog_turn(
             user_id,
@@ -663,41 +648,16 @@ class DialogService:
             max_turns=self.cfg.dialog_history_turns,
             summary_max_chars=self.cfg.dialog_summary_max_chars,
         )
-        if dialog_policy == "switch_topic":
-            next_topic_hint = _extract_topic_hint(user_text)
-            if next_topic_hint:
-                current_topic = next_topic_hint
-            # For hard topic switches, avoid dragging long old context.
-            dialog_context = self.user_memory.build_dialog_context(
-                user_id,
-                max_turns=2,
-                max_chars=min(self.cfg.dialog_context_max_chars, 320),
-                include_summary=False,
-                include_slots=True,
-                include_recent_dialogue=False,
-            )
-            open_question = ""
-        elif dialog_policy == "ask_clarify":
-            dialog_context = self.user_memory.build_dialog_context(
-                user_id,
-                max_turns=min(self.cfg.dialog_history_turns, 4),
-                max_chars=min(self.cfg.dialog_context_max_chars, 560),
-                include_summary=True,
-                include_slots=True,
-                include_recent_dialogue=True,
-            )
-        else:
-            dialog_context = self.user_memory.build_dialog_context(
-                user_id,
-                max_turns=self.cfg.dialog_history_turns,
-                max_chars=self.cfg.dialog_context_max_chars,
-                include_summary=True,
-                include_slots=True,
-                include_recent_dialogue=True,
-            )
+        dialog_context = self.user_memory.build_dialog_context(
+            user_id,
+            max_turns=self.cfg.dialog_history_turns,
+            max_chars=self.cfg.dialog_context_max_chars,
+            include_summary=True,
+            include_slots=False,
+            include_recent_dialogue=True,
+        )
 
         result["dialog_context"] = dialog_context
-        result["dialog_policy"] = dialog_policy
         result["current_topic"] = current_topic
         result["open_question"] = open_question
         return result
@@ -768,7 +728,6 @@ class DialogService:
         memory_context = ""
         dialog_request_ctx: Dict[str, str] = {
             "dialog_context": "",
-            "dialog_policy": "switch_topic",
             "current_topic": "",
             "open_question": "",
         }
@@ -794,14 +753,11 @@ class DialogService:
                     memory_update = self.user_memory.remember_utterance(user_id, text)
                     memory_context = self.user_memory.build_memory_context(user_id, query_text=text)
                     dialog_request_ctx = self._build_dialog_request_context(user_id=user_id, user_text=text)
-                    if dialog_request_ctx.get("dialog_policy") == "switch_topic":
-                        memory_context = ""
             except Exception as exc:
                 print(f"[dialog] user memory resolve failed: {exc}")
                 memory_context = ""
                 dialog_request_ctx = {
                     "dialog_context": "",
-                    "dialog_policy": "switch_topic",
                     "current_topic": "",
                     "open_question": "",
                 }
@@ -828,7 +784,6 @@ class DialogService:
                             user_id=user_id,
                             user_text=text,
                             answer_text=memory_write_reply,
-                            dialog_policy=dialog_request_ctx.get("dialog_policy", "switch_topic"),
                             previous_topic=dialog_request_ctx.get("current_topic", ""),
                         )
                     except Exception as exc:
@@ -875,7 +830,6 @@ class DialogService:
                                 user_id=user_id,
                                 user_text=text,
                                 answer_text=memory_reply,
-                                dialog_policy=dialog_request_ctx.get("dialog_policy", "switch_topic"),
                                 previous_topic=dialog_request_ctx.get("current_topic", ""),
                             )
                         except Exception as exc:
@@ -934,7 +888,6 @@ class DialogService:
                             user_id=user_id,
                             user_text=text,
                             answer_text=grounded_reply,
-                            dialog_policy=dialog_request_ctx.get("dialog_policy", "switch_topic"),
                             previous_topic=dialog_request_ctx.get("current_topic", ""),
                         )
                     except Exception as exc:
@@ -977,7 +930,6 @@ class DialogService:
                             user_id=user_id,
                             user_text=text,
                             answer_text=vision_reply,
-                            dialog_policy=dialog_request_ctx.get("dialog_policy", "switch_topic"),
                             previous_topic=dialog_request_ctx.get("current_topic", ""),
                         )
                     except Exception as exc:
@@ -995,12 +947,6 @@ class DialogService:
                 body["user_id"] = user_id
             if dialog_request_ctx.get("dialog_context"):
                 body["dialog_context"] = dialog_request_ctx["dialog_context"]
-            if dialog_request_ctx.get("dialog_policy"):
-                body["dialog_policy"] = dialog_request_ctx["dialog_policy"]
-            if dialog_request_ctx.get("current_topic"):
-                body["current_topic"] = dialog_request_ctx["current_topic"]
-            if dialog_request_ctx.get("open_question"):
-                body["open_question"] = dialog_request_ctx["open_question"]
             if barge_in:
                 body["barge_in"] = True
             if interrupted_tts_text:
@@ -1008,7 +954,7 @@ class DialogService:
             if user_id:
                 print(
                     "[dialog] respond uses backend runtime/default system prompt "
-                    f"user_id={user_id} policy={dialog_request_ctx.get('dialog_policy', 'switch_topic')}"
+                    f"user_id={user_id}"
                 )
             else:
                 print("[dialog] respond uses backend runtime/default system prompt")
@@ -1071,7 +1017,6 @@ class DialogService:
                     user_id=user_id,
                     user_text=text,
                     answer_text=answer_text,
-                    dialog_policy=dialog_request_ctx.get("dialog_policy", "switch_topic"),
                     previous_topic=dialog_request_ctx.get("current_topic", ""),
                 )
             except Exception as exc:

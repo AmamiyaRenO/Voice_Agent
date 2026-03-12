@@ -36,9 +36,6 @@ OutputBaseFilename=VoiceAgentSetup
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-[Tasks]
-Name: "desktopicon"; Description: "Create a desktop icon"; Flags: unchecked
-
 [Files]
 ; Include only expected Unity player outputs to avoid accidentally packaging
 ; unrelated large folders from parent/root paths.
@@ -48,6 +45,7 @@ Source: "{#UnityBuildDir}\UnityCrashHandler64.exe"; DestDir: "{app}\app"; Flags:
 Source: "{#UnityBuildDir}\MonoBleedingEdge\*"; DestDir: "{app}\app\MonoBleedingEdge"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#UnityBuildDir}\VoiceAgent_Data\*"; DestDir: "{app}\app\VoiceAgent_Data"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#ServiceExeDir}\*"; DestDir: "{app}\runtime\services"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\runtime\live_captions\*"; DestDir: "{app}\runtime\live_captions"; Flags: ignoreversion recursesubdirs createallsubdirs
 #if Len(PiperRuntimeDir) > 0
 Source: "{#PiperRuntimeDir}\*"; DestDir: "{app}\runtime\piper"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
@@ -58,10 +56,10 @@ Source: "..\installer\start_voice_agent.bat"; DestDir: "{app}"; Flags: ignorever
 Source: "..\installer\start_voice_agent.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Start Voice Agent"; Filename: "{app}\start_voice_agent.bat"
-Name: "{group}\Open Voice Agent Setup"; Filename: "{app}\start_voice_agent.bat"; Parameters: "-ForceSetup"
+Name: "{group}\Start Voice Agent"; Filename: "{app}\start_voice_agent.bat"; WorkingDir: "{app}"
+Name: "{group}\Open Voice Agent Setup"; Filename: "{app}\start_voice_agent.bat"; Parameters: "-ForceSetup"; WorkingDir: "{app}"
 Name: "{group}\Uninstall Voice Agent"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Voice Agent"; Filename: "{app}\start_voice_agent.bat"; Tasks: desktopicon
+Name: "{autodesktop}\Voice Agent"; Filename: "{app}\start_voice_agent.bat"; WorkingDir: "{app}"
 
 [Run]
 Filename: "{app}\start_voice_agent.bat"; Description: "Launch Voice Agent now"; Flags: postinstall nowait skipifsilent

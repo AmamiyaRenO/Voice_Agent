@@ -9,6 +9,8 @@ $AppRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ScriptsDir = Join-Path $AppRoot "scripts"
 $AppDir = Join-Path $AppRoot "app"
 $RuntimeServicesDir = Join-Path $AppRoot "runtime\services"
+$LiveCaptionsRuntimeDir = Join-Path $AppRoot "runtime\live_captions"
+$LiveCaptionsListenerExe = Join-Path $LiveCaptionsRuntimeDir "EnableLcMic.exe"
 $StateDir = Join-Path $env:LOCALAPPDATA "VoiceAgent"
 $DefaultConfigPath = Join-Path $ScriptsDir "local_services.default.json"
 $UserConfigPath = Join-Path $StateDir "local_services.user.json"
@@ -104,6 +106,12 @@ function Initialize-UserWritableConfig {
     if (-not $config.paths) {
         $config.paths = [pscustomobject]@{}
     }
+    if (-not ($config.PSObject.Properties.Name -contains "env")) {
+        Add-Member -InputObject $config -MemberType NoteProperty -Name env -Value ([pscustomobject]@{})
+    }
+    if (-not $config.env) {
+        $config.env = [pscustomobject]@{}
+    }
 
     $installedCandidates = @(
         Normalize-PathForCompare $InstalledManifestPath,
@@ -119,6 +127,19 @@ function Initialize-UserWritableConfig {
     }
     if (Test-ManifestPathNeedsMigration -CurrentPath $gamePath -InstalledCandidates $installedCandidates) {
         $config.paths.game_manifest = $UserManifestPath
+        $changed = $true
+    }
+
+    if ("$($config.env.VOICE_CONVERSATION_PROFILE)".Trim() -ne "local") {
+        Add-Member -InputObject $config.env -MemberType NoteProperty -Name VOICE_CONVERSATION_PROFILE -Value "local" -Force
+        $changed = $true
+    }
+    if ("$($config.env.VOICE_LOCAL_STREAMING_ASR_MODE)".Trim() -ne "live-captions") {
+        Add-Member -InputObject $config.env -MemberType NoteProperty -Name VOICE_LOCAL_STREAMING_ASR_MODE -Value "live-captions" -Force
+        $changed = $true
+    }
+    if ("$($config.env.VOICE_CLOUD_STREAMING_ASR_MODE)".Trim() -ne "live-captions") {
+        Add-Member -InputObject $config.env -MemberType NoteProperty -Name VOICE_CLOUD_STREAMING_ASR_MODE -Value "live-captions" -Force
         $changed = $true
     }
 
@@ -457,11 +478,6 @@ function Start-ServiceStack {
 }
 
 function Start-UnityClient {
-    if (Wait-HttpOk -Url $PanelHealthUrl -TimeoutSec 1 -IntervalMs 200) {
-        Write-Host "[oneclick] Unity panel is already online."
-        return
-    }
-
     $unityExe = Resolve-UnityExe -Folder $AppDir
     if (-not $unityExe) {
         Write-Warning "[oneclick] Unity executable was not found under $AppDir."
@@ -511,6 +527,17 @@ $env:DIALOG_USER_MEMORY_PATH = Join-Path $StateDir "user_memory.json"
 $env:VOICE_AGENT_QMD_ROOT = Join-Path $StateDir "qmd"
 $env:VOICE_AGENT_DEFAULT_CONFIG = $DefaultConfigPath
 $env:VOICE_AGENT_LAUNCHER_CONFIG = $UserConfigPath
+$env:VOICE_CONVERSATION_PROFILE = "local"
+$env:VOICE_LOCAL_STREAMING_ASR_MODE = "live-captions"
+$env:VOICE_CLOUD_STREAMING_ASR_MODE = "live-captions"
+if (Test-Path $LiveCaptionsListenerExe) {
+    $env:LIVE_CAPTIONS_LISTENER_EXE = (Resolve-Path $LiveCaptionsListenerExe).Path
+}
+$LiveCaptionsOutputDir = Join-Path $StateDir "live_captions"
+if (-not (Test-Path $LiveCaptionsOutputDir)) {
+    New-Item -ItemType Directory -Force -Path $LiveCaptionsOutputDir | Out-Null
+}
+$env:LIVE_CAPTIONS_OUTPUT_DIR = $LiveCaptionsOutputDir
 
 Write-Host "[oneclick] app root: $AppRoot"
 Write-Host "[oneclick] config: $UserConfigPath"

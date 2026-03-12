@@ -7,8 +7,10 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -83,6 +85,94 @@ except Exception:
 
 logger = logging.getLogger("desktop_audio_agent")
 
+
+def _resolve_app_root() -> Path:
+    if bool(getattr(sys, "frozen", False)):
+        exe_dir = Path(sys.executable).resolve().parent
+        if exe_dir.name.lower() == "services" and exe_dir.parent.name.lower() == "runtime":
+            return exe_dir.parent.parent
+        return exe_dir
+    return Path(__file__).resolve().parents[1]
+
+
+def _resolve_bundle_root(app_root: Path) -> Path:
+    raw = getattr(sys, "_MEIPASS", "")
+    if raw:
+        try:
+            return Path(str(raw)).resolve()
+        except Exception:
+            pass
+    return app_root
+
+
+def _resolve_state_dir(app_root: Path) -> Path:
+    env_state = str(os.getenv("VOICE_AGENT_STATE_DIR") or "").strip()
+    if env_state:
+        try:
+            return Path(os.path.expandvars(env_state)).expanduser().resolve()
+        except Exception:
+            return Path(os.path.expandvars(env_state)).expanduser()
+    if bool(getattr(sys, "frozen", False)):
+        local_app_data = str(os.getenv("LOCALAPPDATA") or "").strip()
+        if local_app_data:
+            return Path(local_app_data).expanduser() / "VoiceAgent"
+        return Path.home() / "AppData" / "Local" / "VoiceAgent"
+    return app_root / "runtime"
+
+
+APP_ROOT = _resolve_app_root()
+BUNDLE_ROOT = _resolve_bundle_root(APP_ROOT)
+STATE_DIR = _resolve_state_dir(APP_ROOT)
+
+for _dialog_dir in (
+    APP_ROOT / "scripts" / "dialog_service",
+    BUNDLE_ROOT / "scripts" / "dialog_service",
+    Path(__file__).resolve().parents[1] / "scripts" / "dialog_service",
+):
+    if str(_dialog_dir) not in sys.path and _dialog_dir.exists():
+        sys.path.insert(0, str(_dialog_dir))
+
+try:
+    from text_utils import sanitize_tts_text
+except Exception:  # pragma: no cover - fallback for isolated tests
+    def sanitize_tts_text(text: str) -> str:
+        return str(text or "").strip()
+
+
+def _resolve_default_live_captions_exe() -> str:
+    env_override = str(os.getenv("LIVE_CAPTIONS_LISTENER_EXE") or "").strip()
+    if env_override:
+        return env_override
+
+    repo_root = APP_ROOT
+    sibling_root = repo_root.parent
+    candidates = [
+        repo_root / "runtime" / "live_captions" / "EnableLcMic.exe",
+        BUNDLE_ROOT / "runtime" / "live_captions" / "EnableLcMic.exe",
+        sibling_root / "LiveCaptionsListener" / "publish" / "win-x64-single" / "EnableLcMic.exe",
+        sibling_root / "LiveCaptionsListener" / "temp_build" / "win-x64-single" / "EnableLcMic.exe",
+        sibling_root
+        / "LiveCaptionsListener"
+        / "bin"
+        / "Release"
+        / "net8.0-windows10.0.19041.0"
+        / "win-x64"
+        / "EnableLcMic.exe",
+        sibling_root
+        / "LiveCaptionsListener"
+        / "bin"
+        / "Debug"
+        / "net8.0-windows10.0.19041.0"
+        / "EnableLcMic.exe",
+        Path(r"C:\unityproject\LiveCaptionsListener\publish\win-x64-single\EnableLcMic.exe"),
+        Path(r"C:\unityproject\LiveCaptionsListener\temp_build\win-x64-single\EnableLcMic.exe"),
+        Path(r"D:\unityproject\LiveCaptionsListener\temp_build\win-x64-single\EnableLcMic.exe"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+    return str(candidates[-1])
+
 DEFAULT_ASR_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_PIPER_BASE_URL = "http://127.0.0.1:5005"
 DEFAULT_QWEN_BASE_URL = "http://127.0.0.1:5006"
@@ -120,9 +210,15 @@ DEFAULT_FRONTEND_NOISE_BOOTSTRAP_FRAMES = int(
     os.getenv("AUDIO_AGENT_FRONTEND_NOISE_BOOTSTRAP_FRAMES", "18") or "18"
 )
 DEFAULT_PARTIAL_COMMIT_DELAY_SECONDS = float(
-    os.getenv("AUDIO_AGENT_PARTIAL_COMMIT_DELAY_SECONDS", "0.55") or "0.55"
+    os.getenv("AUDIO_AGENT_PARTIAL_COMMIT_DELAY_SECONDS", "0.85") or "0.85"
 )
 DEFAULT_PARTIAL_COMMIT_MIN_CHARS = int(os.getenv("AUDIO_AGENT_PARTIAL_COMMIT_MIN_CHARS", "3") or "3")
+DEFAULT_PARTIAL_COMMIT_QUERY_MIN_CHARS = int(
+    os.getenv("AUDIO_AGENT_PARTIAL_COMMIT_QUERY_MIN_CHARS", "12") or "12"
+)
+DEFAULT_PARTIAL_COMMIT_QUERY_MIN_WORDS = int(
+    os.getenv("AUDIO_AGENT_PARTIAL_COMMIT_QUERY_MIN_WORDS", "3") or "3"
+)
 DEFAULT_API_ASR_PREROLL_MS = float(os.getenv("AUDIO_AGENT_API_ASR_PREROLL_MS", "220") or "220")
 DEFAULT_API_ASR_MIN_TURN_MS = float(os.getenv("AUDIO_AGENT_API_ASR_MIN_TURN_MS", "260") or "260")
 DEFAULT_SPEAKER_ID_PREROLL_MS = float(os.getenv("VOICE_SPEAKER_ID_PREROLL_MS", "180") or "180")
@@ -160,13 +256,10 @@ DEFAULT_GEMINI_LIVE_SYSTEM_PROMPT = (
     "If the user asks to open, start, launch, or close a game, acknowledge briefly in one sentence. "
     "If intent is unclear, ask one short clarification question instead of guessing."
 )
-DEFAULT_LIVE_CAPTIONS_EXE = os.getenv(
-    "LIVE_CAPTIONS_LISTENER_EXE",
-    r"D:\unityproject\LiveCaptionsListener\temp_build\win-x64-single\EnableLcMic.exe",
-)
+DEFAULT_LIVE_CAPTIONS_EXE = _resolve_default_live_captions_exe()
 DEFAULT_LIVE_CAPTIONS_OUTPUT_DIR = os.getenv(
     "LIVE_CAPTIONS_OUTPUT_DIR",
-    str((Path(__file__).resolve().parents[1] / "runtime" / "live_captions").resolve()),
+    str((STATE_DIR / "live_captions").resolve()),
 )
 DEFAULT_LIVE_CAPTIONS_ASSISTANT_SUPPRESS_SECONDS = float(
     os.getenv("LIVE_CAPTIONS_ASSISTANT_SUPPRESS_SECONDS", "1.6") or "1.6"
@@ -178,8 +271,14 @@ DEFAULT_LIVE_CAPTIONS_ASSISTANT_VARIANT_LIMIT = int(
     os.getenv("LIVE_CAPTIONS_ASSISTANT_VARIANT_LIMIT", "256") or "256"
 )
 DEFAULT_LIVE_CAPTIONS_MINIMIZE_WINDOW = str(
-    os.getenv("LIVE_CAPTIONS_MINIMIZE_WINDOW", "0") or "0"
+    os.getenv("LIVE_CAPTIONS_MINIMIZE_WINDOW", "1") or "1"
 ).strip().lower() in {"1", "true", "yes", "on"}
+DEFAULT_LIVE_CAPTIONS_HELPER_STDERR_TAIL_LINES = int(
+    os.getenv("LIVE_CAPTIONS_HELPER_STDERR_TAIL_LINES", "8") or "8"
+)
+DEFAULT_LIVE_CAPTIONS_HELPER_RETRY_WINDOW_SECONDS = float(
+    os.getenv("LIVE_CAPTIONS_HELPER_RETRY_WINDOW_SECONDS", "8.0") or "8.0"
+)
 TRANSCRIPT_SOURCE_FINAL = "final"
 TRANSCRIPT_SOURCE_STABLE_PARTIAL_COMMAND = "stable_partial_command"
 TRANSCRIPT_SOURCE_STABLE_PARTIAL_FALLBACK = "stable_partial_fallback"
@@ -213,6 +312,12 @@ HOTWORD_STRATEGIES = [
     HOTWORD_STRATEGY_COMMANDS_GAMES_MEMORY,
 ]
 DEFAULT_STABLE_PARTIAL_REPEATS = int(os.getenv("VOICE_ASR_STABLE_PARTIAL_REPEATS", "2") or "2")
+_PARTIAL_COMMIT_SENTENCE_END_RE = re.compile(r"[.!?;:\u2026][\"')\]]*$")
+_PARTIAL_COMMIT_WORD_RE = re.compile(r"\b[\w']+\b", re.UNICODE)
+_PARTIAL_COMMIT_TRAILING_CONNECTOR_RE = re.compile(
+    r"(?:\b(?:and|or|but|to|of|with|for|in|on|at|through|about|into|from)\b[\s,;:]*)+$",
+    re.IGNORECASE,
+)
 
 
 def normalize_hotword_strategy(value: Optional[str]) -> str:
@@ -1088,6 +1193,10 @@ class LiveCaptionsTranscriptSource:
         self._output_path = ""
         self._last_status = ""
         self._last_error = ""
+        self._stderr_tail: Deque[str] = deque(maxlen=max(1, DEFAULT_LIVE_CAPTIONS_HELPER_STDERR_TAIL_LINES))
+        self._launch_started_at = 0.0
+        self._current_show_live_captions = False
+        self._visible_retry_attempted = False
 
     @property
     def output_path(self) -> str:
@@ -1137,14 +1246,27 @@ class LiveCaptionsTranscriptSource:
             return
         exe = Path(self.exe_path)
         if not exe.exists():
-            raise FileNotFoundError(f"Live Captions listener not found: {exe}")
+            raise FileNotFoundError(
+                f"Live Captions listener not found: {exe}. "
+                "Set LIVE_CAPTIONS_LISTENER_EXE to your EnableLcMic.exe path."
+            )
         self._terminate_stale_helpers()
+        with self._lock:
+            self._stderr_tail.clear()
+            self._visible_retry_attempted = False
+        self._launch_process(
+            show_live_captions=not DEFAULT_LIVE_CAPTIONS_MINIMIZE_WINDOW,
+            restart_reason="starting",
+        )
+
+    def _launch_process(self, *, show_live_captions: bool, restart_reason: str) -> None:
+        exe = Path(self.exe_path)
         output_dir = Path(self.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"captions_{int(time.time() * 1000)}_{os.getpid()}.txt"
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         args = [str(exe), "--headless"]
-        if not DEFAULT_LIVE_CAPTIONS_MINIMIZE_WINDOW:
+        if show_live_captions:
             args.append("--show-live-captions")
         args.extend(["--output", str(output_path)])
         process = subprocess.Popen(
@@ -1162,9 +1284,15 @@ class LiveCaptionsTranscriptSource:
         with self._lock:
             self._process = process
             self._output_path = str(output_path)
-            self._last_status = "starting"
+            self._last_status = str(restart_reason or "starting")
             self._last_error = ""
+            self._stderr_tail.clear()
+            self._launch_started_at = time.monotonic()
+            self._current_show_live_captions = bool(show_live_captions)
         self._stop_event.clear()
+        self._start_worker_threads()
+
+    def _start_worker_threads(self) -> None:
         self._stdout_thread = threading.Thread(target=self._stdout_loop, name="live-captions-stdout", daemon=True)
         self._stderr_thread = threading.Thread(target=self._stderr_loop, name="live-captions-stderr", daemon=True)
         self._monitor_thread = threading.Thread(target=self._monitor_loop, name="live-captions-monitor", daemon=True)
@@ -1178,6 +1306,8 @@ class LiveCaptionsTranscriptSource:
             process = self._process
             self._process = None
             self._last_status = "stopped"
+            self._current_show_live_captions = False
+            self._visible_retry_attempted = False
         if process is not None:
             try:
                 process.terminate()
@@ -1227,6 +1357,7 @@ class LiveCaptionsTranscriptSource:
                     continue
                 with self._lock:
                     self._last_status = text
+                    self._stderr_tail.append(text)
                 lowered = text.casefold()
                 if "failed" in lowered or "error" in lowered:
                     self._record_error(text)
@@ -1244,8 +1375,41 @@ class LiveCaptionsTranscriptSource:
                 time.sleep(0.3)
                 continue
             if not self._stop_event.is_set() and code != 0:
-                self._record_error(f"live captions listener exited with code {code}")
+                exit_message = self._build_exit_error_message(code)
+                if self._restart_visible_fallback(exit_message):
+                    return
+                self._record_error(exit_message)
             return
+
+    def _build_exit_error_message(self, code: int) -> str:
+        with self._lock:
+            tail = [item for item in self._stderr_tail if item]
+        message = f"live captions listener exited with code {code}"
+        if tail:
+            message += f"; last stderr: {' | '.join(tail[-3:])}"
+        return message
+
+    def _restart_visible_fallback(self, exit_message: str) -> bool:
+        with self._lock:
+            launched_at = float(self._launch_started_at or 0.0)
+            show_live_captions = bool(self._current_show_live_captions)
+            retry_attempted = bool(self._visible_retry_attempted)
+            if show_live_captions or retry_attempted:
+                return False
+            if launched_at > 0.0 and (time.monotonic() - launched_at) > DEFAULT_LIVE_CAPTIONS_HELPER_RETRY_WINDOW_SECONDS:
+                return False
+            self._visible_retry_attempted = True
+
+        self._record_error(f"{exit_message}; retrying with visible Live Captions window")
+        try:
+            self._launch_process(
+                show_live_captions=True,
+                restart_reason="retrying live captions with visible window",
+            )
+            return True
+        except Exception as exc:
+            self._record_error(f"live captions visible-window retry failed: {exc}")
+            return False
 
     def _record_error(self, message: str) -> None:
         text = str(message or "").strip()
@@ -1446,10 +1610,13 @@ class DesktopAudioAgent:
         self._mqtt_lock = threading.Lock()
         self._latest_legacy_corr_id = ""
         self._partial_commit_task: Optional[asyncio.Task[Any]] = None
+        self._partial_commit_anchor_at = 0.0
         self._speech_active_last = False
         self._speech_started_at = 0.0
         self._speech_ended_at = 0.0
         self._last_partial_event_at = 0.0
+        self._last_partial_text_changed_at = 0.0
+        self._last_stable_partial_text_changed_at = 0.0
         self._last_final_event_at = 0.0
         self._last_user_submit_text = ""
         self._last_user_submit_at = 0.0
@@ -2047,7 +2214,9 @@ class DesktopAudioAgent:
                 )
 
         if bool(getattr(server_content, "interrupted", False)):
-            interrupted_text = str(self._assistant_buffer_text or self._gemini_live_output_text or "").strip()
+            interrupted_text = self._sanitize_assistant_text(
+                self._assistant_buffer_text or self._gemini_live_output_text or ""
+            )
             if interrupted_text and interrupted_text != self._gemini_live_logged_output_text:
                 self._remember_assistant_text(interrupted_text)
                 self.log_store.add(
@@ -2067,7 +2236,7 @@ class DesktopAudioAgent:
             if self._gemini_live_output_open:
                 await self._wait_for_playback_drain()
             self._close_gemini_live_output(clear_player=False)
-            final_text = str(self._assistant_buffer_text or self._gemini_live_output_text or "").strip()
+            final_text = self._sanitize_assistant_text(self._assistant_buffer_text or self._gemini_live_output_text or "")
             if final_text and final_text != self._gemini_live_logged_output_text:
                 self._remember_assistant_text(final_text)
                 self.log_store.add("coach", final_text, speaker="RACHEL", source="gemini_live")
@@ -2096,10 +2265,14 @@ class DesktopAudioAgent:
             return
         self._assistant_buffer_text = text
         self._gemini_live_output_text = text
-        if finished and text != self._gemini_live_logged_output_text:
-            self._remember_assistant_text(text)
-            self.log_store.add("coach", text, speaker="RACHEL", source="gemini_live")
-            self._gemini_live_logged_output_text = text
+        if finished:
+            clean_text = self._sanitize_assistant_text(text)
+            if clean_text and clean_text != self._gemini_live_logged_output_text:
+                self._assistant_buffer_text = clean_text
+                self._gemini_live_output_text = clean_text
+                self._remember_assistant_text(clean_text)
+                self.log_store.add("coach", clean_text, speaker="RACHEL", source="gemini_live")
+                self._gemini_live_logged_output_text = clean_text
 
     async def _handle_gemini_live_user_turn(self, raw_text: str) -> None:
         normalized = str(raw_text or "").strip()
@@ -2595,6 +2768,7 @@ class DesktopAudioAgent:
         if corr_id and self._latest_legacy_corr_id and corr_id != self._latest_legacy_corr_id:
             return
         text = str(payload.get("text") or "").strip()
+        text = self._sanitize_assistant_text(text)
         if not text:
             return
         speaker = str(payload.get("tts_speaker") or "").strip() or self.active_voice_code
@@ -2872,13 +3046,80 @@ class DesktopAudioAgent:
         raise ValueError("unknown game action")
 
     async def publish_face(self, payload: Dict[str, Any]) -> None:
-        await self._publish_mqtt("robot/pi/face/cmd", payload)
+        data = payload or {}
+        raw_mode = str(data.get("mode") or "").strip()
+        raw_value = str(data.get("value") or "").strip()
+        mode = raw_mode.lower()
+        if mode == "custom" and raw_value:
+            mode = raw_value.lower()
+        elif not mode and raw_value:
+            mode = raw_value.lower()
+        seconds_raw = data.get("seconds")
+        value = mode or "neutral"
+        try:
+            seconds = float(seconds_raw)
+        except Exception:
+            seconds = 0.0
+        if seconds > 0:
+            value = f"{value}:{seconds:g}"
+        await self._publish_mqtt("robot/pi/face/cmd", {"action": "face", "value": value})
 
     async def publish_led(self, payload: Dict[str, Any]) -> None:
-        await self._publish_mqtt("robot/pi/led/cmd", payload)
+        data = payload or {}
+        mode = str(data.get("mode") or "").strip().lower()
+        duration = data.get("duration")
+        brightness = data.get("brightness")
+        period = data.get("period")
+        color = str(data.get("color") or "").strip() or "#{:02x}{:02x}{:02x}".format(
+            random.randint(0, 255),
+            random.randint(0, 255),
+            random.randint(0, 255),
+        )
+
+        def _float_text(value: Any, default: float) -> str:
+            try:
+                return f"{float(value):g}"
+            except Exception:
+                return f"{default:g}"
+
+        if mode == "off":
+            value = "off"
+        elif mode == "breathe":
+            value = ":".join(
+                [
+                    "breathe",
+                    color,
+                    _float_text(duration, 60.0),
+                    _float_text(brightness, 1.0),
+                    _float_text(period, 1.5),
+                ]
+            )
+        else:
+            led_mode = "on" if mode in {"solid", "random", ""} else mode
+            value = ":".join(
+                [
+                    led_mode,
+                    color,
+                    _float_text(duration, 60.0),
+                    _float_text(brightness, 1.0),
+                ]
+            )
+        await self._publish_mqtt("robot/pi/led/cmd", {"action": "led", "value": value})
 
     async def publish_flower(self, payload: Dict[str, Any]) -> None:
-        await self._publish_mqtt("robot/pi/servo/cmd", payload)
+        action = str((payload or {}).get("action") or (payload or {}).get("value") or "").strip().lower()
+        mapping = {
+            "open": "open",
+            "open_hold": "open",
+            "open_slow": "open",
+            "close": "close",
+            "close_hold": "close",
+            "close_slow": "close",
+            "center": "center",
+            "stop": "stop",
+        }
+        value = mapping.get(action, action or "open")
+        await self._publish_mqtt("robot/pi/servo/cmd", {"action": "servo", "value": value})
 
     async def _publish_mqtt(self, topic: str, payload: Dict[str, Any]) -> None:
         with self._mqtt_lock:
@@ -2927,14 +3168,43 @@ class DesktopAudioAgent:
         self._pending_interrupted_corr_id = ""
         return barge_in, interrupted_text, interrupted_corr_id
 
+    def _sanitize_assistant_text(self, text: str) -> str:
+        return sanitize_tts_text(str(text or "").strip())
+
     def _remember_assistant_text(self, text: str) -> None:
-        variants = _assistant_text_variants(text)
+        variants = _assistant_text_variants(self._sanitize_assistant_text(text))
         if not variants:
             return
         now = time.time()
         self._last_assistant_spoke_at = now
         for variant in variants:
             self._recent_assistant_texts.append((now, variant))
+
+    def _looks_complete_query_candidate(self, text: str) -> bool:
+        candidate = str(text or "").strip()
+        if not candidate:
+            return False
+        if _PARTIAL_COMMIT_SENTENCE_END_RE.search(candidate):
+            return True
+        if _PARTIAL_COMMIT_TRAILING_CONNECTOR_RE.search(candidate):
+            return False
+        words = _PARTIAL_COMMIT_WORD_RE.findall(candidate)
+        if len(words) >= DEFAULT_PARTIAL_COMMIT_QUERY_MIN_WORDS:
+            return True
+        return len(candidate) >= DEFAULT_PARTIAL_COMMIT_QUERY_MIN_CHARS
+
+    def _schedule_partial_commit(self, speech_ended_at: float, *, anchor_at: Optional[float] = None) -> None:
+        if self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
+            return
+        if self._loop is None or not self._listening or self.is_assistant_speaking():
+            return
+        commit_anchor = float(anchor_at if anchor_at is not None else time.time())
+        self._cancel_partial_commit()
+        self._partial_commit_anchor_at = commit_anchor
+        self._partial_commit_task = asyncio.run_coroutine_threadsafe(
+            self._commit_partial_after_delay(speech_ended_at, commit_anchor),
+            self._loop,
+        )
 
     def _should_ignore_live_captions_echo(self, text: str) -> bool:
         normalized = str(text or "").strip()
@@ -3116,26 +3386,50 @@ class DesktopAudioAgent:
     def _handle_streaming_started(self, event: AsrEvent) -> None:
         _ = event
         self._cancel_partial_commit()
+        self._partial_commit_anchor_at = 0.0
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
+        self._last_partial_text_changed_at = 0.0
+        self._last_stable_partial_text_changed_at = 0.0
 
     def _handle_streaming_partial(self, event: AsrEvent) -> None:
-        self._last_partial_event_at = time.time()
-        self._last_partial_text = str(event.text or "").strip()
-        self._last_stable_partial_text = str(event.stable_text or "").strip()
+        now = time.time()
+        partial_text = str(event.text or "").strip()
+        stable_text = str(event.stable_text or "").strip()
+        self._last_partial_event_at = now
+        if partial_text != self._last_partial_text:
+            self._last_partial_text_changed_at = now
+        if stable_text != self._last_stable_partial_text:
+            self._last_stable_partial_text_changed_at = now
+        self._last_partial_text = partial_text
+        self._last_stable_partial_text = stable_text
         stable_text = self._last_stable_partial_text
         if not stable_text or not self._listening or self.is_assistant_speaking():
             return
         if self._suppress_transcript_during_enrollment(source="streaming_partial", text=stable_text):
             self._last_partial_text = ""
             self._last_stable_partial_text = ""
+            self._last_partial_text_changed_at = 0.0
+            self._last_stable_partial_text_changed_at = 0.0
             return
         grammar_match = self._command_grammar.canonicalize(stable_text)
         if grammar_match.route_type == "QUERY" or grammar_match.confidence < 0.86:
+            if (
+                not self._speech_active_last
+                and self._speech_ended_at > 0.0
+                and max(self._last_partial_text_changed_at, self._last_stable_partial_text_changed_at) >= self._speech_ended_at
+            ):
+                self._schedule_partial_commit(
+                    self._speech_ended_at,
+                    anchor_at=max(self._last_partial_text_changed_at, self._last_stable_partial_text_changed_at, now),
+                )
             return
         self._cancel_partial_commit()
+        self._partial_commit_anchor_at = 0.0
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
+        self._last_partial_text_changed_at = 0.0
+        self._last_stable_partial_text_changed_at = 0.0
         asyncio.create_task(
             self._submit_user_turn(
                 text=str(grammar_match.canonical_text or stable_text).strip(),
@@ -3170,6 +3464,8 @@ class DesktopAudioAgent:
         )
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
+        self._last_partial_text_changed_at = 0.0
+        self._last_stable_partial_text_changed_at = 0.0
         if not final_text or not self._listening:
             return
         if self.is_assistant_speaking():
@@ -3206,6 +3502,8 @@ class DesktopAudioAgent:
         final_text = str(grammar_match.canonical_text or raw_text).strip()
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
+        self._last_partial_text_changed_at = 0.0
+        self._last_stable_partial_text_changed_at = 0.0
         if not final_text or not self._listening or self.is_assistant_speaking():
             return
         if self._suppress_transcript_during_enrollment(source=source, text=final_text):
@@ -3351,6 +3649,7 @@ class DesktopAudioAgent:
     def _cancel_partial_commit(self) -> None:
         task = self._partial_commit_task
         self._partial_commit_task = None
+        self._partial_commit_anchor_at = 0.0
         if task is not None and not task.done():
             task.cancel()
 
@@ -3367,14 +3666,9 @@ class DesktopAudioAgent:
             self._speech_active_last = False
             if self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
                 return
-            if self._loop is not None and self._listening and not self.is_assistant_speaking():
-                self._cancel_partial_commit()
-                self._partial_commit_task = asyncio.run_coroutine_threadsafe(
-                    self._commit_partial_after_delay(now),
-                    self._loop,
-                )
+            self._schedule_partial_commit(now, anchor_at=now)
 
-    async def _commit_partial_after_delay(self, speech_ended_at: float) -> None:
+    async def _commit_partial_after_delay(self, speech_ended_at: float, commit_anchor_at: float) -> None:
         try:
             if self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
                 return
@@ -3387,9 +3681,31 @@ class DesktopAudioAgent:
                 return
             if self._speech_active_last or self._speech_ended_at != speech_ended_at:
                 return
+            if self._partial_commit_anchor_at and self._partial_commit_anchor_at != commit_anchor_at:
+                return
             if self._last_final_event_at >= speech_ended_at:
                 return
-            candidate = str(self._last_stable_partial_text or self._last_partial_text or "").strip()
+            raw_partial = str(self._last_partial_text or "").strip()
+            stable_partial = str(self._last_stable_partial_text or "").strip()
+            grammar_seed = stable_partial or raw_partial
+            if not grammar_seed:
+                return
+            grammar_match = self._command_grammar.canonicalize(grammar_seed)
+            is_query = grammar_match.route_type == "QUERY" or grammar_match.confidence < 0.86
+            if is_query:
+                if not stable_partial:
+                    return
+                if self._last_partial_text_changed_at > commit_anchor_at:
+                    return
+                if self._last_stable_partial_text_changed_at > commit_anchor_at:
+                    return
+                candidate = stable_partial
+                if not self._looks_complete_query_candidate(candidate):
+                    return
+            else:
+                if max(self._last_partial_text_changed_at, self._last_stable_partial_text_changed_at) > commit_anchor_at:
+                    return
+                candidate = stable_partial or raw_partial
             if len(candidate) < DEFAULT_PARTIAL_COMMIT_MIN_CHARS:
                 return
             grammar_match = self._command_grammar.canonicalize(candidate)
@@ -3405,6 +3721,8 @@ class DesktopAudioAgent:
             self._last_final_event_at = time.time()
             self._last_partial_text = ""
             self._last_stable_partial_text = ""
+            self._last_partial_text_changed_at = 0.0
+            self._last_stable_partial_text_changed_at = 0.0
             await self._submit_user_turn(
                 text=final_text,
                 original_text=candidate,
@@ -3618,7 +3936,7 @@ class DesktopAudioAgent:
                             await tts_queue.put(chunk)
                         continue
                     if event_type == "final":
-                        final_text = str(event.get("text") or "").strip()
+                        final_text = self._sanitize_assistant_text(event.get("text") or "")
                         if final_text:
                             self._assistant_buffer_text = final_text
                             if not final_logged:
@@ -3641,7 +3959,7 @@ class DesktopAudioAgent:
         if final_text and not final_logged:
             self.log_store.add("coach", final_text, speaker="RACHEL", source="voice_service")
         elif not final_logged:
-            interrupted_text = str(self._assistant_buffer_text or "").strip()
+            interrupted_text = self._sanitize_assistant_text(self._assistant_buffer_text or "")
             if interrupted_text:
                 self.log_store.add("coach", interrupted_text, speaker="RACHEL", source="voice_service_partial", metadata="interrupted")
         self._assistant_buffer_text = ""
@@ -3746,7 +4064,7 @@ class DesktopAudioAgent:
         log_message: bool,
         wait_for_drain: bool = True,
     ) -> None:
-        normalized = str(text or "").strip()
+        normalized = self._sanitize_assistant_text(text)
         if not normalized:
             return
         self._remember_assistant_text(normalized)
@@ -3793,7 +4111,7 @@ class DesktopAudioAgent:
         log_message: bool,
         wait_for_drain: bool = True,
     ) -> None:
-        normalized = str(text or "").strip()
+        normalized = self._sanitize_assistant_text(text)
         if not normalized:
             return
         self._remember_assistant_text(normalized)
@@ -3827,7 +4145,7 @@ class DesktopAudioAgent:
         log_message: bool,
         wait_for_drain: bool = True,
     ) -> None:
-        normalized = str(text or "").strip()
+        normalized = self._sanitize_assistant_text(text)
         if not normalized:
             return
         self._remember_assistant_text(normalized)

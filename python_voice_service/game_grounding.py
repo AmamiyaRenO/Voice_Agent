@@ -89,6 +89,42 @@ _GAME_DOMAIN_HINTS = (
     "choice",
     "available",
 )
+_GAME_FOLLOWUP_REFERENCE_PHRASES = (
+    "current choice",
+    "current option",
+    "current recommendation",
+    "current selection",
+    "that one",
+    "this one",
+    "the other one",
+    "another one",
+    "other option",
+    "other options",
+    "that game",
+    "this game",
+    "the game",
+)
+_GAME_FOLLOWUP_ACTION_HINTS = (
+    "what about",
+    "how about",
+    "introduce",
+    "tell me about",
+    "describe",
+    "explain",
+    "compare",
+    "difference",
+    "recommend",
+    "suggest",
+    "option",
+    "options",
+    "choice",
+    "choices",
+    "available",
+    "open",
+    "launch",
+    "start",
+    "play",
+)
 _SINGLE_SENTENCE_HINTS = ("one short sentence", "one sentence", "single sentence")
 _GAME_ALIAS_FUZZY_THRESHOLD = 72
 _GAME_CONTEXT_MAX_AGE_SEC = 600.0
@@ -711,21 +747,81 @@ class GameCatalog:
             return None
         return self.knowledge_docs.get(_normalize_text(card.name))
 
+    def _has_recent_game_context(self, session_state: Any = None) -> bool:
+        if session_state is None:
+            return False
+        now_ts = time.time()
+        updated_at = float(self._session_state_value(session_state, "updated_at") or 0.0)
+        if updated_at > 0.0 and now_ts - updated_at > _GAME_CONTEXT_MAX_AGE_SEC:
+            return False
+        if str(self._session_state_value(session_state, "focused_game") or "").strip():
+            return True
+        if str(self._session_state_value(session_state, "primary_recommendation") or "").strip():
+            return True
+        for field in ("candidate_games", "last_introduced_games"):
+            values = self._session_state_value(session_state, field) or []
+            if any(str(item).strip() for item in values):
+                return True
+        return False
+
+    def looks_like_game_followup(self, text: str, session_state: Any = None) -> bool:
+        normalized = _normalize_text(text)
+        if not normalized or not self._has_recent_game_context(session_state):
+            return False
+        padded = f" {normalized} "
+        if any(phrase in normalized for phrase in _GAME_FOLLOWUP_REFERENCE_PHRASES):
+            return True
+        has_pronoun_reference = any(token in padded for token in (" it ", " them ", " those "))
+        if not has_pronoun_reference:
+            return False
+        return any(hint in normalized for hint in _GAME_FOLLOWUP_ACTION_HINTS)
+
+    def _has_explicit_game_scope(
+        self,
+        text: str,
+        *,
+        normalized_text: str = "",
+        mentioned_names: Optional[List[str]] = None,
+        session_state: Any = None,
+    ) -> bool:
+        normalized = normalized_text or _normalize_text(text)
+        if not normalized:
+            return False
+        if mentioned_names:
+            return True
+        padded = f" {normalized} "
+        if _contains_any_hint(text, normalized, _LIST_HINTS, _LIST_HINTS_RAW):
+            return True
+        if _contains_any_hint(text, normalized, _RECOMMEND_HINTS, _RECOMMEND_HINTS_RAW):
+            return True
+        if _contains_any_hint(text, normalized, _ALTERNATIVE_HINTS, _ALTERNATIVE_HINTS_RAW):
+            return True
+        if any(hint in normalized for hint in _COMPARE_HINTS):
+            return True
+        if " game " in padded or " games " in padded:
+            return True
+        if any(phrase in normalized for phrase in _GAME_FOLLOWUP_REFERENCE_PHRASES):
+            return True
+        return self.looks_like_game_followup(text, session_state=session_state)
+
     def looks_like_game_domain(self, text: str, session_state: Any = None) -> bool:
         normalized = _normalize_text(text)
         if not normalized:
             return False
-        if self.extract_game_mentions(text, limit=1):
-            return True
-        padded = f" {normalized} "
-        if any(f" {hint} " in padded for hint in _GAME_DOMAIN_HINTS):
-            return True
-        if session_state is not None:
-            if str(self._session_state_value(session_state, "focused_game") or "").strip():
-                return True
-            if self._session_state_value(session_state, "candidate_games"):
-                return True
-        return False
+        mentions = self.extract_game_mentions(text, limit=1)
+        if any(hint in normalized for hint in _INTRODUCE_HINTS):
+            return self._has_explicit_game_scope(
+                text,
+                normalized_text=normalized,
+                mentioned_names=mentions,
+                session_state=session_state,
+            )
+        return self._has_explicit_game_scope(
+            text,
+            normalized_text=normalized,
+            mentioned_names=mentions,
+            session_state=session_state,
+        )
 
     def route_game_query(
         self,
@@ -771,18 +867,35 @@ class GameCatalog:
         if any(hint in normalized for hint in _INTRODUCE_HINTS):
             use_candidate_set = " them " in padded or " all " in padded or "games" in padded
             use_current_choice = "current choice" in normalized or "current option" in normalized or "current recommendation" in normalized
-            return GameQaRouteDecision(
-                intent="game_introduce",
-                game_names=mentioned_names,
-                reference_game_name=mentioned_names[-1] if mentioned_names else "",
-                use_current_choice=use_current_choice,
-                use_candidate_set=use_candidate_set,
-            )
+            if (
+                mentioned_names
+                or use_candidate_set
+                or use_current_choice
+                or " game " in padded
+                or " games " in padded
+                or self.looks_like_game_followup(text, session_state=session_state)
+            ):
+                return GameQaRouteDecision(
+                    intent="game_introduce",
+                    game_names=mentioned_names,
+                    reference_game_name=mentioned_names[-1] if mentioned_names else "",
+                    use_current_choice=use_current_choice,
+                    use_candidate_set=use_candidate_set,
+                )
         if mentioned_names and self.looks_like_game_domain(text, session_state=session_state):
             return GameQaRouteDecision(intent="game_introduce", game_names=mentioned_names, reference_game_name=mentioned_names[-1])
-        if session_state is not None and self.looks_like_game_domain(text, session_state=session_state):
-            if " it " in padded or " the game " in padded or " that one " in padded:
-                return GameQaRouteDecision(intent="game_introduce")
+        if session_state is not None and self.looks_like_game_followup(text, session_state=session_state):
+            use_candidate_set = " them " in padded or " those " in padded or " all " in padded
+            use_current_choice = (
+                "current choice" in normalized
+                or "current option" in normalized
+                or "current recommendation" in normalized
+            )
+            return GameQaRouteDecision(
+                intent="game_introduce",
+                use_candidate_set=use_candidate_set,
+                use_current_choice=use_current_choice,
+            )
         return GameQaRouteDecision()
 
     def retrieve_game_sections(self, game_name: str, *, sections: List[str]) -> List[str]:
@@ -940,7 +1053,7 @@ class GameCatalog:
     ) -> Optional[GameAnswerPlan]:
         self._maybe_reload()
         if decision.intent == "game_recommend":
-            result = self.recommend_result(text, user_profile=user_profile)
+            result = self.recommend_result(text, user_profile=user_profile, force=True)
             if not result:
                 return None
             primary = str(result.get("primary_game_name") or result.get("game_name") or "").strip()
@@ -987,7 +1100,7 @@ class GameCatalog:
                     user_profile=user_profile,
                 )
             if reference_card is None and not candidate_cards:
-                result = self.alternative_result(text, user_profile=user_profile)
+                result = self.alternative_result(text, user_profile=user_profile, force=True)
                 if not result:
                     return None
                 primary = str(result.get("primary_game_name") or result.get("game_name") or "").strip()
@@ -1059,7 +1172,7 @@ class GameCatalog:
                 max_sentences=2 if not _wants_single_sentence(text) else 1,
             )
         if decision.intent == "game_availability":
-            result = self.list_result(text)
+            result = self.list_result(text, force=True)
             if not result:
                 return None
             primary = str(result.get("primary_game_name") or result.get("game_name") or "").strip()
@@ -1152,10 +1265,12 @@ class GameCatalog:
             return f"{names[0]} and {names[1]}"
         return ", ".join(names[:-1]) + f", and {names[-1]}"
 
-    def list_result(self, text: str) -> Dict[str, Any]:
+    def list_result(self, text: str, *, force: bool = False) -> Dict[str, Any]:
         self._maybe_reload()
         normalized = _normalize_text(text)
-        if not normalized or not _contains_any_hint(text, normalized, _LIST_HINTS, _LIST_HINTS_RAW):
+        if not normalized:
+            return {}
+        if not force and not _contains_any_hint(text, normalized, _LIST_HINTS, _LIST_HINTS_RAW):
             return {}
         if not self.cards:
             return {
@@ -1266,12 +1381,18 @@ class GameCatalog:
             score -= 1.2
         return score, reasons
 
-    def alternative_result(self, text: str, user_profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def alternative_result(
+        self,
+        text: str,
+        user_profile: Optional[Dict[str, Any]] = None,
+        *,
+        force: bool = False,
+    ) -> Dict[str, Any]:
         self._maybe_reload()
         normalized = _normalize_text(text)
         if not normalized:
             return {}
-        if not _contains_any_hint(text, normalized, _ALTERNATIVE_HINTS, _ALTERNATIVE_HINTS_RAW):
+        if not force and not _contains_any_hint(text, normalized, _ALTERNATIVE_HINTS, _ALTERNATIVE_HINTS_RAW):
             return {}
         normalized_padded = f" {normalized} "
         mentioned_names = self.extract_game_mentions(text, limit=3)
@@ -1365,10 +1486,18 @@ class GameCatalog:
             "style_goal": "warm_natural",
         }
 
-    def recommend_result(self, text: str, user_profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def recommend_result(
+        self,
+        text: str,
+        user_profile: Optional[Dict[str, Any]] = None,
+        *,
+        force: bool = False,
+    ) -> Dict[str, Any]:
         self._maybe_reload()
         normalized = _normalize_text(text)
-        if not normalized or not _contains_any_hint(text, normalized, _RECOMMEND_HINTS, _RECOMMEND_HINTS_RAW):
+        if not normalized:
+            return {}
+        if not force and not _contains_any_hint(text, normalized, _RECOMMEND_HINTS, _RECOMMEND_HINTS_RAW):
             return {}
         if not self.cards:
             return {

@@ -445,59 +445,58 @@ def test_smoke_dialog_game_mentions_route_new_game_followups(tmp_path: Path):
         service.http.close()
 
 
-def test_smoke_dialog_policy_classifier():
+def test_smoke_dialog_request_context_omits_policy_hints(tmp_path: Path):
     pytest.importorskip("paho.mqtt.client")
 
     if str(DIALOG_DIR) not in sys.path:
         sys.path.insert(0, str(DIALOG_DIR))
 
-    dialog_cfg = _load_module("smoke_dialog_policy_cfg", DIALOG_DIR / "dialog_config.py")
-    dialog_impl = _load_module("smoke_dialog_policy_impl", DIALOG_DIR / "dialog_service_impl.py")
+    dialog_cfg = _load_module("smoke_dialog_request_ctx_cfg", DIALOG_DIR / "dialog_config.py")
+    dialog_impl = _load_module("smoke_dialog_request_ctx_impl", DIALOG_DIR / "dialog_service_impl.py")
 
     cfg = dialog_cfg.Config(
-        enable_user_memory=False,
+        enable_user_memory=True,
+        enable_user_memory_embeddings=False,
+        user_memory_path=str(tmp_path / "user_memory.json"),
         enable_dialog_context=True,
         enable_dialog_policy=True,
+        dialog_history_turns=6,
+        dialog_summary_max_chars=320,
+        dialog_context_max_chars=640,
     )
     service = dialog_impl.DialogService(cfg)
     try:
-        assert (
-            service._classify_dialog_policy(
-                user_text="what about tomorrow morning then?",
-                current_topic="rehab schedule",
-                open_question="",
-            )
-            == "continue_topic"
+        user_id = service.user_memory.resolve_user("moonshine:1:42")
+        service.user_memory.update_dialog_slots(
+            user_id,
+            current_topic="rehab schedule",
+            open_question="Do you prefer morning or evening practice?",
         )
-        assert (
-            service._classify_dialog_policy(
-                user_text="by the way, switch topic to music",
-                current_topic="rehab schedule",
-                open_question="",
+        for i in range(4):
+            role = "user" if i % 2 == 0 else "assistant"
+            service.user_memory.remember_dialog_turn(
+                user_id,
+                role,
+                f"context turn {i}",
+                max_turns=6,
+                summary_max_chars=320,
             )
-            == "switch_topic"
+
+        result = service._build_dialog_request_context(
+            user_id=user_id,
+            user_text="Introduce yourself.",
         )
-        assert (
-            service._classify_dialog_policy(
-                user_text="why?",
-                current_topic="",
-                open_question="",
-            )
-            == "ask_clarify"
-        )
-        assert (
-            service._classify_dialog_policy(
-                user_text="morning is better",
-                current_topic="rehab schedule",
-                open_question="Do you prefer morning or evening practice?",
-            )
-            == "continue_topic"
-        )
+
+        assert "dialog_policy" not in result
+        assert result["current_topic"] == "rehab schedule"
+        assert result["open_question"].startswith("Do you prefer")
+        assert "Current topic:" not in result["dialog_context"]
+        assert "Pending follow-up question:" not in result["dialog_context"]
     finally:
         service.http.close()
 
 
-def test_smoke_dialog_request_includes_context_and_policy(tmp_path: Path):
+def test_smoke_dialog_request_includes_context_without_policy_hints(tmp_path: Path):
     pytest.importorskip("paho.mqtt.client")
 
     if str(DIALOG_DIR) not in sys.path:
@@ -589,10 +588,13 @@ def test_smoke_dialog_request_includes_context_and_policy(tmp_path: Path):
     assert len(posted) == 2
     first_body = posted[0][1]
     second_body = posted[1][1]
-    assert first_body.get("dialog_policy") in {"switch_topic", "continue_topic", "ask_clarify"}
+    assert "dialog_policy" not in first_body
+    assert "current_topic" not in first_body
+    assert "open_question" not in first_body
     assert "dialog_context" in second_body
-    assert second_body.get("dialog_policy") == "continue_topic"
-    assert second_body.get("open_question", "").startswith("Do you prefer")
+    assert "dialog_policy" not in second_body
+    assert "current_topic" not in second_body
+    assert "open_question" not in second_body
     assert len(published) == 2
 
 
@@ -712,7 +714,7 @@ def test_smoke_dialog_vision_query_short_circuit_publish():
         service.http.close()
 
 
-def test_smoke_dialog_switch_topic_reduces_context(tmp_path: Path):
+def test_smoke_dialog_request_context_uses_balanced_recent_history(tmp_path: Path):
     pytest.importorskip("paho.mqtt.client")
 
     if str(DIALOG_DIR) not in sys.path:
@@ -753,9 +755,12 @@ def test_smoke_dialog_switch_topic_reduces_context(tmp_path: Path):
             user_id=user_id,
             user_text="Actually, switch topic to sleep quality.",
         )
-        assert result["dialog_policy"] == "switch_topic"
-        assert "sleep quality" in result["current_topic"]
-        assert result["open_question"] == ""
-        assert len(result["dialog_context"]) <= 420
+        assert "dialog_policy" not in result
+        assert result["current_topic"] == "rehab schedule"
+        assert result["open_question"].startswith("Do you prefer")
+        assert len(result["dialog_context"]) <= 900
+        assert "Current topic:" not in result["dialog_context"]
+        assert "Pending follow-up question:" not in result["dialog_context"]
+        assert "Recent dialogue:" in result["dialog_context"]
     finally:
         service.http.close()

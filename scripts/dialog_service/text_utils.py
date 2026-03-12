@@ -5,6 +5,7 @@ import re
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?])\s+")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.;:!?])")
 _TRAILING_CONNECTOR_RE = re.compile(
     r"(?:\b(?:and|or|but|to|of|with|for|in|on|at|through|about|into|from)\b[\s,;:]*)+$",
     re.IGNORECASE,
@@ -21,6 +22,24 @@ _STAGE_HINT_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F1E6-\U0001F1FF"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FAFF"
+    "\u2600-\u27BF"
+    "]+",
+    re.UNICODE,
+)
+_KEYCAP_EMOJI_RE = re.compile(r"[#*0-9]\ufe0f?\u20e3")
+_EMOJI_SYMBOL_RE = re.compile(r"[\u00a9\u00ae\u2122]")
+_EMOJI_MODIFIER_RE = re.compile(r"[\u200d\ufe0e\ufe0f\u20e3\U0001F3FB-\U0001F3FF]")
 
 
 def compress_reply_for_latency(text: str, max_sentences: int, max_chars: int) -> str:
@@ -93,5 +112,12 @@ def sanitize_tts_text(text: str) -> str:
     # Drop pure stage-direction outputs such as "(A low chuckle, ...)".
     if _WRAPPED_STAGE_RE.match(current) and _STAGE_HINT_RE.search(current):
         return ""
+
+    current = _KEYCAP_EMOJI_RE.sub(" ", current)
+    current = _EMOJI_SYMBOL_RE.sub(" ", current)
+    current = _EMOJI_RE.sub(" ", current)
+    current = _EMOJI_MODIFIER_RE.sub("", current)
+    current = _WHITESPACE_RE.sub(" ", current).strip()
+    current = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", current)
 
     return current.strip()
