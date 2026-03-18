@@ -35,12 +35,15 @@ The repository also includes:
 - Direct unified conversation flow is available on `/conversation/turn/stream` with runtime profile switching between `local` and `cloud`.
 - Main local speech path is tuned around `moonshine-medium`; cloud STT/response settings are exposed through panel/runtime config.
 - Structured memory now stores facts, episodic turns, recent launched games, and last referenced game for contextual follow-ups.
-- Grounded game replies now cover explain/recommend/list behavior from the local manifest instead of freeform LLM guesses.
+- Unified doc-RAG now handles both general local documents and game knowledge from a shared local index, with `doc_answer` / `doc_clarify` / `no_evidence` routing.
+- General doc answers now use a local summary step before spoken rendering, which improves multi-turn lab / people / research / equipment answers over raw snippet playback.
+- Grounded game replies now cover explain/recommend/list behavior from the local manifest inside the same doc-grounded pipeline instead of freeform LLM guesses.
 - Contextual command carryover works for phrases such as `Open it.` after a recommendation or grounded explanation.
+- Confirmed doc follow-ups such as `his lab`, `the research`, `they`, `it`, and `Yes.` now resume the prior grounded doc target instead of falling back to memory or vision.
 - Piper runs as a persistent worker instead of a per-request process, which reduces TTS startup cost.
 - Kokoro TTS is now available as a third compatible backend on `:5007`, alongside Piper and Qwen.
-- The source launcher now auto-bootstraps/detects `.venv_asr` and `.venv_tts`, while `helper.bat` prefers packaged services, clears stale processes, and reuses an existing MQTT broker on `1883`.
-- Repeatable conversation regression now includes profile compare, grounded game cases, and a dedicated memory regression scenario set.
+- The source launcher now auto-bootstraps/detects `.venv_asr` and `.venv_tts`, validates the local doc-rag embedder before startup, clears stale repo-owned service trees, and reuses an existing MQTT broker on `1883`.
+- Repeatable regression now includes transcript-level dialogue cases with machine-readable and human-readable reports under `runtime/evals/`.
 
 ## SDK Spotlight (Start Here for Integration)
 
@@ -145,8 +148,13 @@ sequenceDiagram
 - MQTT command publish for face/servo/LED and game intents.
 - Intent router with layered strategy: exact alias, fuzzy/phonetic similarity, optional LLM classifier, optional Moonshine embedding matcher.
 - Structured memory with speaker identity mapping, facts, episodic recall, recent game history, and contextual game references (`scripts/dialog_service/user_memory.json`).
-- Grounded game catalog for explain/recommend/list replies, using local manifest data instead of freeform game descriptions.
+- Unified local doc-RAG for both general documents and game knowledge, using a shared retrieval-first pipeline instead of separate freeform reply paths.
+- Entity resolver for ASR/typo-tolerant local doc grounding, with fuzzy entity matching against indexed labs, people, projects, equipment, and games.
+- Two-stage grounded answers for general docs: local snippet retrieval -> local summary synthesis -> spoken render.
+- Facet-aware general doc answers for `overview`, `people`, `research`, `equipment`, `location_contact`, and `news`.
+- Grounded game catalog for explain/recommend/list replies, using local manifest data inside the same doc-grounded pipeline instead of freeform game descriptions.
 - Contextual launch carryover for commands like `Open it.` after a grounded recommendation.
+- Confirmed doc follow-up carryover for references like `his lab`, `the research`, `it`, `they`, and short clarification replies like `Yes.`.
 - Optional vision-assisted replies through the desktop runtime camera describe endpoint.
 - Telemetry aggregation service for elder-exercise metrics (supports mock seeding).
 - Browser control panel over HTTP (default port `8787`) with runtime switching, memory/QMD tools, games, camera, and logs.
@@ -180,6 +188,12 @@ flowchart LR
 5. Use `/setup`, `/memory`, `/games`, and `/sdk` for first-run checks, memory inspection, manifest editing, and API testing.
 
 `helper.bat` delegates to `scripts/start_local_services.py`, which can launch source services in development or bundled executables when running from a packaged deployment.
+
+For local document grounding, the maintained default doc root is:
+
+- `runtime/qmd/docs`
+
+Place `.md`, `.qmd`, and `.txt` corpora there when you want them to participate in general/doc retrieval. Game knowledge is still loaded from the manifest/QMD side, but general documents now share the same doc-grounded conversation path.
 
 ### Path B: Optional Unity Shell
 
@@ -242,6 +256,8 @@ Important:
 - `--hub-cmd` is optional and only needed when you want to override broker startup.
 - Use `--no-hub` if you already have an external broker running.
 - By default, the script starts voice service + Piper HTTP + Qwen HTTP + Kokoro HTTP + intent service + dialog service + telemetry service + game launcher.
+- Startup now validates the local doc-rag embedder before bringing the stack up. If the ONNX embedder is unavailable, startup fails fast instead of silently dropping to a partial general-doc mode.
+- Before starting fresh services, the launcher clears stale repo-owned service process trees so `:8000` and `:8787` are not left on old Python worker chains.
 - Launcher config files:
   - baseline defaults: `scripts/local_services.default.json`
   - per-machine overrides (no env var required): `scripts/local_services.user.json`
@@ -252,8 +268,11 @@ Important:
     - launch triggers (for `LAUNCH_GAME`)
     - exit keywords (for `BACK_HOME`)
 - On source checkouts, the launcher can auto-bootstrap `python_voice_service/.venv_asr` and `.venv_tts` before falling back to system Python.
+- The maintained source runtime is `.venv_asr`; avoid running a second unmanaged Python service stack in parallel on the same ports.
 - Intent alias matching uses `scripts/intent_service/manifest.json` by default (override with `INTENT_MANIFEST_PATH`).
 - Game launching reads the same manifest file (override with `GAME_LAUNCHER_MANIFEST_PATH`).
+- Local doc-rag defaults to `runtime/qmd` as the corpus root and looks for general docs under `runtime/qmd/docs`.
+- Optional curated entity aliases for ASR/pronunciation edge cases can be stored at `runtime/qmd/docs/entity_aliases.json`.
 - Each game entry can include `exec`, `workdir`, `args`, and `env`; `LAUNCH_GAME` only opens a process when `exec` is configured.
 - If one managed process exits, the launcher shuts down the remaining processes.
 
@@ -289,6 +308,32 @@ Recommended env vars when you want to control it explicitly:
 - `VOICE_SPEAKER_ID_ENABLED=1`
 - `VOICE_SPEAKER_ID_MODEL_PATH=<absolute path to ECAPA ONNX>`
 - `VOICE_SPEAKER_ID_PROFILES_PATH=<absolute path to speaker_profiles.json>`
+
+### 3.6) Local Doc-RAG Notes
+
+The maintained grounded conversation path now uses a unified local doc index for both:
+
+- general documents under `runtime/qmd/docs`
+- game knowledge from the manifest and game docs
+
+Current behavior:
+
+- `QUERY` turns first check doc clarification continuation and confirmed doc follow-ups, then memory/vision guards, then doc retrieval.
+- General/doc replies are split by internal focus (`overview`, `people`, `research`, `equipment`, `location_contact`, `news`) so team questions do not get answered with news snippets and overview questions do not read out raw project descriptions.
+- General/doc answers use a local summary stage before spoken rendering.
+- Doc-like failures stay inside safe grounded behavior: `doc_clarify`, `clarify_typo_correction`, or `no_evidence`.
+- Vision is now guarded more strictly; generic `describe` does not steal a doc/game follow-up unless the user explicitly refers to camera/frame/image/scene content.
+
+Useful doc-rag env vars:
+
+- `DOC_RAG_ENABLE`
+- `DOC_RAG_ROOT`
+- `DOC_RAG_HIGH_CONFIDENCE`
+- `DOC_RAG_LOW_CONFIDENCE`
+- `DOC_RAG_SUMMARY_ENABLE`
+- `DOC_RAG_SUMMARY_MODEL`
+- `DOC_RAG_SUMMARY_MAX_SNIPPETS`
+- `DOC_RAG_SUMMARY_MAX_CHARS_PER_SNIPPET`
 
 ### 4) Optional helper.bat
 
@@ -963,6 +1008,8 @@ Regression artifacts:
 - broad conversation report: `runtime/evals/latest_conversation_eval.json`
 - text-only public benchmark report: `runtime/evals/latest_dialogue_benchmark_eval.json`
 - memory-focused report: `runtime/evals/latest_memory_eval.json`
+- transcript regression report (machine-readable): `runtime/evals/latest_dialogue_regression_report.json`
+- transcript regression report (readable): `runtime/evals/latest_dialogue_regression_report.md`
 
 Current regression coverage includes:
 - command launch / exit
@@ -971,6 +1018,14 @@ Current regression coverage includes:
 - structured memory write + recall
 - episodic recall
 - recommendation carryover (`Open it.` after recommendation)
+- transcript-level general/doc follow-ups (`his lab`, `the research`, `they`, `Yes.` after clarification)
+- transcript-level game/doc follow-ups (`What options do you have?`, `Describe all the game.`, `All the game.`)
+
+Transcript regression discipline:
+
+- User-reported dialogue failures are added as repo-tracked transcript fixtures under `tests/fixtures/`.
+- Every implementation round should keep older transcript cases green, not just the latest bugfix.
+- The regression report records expected behavior, actual provider/route, and the actual answer text for each captured turn.
 
 Recommended public dialogue benchmark shortlist for future eval expansion:
 - [`docs/DIALOGUE_BENCHMARK_DATASETS.md`](docs/DIALOGUE_BENCHMARK_DATASETS.md)
