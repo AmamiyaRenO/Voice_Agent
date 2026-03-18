@@ -83,6 +83,7 @@ def _build_runtime(tmp_path: Path):
     )
     runtime.session_store = session_context.SessionContextStore(max_age_sec=600.0)
     runtime._capability_classifier_cache = {}
+    runtime.local_docs_rag = None
     runtime.ready = True
     runtime.error = ""
 
@@ -94,122 +95,62 @@ def _build_runtime(tmp_path: Path):
     return runtime, voice_main, session_context
 
 
-def test_game_catalog_introduce_current_choice_uses_session_state(tmp_path: Path):
+def _attach_doc_rag(runtime, handler):
+    def _probe(text, *, focus_state=None, session_state=None, user_profile=None):
+        result = handler(
+            text=text,
+            focus_state=focus_state,
+            session_state=session_state,
+            user_profile=user_profile,
+        )
+        payload = dict(result.get("payload") or {})
+        response_text = str(result.get("response_text") or payload.get("text") or "").strip()
+        telemetry = {
+            "query": text,
+            "stage1_result": result.get("stage1_result", "doc_candidate"),
+            "query_doc_affinity": result.get("query_doc_affinity", 0.9),
+            "retrieval_support": result.get("retrieval_support", 0.8),
+            "entity_binding_strength": result.get("entity_binding_strength", 0.8),
+            "stage1_reason": result.get("stage1_reason", "test_probe"),
+            "force_doc_reason": result.get("force_doc_reason", "test_force"),
+            "stage2_result": result.get("stage2_result", "doc_answer"),
+            "domain": result.get("domain", str(payload.get("domain") or "")),
+            "answer_mode": result.get("answer_mode", str(payload.get("answer_mode") or "")),
+            "routing_confidence": result.get("routing_confidence", 0.9),
+            "answerability_confidence": result.get("answerability_confidence", 0.8),
+            "doc_confidence": result.get("doc_confidence", 0.8),
+            "top_hit_ids": list(result.get("top_hit_ids", ["hit-1", "hit-2"])),
+            "selected_evidence_ids": list(result.get("selected_evidence_ids", payload.get("doc_source_ids", ["hit-1"]))),
+            "fallback_reason": result.get("fallback_reason", ""),
+            "clarify_kind": result.get("clarify_kind", str(payload.get("clarify_kind") or "")),
+        }
+        return SimpleNamespace(
+            stage1_result=telemetry["stage1_result"],
+            stage2_result=telemetry["stage2_result"],
+            payload=payload,
+            response_text=response_text,
+            doc_confidence=telemetry["doc_confidence"],
+            routing_confidence=telemetry["routing_confidence"],
+            clarify_kind=telemetry["clarify_kind"],
+            fallback_reason=telemetry["fallback_reason"],
+            telemetry=lambda: dict(telemetry),
+        )
+
+    runtime.local_docs_rag = SimpleNamespace(ready=True, probe=_probe)
+
+
+def test_game_catalog_extracts_manifest_mentions(tmp_path: Path):
     if str(PYTHON_VOICE_DIR) not in sys.path:
         sys.path.insert(0, str(PYTHON_VOICE_DIR))
-    game_grounding = _load_module("game_qa_current_choice_module", PYTHON_VOICE_DIR / "game_grounding.py")
+    game_grounding = _load_module("game_qa_extract_mentions_module", PYTHON_VOICE_DIR / "game_grounding.py")
 
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path)
     catalog = game_grounding.GameCatalog(manifest_path)
 
-    result = catalog.grounded_reply(
-        "Introduce your current choice to me.",
-        session_state={
-            "focused_game": "Bean Bag Toss",
-            "primary_recommendation": "Bean Bag Toss",
-            "candidate_games": ["Bean Bag Toss", "Disc Golf"],
-            "updated_at": 9999999999.0,
-        },
-    )
+    mentions = catalog.extract_game_mentions("Could you compare disc golf and cornhole for me?", limit=4)
 
-    assert result["type"] == "game_explain"
-    assert result["primary_game_name"] == "Bean Bag Toss"
-    assert "Bean Bag Toss" in result["required_terms"]
-    assert "Bean Bag Toss" in result["text"]
-
-
-def test_game_catalog_introduce_them_uses_candidate_games(tmp_path: Path):
-    if str(PYTHON_VOICE_DIR) not in sys.path:
-        sys.path.insert(0, str(PYTHON_VOICE_DIR))
-    game_grounding = _load_module("game_qa_intro_them_module", PYTHON_VOICE_DIR / "game_grounding.py")
-
-    manifest_path = tmp_path / "manifest.json"
-    _write_manifest(manifest_path)
-    catalog = game_grounding.GameCatalog(manifest_path)
-
-    result = catalog.grounded_reply(
-        "Introduce them to me.",
-        session_state={
-            "focused_game": "Bean Bag Toss",
-            "primary_recommendation": "Bean Bag Toss",
-            "candidate_games": ["Bean Bag Toss", "Disc Golf"],
-            "updated_at": 9999999999.0,
-        },
-    )
-
-    assert result["type"] == "game_explain"
-    assert set(result["candidate_games"]) == {"Bean Bag Toss", "Disc Golf"}
-    assert "Bean Bag Toss" in result["text"]
-    assert "Disc Golf" in result["text"]
-
-
-def test_game_catalog_alternative_pivots_to_compare_after_intro(tmp_path: Path):
-    if str(PYTHON_VOICE_DIR) not in sys.path:
-        sys.path.insert(0, str(PYTHON_VOICE_DIR))
-    game_grounding = _load_module("game_qa_compare_pivot_module", PYTHON_VOICE_DIR / "game_grounding.py")
-
-    manifest_path = tmp_path / "manifest.json"
-    _write_manifest(manifest_path)
-    catalog = game_grounding.GameCatalog(manifest_path)
-
-    result = catalog.grounded_reply(
-        "Any other option?",
-        session_state={
-            "focused_game": "Bean Bag Toss",
-            "primary_recommendation": "Bean Bag Toss",
-            "candidate_games": ["Bean Bag Toss", "Disc Golf"],
-            "last_introduced_games": ["Disc Golf"],
-            "updated_at": 9999999999.0,
-        },
-    )
-
-    assert result["type"] == "game_explain"
-    assert set(result["candidate_games"]) == {"Bean Bag Toss", "Disc Golf"}
-    assert "Bean Bag Toss" in result["text"]
-    assert "Disc Golf" in result["text"]
-
-
-def test_game_catalog_qmd_overview_is_used_for_introduction(tmp_path: Path):
-    if str(PYTHON_VOICE_DIR) not in sys.path:
-        sys.path.insert(0, str(PYTHON_VOICE_DIR))
-    game_grounding = _load_module("game_qa_qmd_module", PYTHON_VOICE_DIR / "game_grounding.py")
-
-    manifest_path = tmp_path / "manifest.json"
-    _write_manifest(manifest_path)
-    catalog = game_grounding.GameCatalog(manifest_path)
-    qmd_root = tmp_path / "qmd" / "games"
-    qmd_root.mkdir(parents=True, exist_ok=True)
-    (qmd_root / "disc_golf.qmd").write_text(
-        "\n".join(
-            [
-                "---",
-                "type: game_card",
-                "name: Disc Golf",
-                "---",
-                "",
-                "# Game Card: Disc Golf",
-                "",
-                "## Description",
-                "Disc Golf is the walking-focused throwing option with basket targets.",
-                "",
-                "## How To Play",
-                "Throw discs toward the basket and finish each hole in as few throws as possible.",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    catalog.qmd_games_dir = qmd_root
-    catalog._load()
-
-    result = catalog.grounded_reply(
-        "Introduce Disc Golf to me.",
-        session_state={"updated_at": 9999999999.0},
-    )
-
-    assert result["type"] == "game_explain"
-    assert result["primary_game_name"] == "Disc Golf"
-    assert "walking-focused throwing option" in result["text"]
+    assert mentions == ["Disc Golf", "Bean Bag Toss"]
 
 
 def test_game_catalog_generic_chat_is_not_treated_as_game_followup(tmp_path: Path):
@@ -227,53 +168,9 @@ def test_game_catalog_generic_chat_is_not_treated_as_game_followup(tmp_path: Pat
         "updated_at": 9999999999.0,
     }
 
-    assert catalog.looks_like_game_domain("Can you hear me clearly?", session_state=session_state) is False
     assert catalog.looks_like_game_followup("Can you hear me clearly?", session_state=session_state) is False
-    assert catalog.route_game_query("Can you hear me clearly?", session_state=session_state).intent == "none"
-    assert catalog.looks_like_game_domain("What options do we have?", session_state=session_state) is False
-    assert catalog.route_game_query("What options do we have?", session_state=session_state).intent == "none"
-
-
-def test_runtime_try_game_reply_skips_generic_chat_even_with_game_context(tmp_path: Path):
-    if str(PYTHON_VOICE_DIR) not in sys.path:
-        sys.path.insert(0, str(PYTHON_VOICE_DIR))
-    game_grounding = _load_module("game_qa_runtime_grounding_module", PYTHON_VOICE_DIR / "game_grounding.py")
-    session_context = _load_module("game_qa_runtime_session_module", PYTHON_VOICE_DIR / "session_context.py")
-    voice_main = _load_module("game_qa_runtime_main_module", PYTHON_VOICE_DIR / "main.py")
-
-    manifest_path = tmp_path / "manifest.json"
-    _write_manifest(manifest_path)
-    catalog = game_grounding.GameCatalog(manifest_path)
-
-    runtime = voice_main._UnifiedConversationRuntime.__new__(voice_main._UnifiedConversationRuntime)
-    runtime.intent_router = object()
-    runtime.dialog_helper = SimpleNamespace(user_memory=None, reply_compress=False)
-    runtime.game_catalog = catalog
-    runtime.session_store = session_context.SessionContextStore(max_age_sec=600.0)
-    runtime.ready = True
-    runtime.error = ""
-
-    async def _fail_render(**_kwargs):
-        raise AssertionError("structured game renderer should not be called for generic chat")
-
-    runtime._render_structured_reply = _fail_render
-    runtime.finalize_assistant_turn = lambda **_kwargs: None
-    runtime.session_store.update_game_state(
-        user_id=None,
-        focused_game="Bean Bag Toss",
-        candidate_games=["Bean Bag Toss", "Disc Golf"],
-        primary_recommendation="Bean Bag Toss",
-    )
-
-    reply = asyncio.run(
-        runtime.try_game_reply(
-            user_id=None,
-            text="Can you hear me clearly?",
-            dialog_request_ctx={},
-        )
-    )
-
-    assert reply == ""
+    assert catalog.looks_like_game_followup("What options do we have?", session_state=session_state) is False
+    assert catalog.looks_like_game_followup("Tell me more about it.", session_state=session_state) is True
 
 
 def test_session_context_store_enforces_balanced_context_budget():
@@ -363,8 +260,28 @@ def test_runtime_route_query_capability_clarifies_ambiguous_help_without_game_bi
     assert decision.clarification_kind == "help"
 
 
-def test_runtime_route_query_capability_uses_semantic_game_availability_for_exercise_game(tmp_path: Path):
+def test_runtime_route_query_capability_prefers_doc_probe_for_exercise_game(tmp_path: Path):
     runtime, _, _ = _build_runtime(tmp_path)
+    _attach_doc_rag(
+        runtime,
+        lambda **_kwargs: {
+            "payload": {
+                "type": "doc_answer",
+                "domain": "game",
+                "answer_mode": "availability",
+                "text": "Right now I have Bean Bag Toss and Disc Golf available.",
+                "doc_source_ids": ["game_card:bean_bag_toss", "game_card:disc_golf"],
+                "candidate_entities": ["Bean Bag Toss", "Disc Golf"],
+                "allowed_entities": ["Bean Bag Toss", "Disc Golf"],
+                "launchable_games": ["Bean Bag Toss", "Disc Golf"],
+                "doc_confidence": 0.82,
+            },
+            "stage2_result": "doc_answer",
+            "domain": "game",
+            "answer_mode": "availability",
+            "doc_confidence": 0.82,
+        },
+    )
 
     async def _semantic_label(**_kwargs):
         return "game_availability"
@@ -378,7 +295,125 @@ def test_runtime_route_query_capability_uses_semantic_game_availability_for_exer
         )
     )
 
-    assert decision.label == "game_availability"
+    assert decision.label == "doc_query"
+    assert decision.structured_payload["answer_mode"] == "availability"
+    assert decision.structured_payload["domain"] == "game"
+
+
+def test_runtime_route_query_capability_uses_confirmed_general_doc_followup_before_other_guards(tmp_path: Path):
+    runtime, _, _ = _build_runtime(tmp_path)
+    runtime.session_store.record_structured_capability(
+        user_id=None,
+        active_capability="doc_query",
+        focused_entity="John E. Munoz",
+        candidate_entities=["John E. Munoz"],
+        last_structured_intent="introduce",
+        focus_domain="general",
+        focus_general_focus="people",
+        related_entities={"lab": ["BioAdaptive Interface Lab"]},
+        focus_source="answer",
+    )
+
+    _attach_doc_rag(
+        runtime,
+        lambda **kwargs: {
+            "payload": {
+                "type": "doc_answer",
+                "domain": "general",
+                "answer_mode": "introduce",
+                "general_focus": "overview",
+                "text": "BioAdaptive Interface Lab is a research lab at Wilfrid Laurier University.",
+                "summary_text": "BioAdaptive Interface Lab is a research lab at Wilfrid Laurier University.",
+                "doc_snippets": ["Lab name: BioAdaptive Interface Lab."],
+                "doc_source_ids": ["general:lab_identity:0:0"],
+                "candidate_entities": ["BioAdaptive Interface Lab"],
+                "allowed_entities": ["BioAdaptive Interface Lab"],
+                "doc_confidence": 0.88,
+            },
+            "stage2_result": "doc_answer",
+            "domain": "general",
+            "answer_mode": "introduce",
+            "doc_confidence": 0.88,
+            "selected_evidence_ids": ["general:lab_identity:0:0"],
+            "top_hit_ids": ["general:lab_identity:0:0"],
+        }
+        if kwargs.get("text") == "What is BioAdaptive Interface Lab?"
+        else {
+            "stage1_result": "not_doc",
+            "stage2_result": "",
+            "fallback_reason": "not_doc",
+        },
+    )
+
+    decision = asyncio.run(
+        runtime.route_query_capability(
+            user_id=None,
+            text="Do you know his lab?",
+        )
+    )
+
+    assert decision.label == "doc_query"
+    assert decision.routed_text == "What is BioAdaptive Interface Lab?"
+    assert decision.structured_payload["domain"] == "general"
+    assert decision.structured_payload["general_focus"] == "overview"
+
+
+def test_runtime_route_query_capability_resumes_typed_doc_clarification_on_yes(tmp_path: Path):
+    runtime, _, _ = _build_runtime(tmp_path)
+    runtime.session_store.save_clarification(
+        user_id=None,
+        kind="doc_clarify",
+        source_user_text="What do you know about John?",
+        assistant_clarify_text="Do you mean John E. Munoz?",
+        target_domain="general",
+        target_answer_mode="introduce",
+        target_general_focus="people",
+        target_entities=["John E. Munoz"],
+        related_entities={"lab": ["BioAdaptive Interface Lab"]},
+        resume_strategy="confirm_candidate",
+    )
+    _attach_doc_rag(
+        runtime,
+        lambda **kwargs: {
+            "payload": {
+                "type": "doc_answer",
+                "domain": "general",
+                "answer_mode": "introduce",
+                "general_focus": "people",
+                "text": "John E. Munoz is Director of BioAdaptive Interface Lab.",
+                "summary_text": "John E. Munoz is Director of BioAdaptive Interface Lab.",
+                "doc_snippets": ["Name: John E. Munoz. Role: Director of BioAdaptive Interface Lab."],
+                "doc_source_ids": ["general:team:0:0"],
+                "candidate_entities": ["John E. Munoz"],
+                "allowed_entities": ["John E. Munoz", "BioAdaptive Interface Lab"],
+                "primary_entity": "John E. Munoz",
+                "doc_confidence": 0.84,
+            },
+            "stage2_result": "doc_answer",
+            "domain": "general",
+            "answer_mode": "introduce",
+            "doc_confidence": 0.84,
+            "selected_evidence_ids": ["general:team:0:0"],
+            "top_hit_ids": ["general:team:0:0"],
+        }
+        if kwargs.get("text") == "Tell me about John E. Munoz."
+        else {
+            "stage1_result": "not_doc",
+            "stage2_result": "",
+            "fallback_reason": "not_doc",
+        },
+    )
+
+    decision = asyncio.run(
+        runtime.route_query_capability(
+            user_id=None,
+            text="Yes.",
+        )
+    )
+
+    assert decision.label == "doc_query"
+    assert decision.merged_from_clarification is True
+    assert decision.routed_text == "Tell me about John E. Munoz."
 
 
 def test_runtime_route_query_capability_keeps_introduce_yourself_as_general_chat(tmp_path: Path):
@@ -437,22 +472,6 @@ def test_runtime_route_query_capability_switches_from_game_to_memory_query(tmp_p
     )
 
     assert decision.label == "memory_query"
-
-
-def test_runtime_try_game_reply_forced_availability_handles_fuzzy_game_query(tmp_path: Path):
-    runtime, _, _ = _build_runtime(tmp_path)
-
-    reply = asyncio.run(
-        runtime.try_game_reply(
-            user_id=None,
-            text="Do you got any exercise game?",
-            dialog_request_ctx={},
-            forced_intent="game_availability",
-        )
-    )
-
-    assert "Bean Bag Toss" in reply
-    assert "Disc Golf" in reply
 
 
 def test_runtime_route_query_capability_topic_switch_clarifies_after_unrelated_chat(tmp_path: Path):
@@ -546,6 +565,27 @@ def test_runtime_route_query_capability_allows_explicit_game_reopen_after_reset(
     runtime, _, _ = _build_runtime(tmp_path)
     runtime.session_store.remember_turn(user_id=None, role="user", text="Let's switch topic to normal talking.")
     runtime.session_store.activate_game_suppression(user_id=None, reason="normal_talk")
+    _attach_doc_rag(
+        runtime,
+        lambda **_kwargs: {
+            "payload": {
+                "type": "doc_answer",
+                "domain": "game",
+                "answer_mode": "availability",
+                "text": "Right now I have Bean Bag Toss and Disc Golf available.",
+                "doc_source_ids": ["game_card:bean_bag_toss", "game_card:disc_golf"],
+                "candidate_entities": ["Bean Bag Toss", "Disc Golf"],
+                "allowed_entities": ["Bean Bag Toss", "Disc Golf"],
+                "launchable_games": ["Bean Bag Toss", "Disc Golf"],
+                "doc_confidence": 0.85,
+            },
+            "stage2_result": "doc_answer",
+            "domain": "game",
+            "answer_mode": "availability",
+            "force_doc_reason": "availability_query",
+            "doc_confidence": 0.85,
+        },
+    )
 
     async def _semantic_label(**_kwargs):
         return "game_availability"
@@ -559,7 +599,8 @@ def test_runtime_route_query_capability_allows_explicit_game_reopen_after_reset(
         )
     )
 
-    assert decision.label == "game_availability"
+    assert decision.label == "doc_query"
+    assert decision.structured_payload["answer_mode"] == "availability"
 
 
 def test_coach_prompt_package_uses_neutral_assistant_label():
@@ -586,6 +627,27 @@ def test_runtime_route_query_capability_routes_other_option_after_game_recommend
         primary_recommendation="Bean Bag Toss",
         last_router_intent="game_recommend",
     )
+    _attach_doc_rag(
+        runtime,
+        lambda **_kwargs: {
+            "payload": {
+                "type": "doc_clarify",
+                "domain": "game",
+                "answer_mode": "",
+                "clarify_kind": "clarify_ambiguous_intent",
+                "text": "Do you want me to compare Bean Bag Toss and Disc Golf, or recommend one?",
+                "doc_source_ids": ["game_card:bean_bag_toss", "game_card:disc_golf"],
+                "candidate_entities": ["Bean Bag Toss", "Disc Golf", "Balance Quest"],
+                "allowed_entities": ["Bean Bag Toss", "Disc Golf", "Balance Quest"],
+                "launchable_games": ["Bean Bag Toss", "Disc Golf", "Balance Quest"],
+                "doc_confidence": 0.44,
+            },
+            "stage2_result": "doc_clarify",
+            "domain": "game",
+            "clarify_kind": "clarify_ambiguous_intent",
+            "doc_confidence": 0.44,
+        },
+    )
 
     decision = asyncio.run(
         runtime.route_query_capability(
@@ -594,7 +656,9 @@ def test_runtime_route_query_capability_routes_other_option_after_game_recommend
         )
     )
 
-    assert decision.label == "game_alternative"
+    assert decision.label == "doc_query"
+    assert decision.structured_payload["type"] == "doc_clarify"
+    assert decision.clarification_kind == "clarify_ambiguous_intent"
 
 
 def test_runtime_route_query_capability_routes_introduce_game_with_focus(tmp_path: Path):
@@ -606,6 +670,27 @@ def test_runtime_route_query_capability_routes_introduce_game_with_focus(tmp_pat
         primary_recommendation="Bean Bag Toss",
         last_router_intent="game_availability",
     )
+    _attach_doc_rag(
+        runtime,
+        lambda **_kwargs: {
+            "payload": {
+                "type": "doc_answer",
+                "domain": "game",
+                "answer_mode": "introduce",
+                "text": "Disc Golf is a throwing game where players aim discs at basket targets.",
+                "doc_source_ids": ["game_card:disc_golf"],
+                "primary_entity": "Disc Golf",
+                "candidate_entities": ["Disc Golf"],
+                "allowed_entities": ["Disc Golf"],
+                "launchable_games": ["Disc Golf"],
+                "doc_confidence": 0.78,
+            },
+            "stage2_result": "doc_answer",
+            "domain": "game",
+            "answer_mode": "introduce",
+            "doc_confidence": 0.78,
+        },
+    )
 
     decision = asyncio.run(
         runtime.route_query_capability(
@@ -614,11 +699,34 @@ def test_runtime_route_query_capability_routes_introduce_game_with_focus(tmp_pat
         )
     )
 
-    assert decision.label == "game_introduce"
+    assert decision.label == "doc_query"
+    assert decision.structured_payload["answer_mode"] == "introduce"
+    assert decision.structured_payload["primary_entity"] == "Disc Golf"
 
 
 def test_capability_router_replays_failing_sequence_without_game_latch(tmp_path: Path):
     runtime, _, _ = _build_runtime(tmp_path)
+    _attach_doc_rag(
+        runtime,
+        lambda *, text, **_kwargs: {
+            "payload": {
+                "type": "doc_answer",
+                "domain": "game",
+                "answer_mode": "availability",
+                "text": "Right now I have Bean Bag Toss and Disc Golf available.",
+                "doc_source_ids": ["game_card:bean_bag_toss", "game_card:disc_golf"],
+                "candidate_entities": ["Bean Bag Toss", "Disc Golf"],
+                "allowed_entities": ["Bean Bag Toss", "Disc Golf"],
+                "launchable_games": ["Bean Bag Toss", "Disc Golf"],
+                "doc_confidence": 0.8,
+            },
+            "stage1_result": "doc_candidate" if "exercise game" in text.lower() else "not_doc",
+            "stage2_result": "doc_answer",
+            "domain": "game",
+            "answer_mode": "availability",
+            "doc_confidence": 0.8,
+        },
+    )
 
     async def _semantic_label(*, text, **_kwargs):
         lowered = text.lower()
@@ -652,7 +760,8 @@ def test_capability_router_replays_failing_sequence_without_game_latch(tmp_path:
             text="Do you got any exercise game?",
         )
     )
-    assert third.label == "game_availability"
+    assert third.label == "doc_query"
+    assert third.structured_payload["answer_mode"] == "availability"
 
 
 def test_runtime_clarification_handoff_merges_exercise_plan_followup(tmp_path: Path):
@@ -692,6 +801,28 @@ def test_runtime_clarification_handoff_can_route_games_from_short_followup(tmp_p
         source_user_text="Help me with.",
         assistant_clarify_text="What kind of help do you want?",
     )
+    _attach_doc_rag(
+        runtime,
+        lambda *, text, **_kwargs: {
+            "payload": {
+                "type": "doc_answer",
+                "domain": "game",
+                "answer_mode": "availability",
+                "text": "Right now I have Bean Bag Toss and Disc Golf available.",
+                "doc_source_ids": ["game_card:bean_bag_toss", "game_card:disc_golf"],
+                "candidate_entities": ["Bean Bag Toss", "Disc Golf"],
+                "allowed_entities": ["Bean Bag Toss", "Disc Golf"],
+                "launchable_games": ["Bean Bag Toss", "Disc Golf"],
+                "doc_confidence": 0.83,
+            },
+            "stage1_result": "doc_candidate" if "games" in text.lower() else "not_doc",
+            "stage2_result": "doc_answer",
+            "domain": "game",
+            "answer_mode": "availability",
+            "force_doc_reason": "availability_query",
+            "doc_confidence": 0.83,
+        },
+    )
 
     async def _semantic_label(*, text, **_kwargs):
         if "games" in text.lower():
@@ -707,8 +838,42 @@ def test_runtime_clarification_handoff_can_route_games_from_short_followup(tmp_p
         )
     )
 
-    assert decision.label == "game_availability"
+    assert decision.label == "doc_query"
     assert decision.merged_from_clarification is True
+
+
+def test_runtime_route_query_capability_keeps_not_doc_probe_telemetry(tmp_path: Path):
+    runtime, _, _ = _build_runtime(tmp_path)
+    _attach_doc_rag(
+        runtime,
+        lambda **_kwargs: {
+            "stage1_result": "not_doc",
+            "stage1_reason": "weak_retrieval_support",
+            "fallback_reason": "weak_retrieval_support",
+            "query_doc_affinity": 0.12,
+            "retrieval_support": 0.08,
+            "entity_binding_strength": 0.05,
+            "routing_confidence": 0.14,
+            "doc_confidence": 0.14,
+        },
+    )
+
+    async def _semantic_label(**_kwargs):
+        return "general_chat"
+
+    runtime._semantic_capability_label = _semantic_label
+
+    decision = asyncio.run(
+        runtime.route_query_capability(
+            user_id=None,
+            text="Tell me something fun.",
+        )
+    )
+
+    assert decision.label == "general_chat"
+    assert decision.probe_telemetry is not None
+    assert decision.probe_telemetry["stage1_result"] == "not_doc"
+    assert decision.fallback_reason == "weak_retrieval_support"
 
 
 def test_runtime_clarification_handoff_expires_after_one_unrelated_turn(tmp_path: Path):

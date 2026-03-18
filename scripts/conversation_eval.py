@@ -216,6 +216,7 @@ async def _run_turn_stream(
     first_event_ms: Optional[float] = None
     first_chunk_ms: Optional[float] = None
     events: List[Dict[str, Any]] = []
+    final_event: Dict[str, Any] = {}
 
     try:
         async with client.stream(
@@ -245,8 +246,10 @@ async def _run_turn_stream(
                             first_chunk_ms = now_ms
                 elif event_type == "final":
                     final_text = str(event.get("text") or "").strip()
+                    final_event = dict(event)
                 elif event_type == "error":
                     error_text = str(event.get("message") or "").strip()
+                    final_event = dict(event)
     except (httpx.HTTPError, json.JSONDecodeError) as exc:
         error_text = str(exc).strip() or exc.__class__.__name__
 
@@ -260,6 +263,20 @@ async def _run_turn_stream(
         "final_text": final_text,
         "error": error_text,
         "events": events,
+        "doc_probe": final_event.get("doc_probe") if isinstance(final_event.get("doc_probe"), dict) else {},
+        "fallback_reason": str(final_event.get("fallback_reason") or "").strip(),
+        "structured_type": str(final_event.get("structured_type") or "").strip(),
+        "domain": str(final_event.get("domain") or "").strip(),
+        "answer_mode": str(final_event.get("answer_mode") or "").strip(),
+        "general_focus": str(final_event.get("general_focus") or "").strip(),
+        "clarify_kind": str(final_event.get("clarify_kind") or "").strip(),
+        "summary_used": bool(final_event.get("summary_used")),
+        "summary_model": str(final_event.get("summary_model") or "").strip(),
+        "summary_fallback_reason": str(final_event.get("summary_fallback_reason") or "").strip(),
+        "general_doc_kinds": list(final_event.get("general_doc_kinds") or []),
+        "focus_domain": str(final_event.get("focus_domain") or "").strip(),
+        "focus_general_focus": str(final_event.get("focus_general_focus") or "").strip(),
+        "clarification_resume_strategy": str(final_event.get("clarification_resume_strategy") or "").strip(),
     }
 
 
@@ -466,6 +483,13 @@ async def _run_scenario(
             "chunks": result.get("chunks", []),
             "final_text": result.get("final_text", ""),
             "error": result.get("error", ""),
+            "doc_probe": result.get("doc_probe", {}),
+            "fallback_reason": result.get("fallback_reason", ""),
+            "structured_type": result.get("structured_type", ""),
+            "domain": result.get("domain", ""),
+            "answer_mode": result.get("answer_mode", ""),
+            "general_focus": result.get("general_focus", ""),
+            "clarify_kind": result.get("clarify_kind", ""),
             "checks": checks,
             "passed": passed,
         }
@@ -492,6 +516,13 @@ async def _run_scenario(
             "final_ms": aggregate.get("final_ms"),
             "final_text": aggregate.get("final_text", ""),
             "error": aggregate.get("error", ""),
+            "doc_probe": aggregate.get("doc_probe", {}),
+            "fallback_reason": aggregate.get("fallback_reason", ""),
+            "structured_type": aggregate.get("structured_type", ""),
+            "domain": aggregate.get("domain", ""),
+            "answer_mode": aggregate.get("answer_mode", ""),
+            "general_focus": aggregate.get("general_focus", ""),
+            "clarify_kind": aggregate.get("clarify_kind", ""),
             "steps": step_results,
         },
         runtime_cfg,

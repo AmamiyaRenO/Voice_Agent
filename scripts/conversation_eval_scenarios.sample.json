@@ -26,7 +26,7 @@
     "category": "casual",
     "text": "Explain cornhole in one short sentence.",
     "expect_route": "QUERY",
-    "allowed_providers": ["game_catalog"],
+    "allowed_providers": ["doc_rag"],
     "expect_contains": ["bean bag", "board"],
     "reject_contains": ["rehabilitation", "training claims", "wooden ball"]
   },
@@ -46,8 +46,8 @@
         "name": "recommend_local_game",
         "text": "Recommend a game for two people in one short sentence.",
         "expect_route": "QUERY",
-        "allowed_providers": ["game_catalog"],
-        "expect_contains": ["Bean Bag Toss", "single-player"],
+        "allowed_providers": ["doc_rag"],
+        "expect_contains": ["Bean Bag Toss"],
         "reject_contains": ["standard game designed"]
       }
     ]
@@ -68,7 +68,7 @@
         "name": "recommend_for_goal",
         "text": "Recommend a local game in one short sentence.",
         "expect_route": "QUERY",
-        "allowed_providers": ["game_catalog"],
+        "allowed_providers": ["doc_rag"],
         "expect_contains": ["Disc Golf"]
       }
     ]
@@ -88,7 +88,7 @@
         "name": "recommend_for_constraint",
         "text": "Recommend a local game in one short sentence.",
         "expect_route": "QUERY",
-        "allowed_providers": ["game_catalog"],
+        "allowed_providers": ["doc_rag"],
         "expect_contains": ["Bean Bag Toss"]
       }
     ]
@@ -109,7 +109,7 @@
         "name": "recommend_game",
         "text": "recommend a game to me.",
         "expect_route": "QUERY",
-        "allowed_providers": ["game_catalog"],
+        "allowed_providers": ["doc_rag"],
         "expect_contains": ["Disc Golf"]
       },
       {

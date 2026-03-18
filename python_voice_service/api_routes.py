@@ -36,6 +36,11 @@ except Exception:
     from game_grounding import GameCatalog
 
 try:
+    from .local_docs_rag import LocalDocsRAG
+except Exception:
+    from local_docs_rag import LocalDocsRAG
+
+try:
     from .session_context import SessionContextStore
 except Exception:
     from session_context import SessionContextStore
@@ -1269,8 +1274,15 @@ def _structured_template_reply(payload: Dict[str, Any], user_text: str) -> str:
     candidate_games = [str(item).strip() for item in payload.get("candidate_games", []) or [] if str(item).strip()]
     facts = [item for item in payload.get("facts", []) or [] if isinstance(item, dict)]
     notes = [" ".join(str(item).strip().split()) for item in payload.get("notes", []) or [] if str(item).strip()]
-    reason_text = " ".join(str(payload.get("reason_text") or "").strip().split())
-    fallback_text = " ".join(str(payload.get("text") or "").strip().split())
+    reason_text = " ".join(str(payload.get("reason_text") or payload.get("recommendation_reason") or "").strip().split())
+    summary_text = " ".join(str(payload.get("summary_text") or "").strip().split())
+    fallback_text = summary_text or " ".join(str(payload.get("text") or "").strip().split())
+    primary_entity = str(payload.get("primary_entity") or primary_game_name or "").strip()
+    candidate_entities = [str(item).strip() for item in payload.get("candidate_entities", []) or [] if str(item).strip()]
+    allowed_entities = [str(item).strip() for item in payload.get("allowed_entities", []) or [] if str(item).strip()]
+    answer_mode = str(payload.get("answer_mode") or "").strip().lower()
+    domain = str(payload.get("domain") or "").strip().lower()
+    clarify_kind = str(payload.get("clarify_kind") or "").strip().lower()
     seed = f"{reply_type}|{result_kind}|{primary_game_name}|{user_text}"
 
     if reply_type == "game_recommend":
@@ -1355,6 +1367,37 @@ def _structured_template_reply(payload: Dict[str, Any], user_text: str) -> str:
                 return f"So far I remember that {clauses[0]}, {clauses[1]}, and {clauses[2]}."
         return fallback_text
 
+    if reply_type == "doc_clarify":
+        if fallback_text:
+            return fallback_text
+        if clarify_kind == "clarify_missing_entity" and answer_mode == "compare":
+            return "Which two games do you want me to compare?"
+        if clarify_kind == "clarify_ambiguous_intent" and len(candidate_entities) >= 2:
+            return f"Do you want me to compare {candidate_entities[0]} and {candidate_entities[1]}, or recommend one?"
+        return "Could you clarify which document or item you mean?"
+
+    if reply_type == "doc_answer":
+        if fallback_text:
+            return fallback_text
+        if domain == "game" and answer_mode == "availability" and candidate_entities:
+            if len(candidate_entities) == 1:
+                return f"Right now I have {candidate_entities[0]} available."
+            if len(candidate_entities) == 2:
+                return f"Right now I have {candidate_entities[0]} and {candidate_entities[1]} available."
+            return "Right now I have " + ", ".join(candidate_entities[:-1]) + f", and {candidate_entities[-1]} available."
+        if domain == "game" and answer_mode == "recommend" and primary_entity:
+            if reason_text:
+                return f"I recommend {primary_entity} because {reason_text.rstrip('.')}."
+            return f"I recommend {primary_entity}."
+        if domain == "game" and answer_mode == "compare" and len(candidate_entities) >= 2:
+            if reason_text:
+                return f"{candidate_entities[0]} and {candidate_entities[1]} are current options. {reason_text.rstrip('.') }."
+            return f"{candidate_entities[0]} and {candidate_entities[1]} are current options."
+        if primary_entity and answer_mode in {"introduce", "factual", "how_to"} and reason_text:
+            return f"{primary_entity} is {reason_text.rstrip('.') }."
+        if allowed_entities and answer_mode == "recommend":
+            return f"I recommend {allowed_entities[0]}."
+
     return fallback_text
 
 
@@ -1384,23 +1427,50 @@ def _validate_structured_reply(
     if _count_sentences(clean) > max(1, max_sentences):
         return False, "too_many_sentences"
 
-    required_terms = [str(item).strip() for item in payload.get("required_terms", []) or [] if str(item).strip()]
-    for term in required_terms:
-        if _normalize_compare_text(term) not in normalized:
-            return False, f"missing_required:{term}"
-
+    allowed_entities = {
+        _normalize_compare_text(str(item))
+        for item in payload.get("allowed_entities", []) or []
+        if _normalize_compare_text(str(item))
+    }
     allowed_games = {
         _normalize_compare_text(str(item))
         for item in payload.get("allowed_game_names", []) or []
         if _normalize_compare_text(str(item))
     }
+    allowed_games.update(allowed_entities)
     if all_game_names:
         for game_name in all_game_names:
             normalized_name = _normalize_compare_text(game_name)
             if not normalized_name or normalized_name in allowed_games:
                 continue
             if normalized_name in normalized:
-                return False, f"unexpected_game:{game_name}"
+                return False, f"unexpected_entity:{game_name}"
+
+    answer_mode = str(payload.get("answer_mode") or "").strip().lower()
+    candidate_entities = [
+        str(item).strip()
+        for item in payload.get("candidate_entities", []) or []
+        if str(item).strip()
+    ]
+    primary_entity = str(payload.get("primary_entity") or "").strip()
+    if answer_mode == "compare" and len(candidate_entities) >= 2:
+        covered = 0
+        for entity_name in candidate_entities[:2]:
+            if _normalize_compare_text(entity_name) in normalized:
+                covered += 1
+        if covered < 2:
+            return False, "compare_entities_missing"
+    if answer_mode == "recommend" and primary_entity:
+        if _normalize_compare_text(primary_entity) not in normalized:
+            for game_name in all_game_names or []:
+                normalized_name = _normalize_compare_text(game_name)
+                if normalized_name and normalized_name in normalized and normalized_name != _normalize_compare_text(primary_entity):
+                    return False, "recommend_invalid_entity"
+
+    required_terms = [str(item).strip() for item in payload.get("required_terms", []) or [] if str(item).strip()]
+    for term in required_terms:
+        if _normalize_compare_text(term) not in normalized:
+            return False, f"missing_required:{term}"
 
     binding_state = str(payload.get("binding_state") or "").strip().lower()
     if binding_state in {"session_only", "no_saved_profile"} and any(
@@ -1410,10 +1480,150 @@ def _validate_structured_reply(
             "full history",
             "your whole history",
             "your long term profile says",
-        )
+      )
     ):
         return False, "binding_reversal"
     return True, ""
+
+
+def _doc_rag_summary_enabled() -> bool:
+    return _environment_bool("DOC_RAG_SUMMARY_ENABLE", True)
+
+
+def _doc_rag_summary_model() -> str:
+    return _environment("DOC_RAG_SUMMARY_MODEL", _conversation_local_response_model())
+
+
+def _doc_rag_summary_max_snippets() -> int:
+    return max(1, _environment_int("DOC_RAG_SUMMARY_MAX_SNIPPETS", 3))
+
+
+def _doc_rag_summary_max_chars_per_snippet() -> int:
+    return max(80, _environment_int("DOC_RAG_SUMMARY_MAX_CHARS_PER_SNIPPET", 220))
+
+
+def _build_doc_summary_prompt(user_text: str, payload: Dict[str, Any]) -> Tuple[str, str]:
+    compact_payload = {
+        "domain": str(payload.get("domain") or "").strip(),
+        "answer_mode": str(payload.get("answer_mode") or "").strip(),
+        "general_focus": str(payload.get("general_focus") or "").strip(),
+        "primary_entity": str(payload.get("primary_entity") or "").strip(),
+        "candidate_entities": [str(item).strip() for item in payload.get("candidate_entities", []) or [] if str(item).strip()],
+        "allowed_entities": [str(item).strip() for item in payload.get("allowed_entities", []) or [] if str(item).strip()],
+        "required_terms": [str(item).strip() for item in payload.get("required_terms", []) or [] if str(item).strip()],
+        "related_entities": payload.get("related_entities", {}) or {},
+        "summary_text": str(payload.get("summary_text") or payload.get("text") or "").strip(),
+        "summary_points": [str(item).strip() for item in payload.get("summary_points", []) or [] if str(item).strip()],
+        "doc_snippets": [
+            " ".join(str(item).strip().split())[: _doc_rag_summary_max_chars_per_snippet()]
+            for item in (payload.get("doc_snippets", []) or [])[: _doc_rag_summary_max_snippets()]
+            if str(item).strip()
+        ],
+        "doc_source_ids": [str(item).strip() for item in payload.get("doc_source_ids", []) or [] if str(item).strip()],
+        "max_sentences": int(payload.get("max_sentences") or 2),
+    }
+    system_prompt = (
+        "You summarize grounded local document evidence into a concise spoken answer.\n"
+        "Rules:\n"
+        "- Use only the supplied evidence.\n"
+        "- Keep every required term.\n"
+        "- Do not mention any entity outside allowed_entities.\n"
+        "- Keep it to one or two complete sentences.\n"
+        "- Do not use labels, bullets, or JSON.\n"
+        "- Output only the final summary in English."
+    )
+    prompt = (
+        "Summarize the grounded local document evidence for speech.\n\n"
+        f"Latest user message:\n{user_text}\n\n"
+        "Grounded evidence JSON:\n"
+        + json.dumps(compact_payload, ensure_ascii=False, indent=2)
+        + "\n\nFinal spoken summary:"
+    )
+    return system_prompt, prompt
+
+
+async def _generate_local_doc_summary(user_text: str, payload: Dict[str, Any]) -> str:
+    system_prompt, prompt = _build_doc_summary_prompt(user_text, payload)
+    payload_json: Dict[str, Any] = {
+        "model": _doc_rag_summary_model(),
+        "think": False,
+        "system": system_prompt,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.1,
+            "top_p": 0.7,
+            "top_k": 20,
+            "num_predict": 96,
+            "repeat_penalty": 1.05,
+        },
+    }
+    keep_alive = _environment("OLLAMA_KEEP_ALIVE", "30m")
+    if keep_alive:
+        payload_json["keep_alive"] = keep_alive
+    url = f"{_ollama_base_url()}/api/generate"
+    try:
+        client = _AsyncHttpClient.get()
+        response = await client.post(url, json=payload_json)
+    except httpx.HTTPError as exc:
+        raise OllamaError(f"Failed to contact Ollama at {url}: {exc}") from exc
+    if response.status_code != 200:
+        raise OllamaError(f"Ollama returned status {response.status_code}: {response.text.strip()}")
+    data = response.json()
+    summary = _normalize_final_reply_text(str(data.get("response") or ""))
+    if not summary:
+        raise OllamaError("Ollama doc summary response was empty")
+    return summary
+
+
+async def _prepare_structured_payload_for_render(user_text: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    effective_payload = dict(payload)
+    reply_type = str(effective_payload.get("type") or "").strip().lower()
+    domain = str(effective_payload.get("domain") or "").strip().lower()
+    default_summary = _normalize_final_reply_text(
+        str(effective_payload.get("summary_text") or effective_payload.get("text") or "")
+    )
+    effective_payload["summary_used"] = False
+    effective_payload["summary_model"] = ""
+    effective_payload["summary_fallback_reason"] = ""
+    if reply_type != "doc_answer" or domain != "general":
+        if default_summary:
+            effective_payload["summary_text"] = default_summary
+        return effective_payload
+    if default_summary:
+        effective_payload["summary_text"] = default_summary
+    if not _doc_rag_summary_enabled():
+        if default_summary:
+            effective_payload["summary_used"] = True
+            effective_payload["summary_model"] = "deterministic"
+            effective_payload["summary_fallback_reason"] = "disabled"
+        return effective_payload
+    try:
+        summary_text = await _generate_local_doc_summary(user_text, effective_payload)
+    except (OllamaError, OpenAIResponseError, RuntimeError) as exc:
+        logger.info("doc summary fallback: %s", exc)
+        if default_summary:
+            effective_payload["summary_used"] = True
+            effective_payload["summary_model"] = "deterministic"
+            effective_payload["summary_fallback_reason"] = f"summary_error:{type(exc).__name__}"
+        else:
+            effective_payload["summary_fallback_reason"] = f"summary_error:{type(exc).__name__}"
+        return effective_payload
+    valid, reason = _validate_structured_reply(summary_text, effective_payload)
+    if not valid:
+        logger.info("doc summary validation fallback: %s", reason)
+        if default_summary:
+            effective_payload["summary_used"] = True
+            effective_payload["summary_model"] = "deterministic"
+            effective_payload["summary_fallback_reason"] = reason or "summary_invalid"
+        else:
+            effective_payload["summary_fallback_reason"] = reason or "summary_invalid"
+        return effective_payload
+    effective_payload["summary_text"] = summary_text
+    effective_payload["summary_used"] = True
+    effective_payload["summary_model"] = _doc_rag_summary_model()
+    effective_payload["summary_fallback_reason"] = ""
+    return effective_payload
 
 
 _GAME_CAPABILITY_LABELS = {
@@ -1423,7 +1633,7 @@ _GAME_CAPABILITY_LABELS = {
     "game_introduce",
     "game_compare",
 }
-_STRUCTURED_CAPABILITY_LABELS = _GAME_CAPABILITY_LABELS | {"memory_query", "vision_query", "clarify"}
+_STRUCTURED_CAPABILITY_LABELS = _GAME_CAPABILITY_LABELS | {"memory_query", "vision_query", "clarify", "doc_query"}
 
 
 class _UnifiedConversationRuntime:
@@ -1432,6 +1642,7 @@ class _UnifiedConversationRuntime:
         self.intent_resolver = None
         self.intent_router = None
         self.game_catalog = None
+        self.local_docs_rag = None
         self.dialog_cfg = None
         self.dialog_helper = None
         self.session_store = _SESSION_CONTEXT_STORE
@@ -1450,6 +1661,12 @@ class _UnifiedConversationRuntime:
         self.intent_router = None
         self.intent_resolver = None
         self.game_catalog = None
+        if self.local_docs_rag is not None:
+            try:
+                self.local_docs_rag.close()
+            except Exception:
+                pass
+        self.local_docs_rag = None
         if self.dialog_helper is not None:
             try:
                 self.dialog_helper.http.close()
@@ -1491,6 +1708,40 @@ class _UnifiedConversationRuntime:
             self.intent_router = None
             self.dialog_helper = None
             return
+
+        try:
+            self.local_docs_rag = LocalDocsRAG(
+                manifest_path=Path(self.intent_cfg.manifest_path),
+                game_catalog=self.game_catalog,
+            )
+        except Exception as exc:
+            logger.warning("local docs rag init failed: %s", exc)
+            self.local_docs_rag = None
+        if self.local_docs_rag is not None:
+            try:
+                doc_rag_diag = self.local_docs_rag.diagnostics()
+            except Exception as exc:
+                logger.warning("local docs rag diagnostics failed: %s", exc)
+            else:
+                logger.info(
+                    "local docs rag startup root=%s ready=%s dense_ready=%s general_files=%s general_chunks=%s game_chunks=%s entities=%s error=%s",
+                    doc_rag_diag.get("doc_root", ""),
+                    doc_rag_diag.get("ready", False),
+                    doc_rag_diag.get("dense_ready", False),
+                    doc_rag_diag.get("general_source_files", 0),
+                    doc_rag_diag.get("general_chunk_count", 0),
+                    doc_rag_diag.get("game_chunk_count", 0),
+                    doc_rag_diag.get("entity_registry_count", 0),
+                    doc_rag_diag.get("error", ""),
+                )
+                if not bool(doc_rag_diag.get("docs_dir_exists", False)):
+                    logger.warning("local docs rag docs directory missing: %s", doc_rag_diag.get("docs_dir", ""))
+                elif int(doc_rag_diag.get("general_source_files", 0) or 0) <= 0:
+                    logger.warning("local docs rag docs directory is present but has no general doc files: %s", doc_rag_diag.get("docs_dir", ""))
+                elif int(doc_rag_diag.get("general_chunk_count", 0) or 0) <= 0:
+                    logger.warning("local docs rag loaded no general chunks from docs directory: %s", doc_rag_diag.get("docs_dir", ""))
+                if not bool(doc_rag_diag.get("ready", False)) and str(doc_rag_diag.get("error", "")).strip():
+                    logger.warning("local docs rag unavailable: %s", doc_rag_diag.get("error", ""))
 
         self.error = ""
         self.ready = True
@@ -1652,6 +1903,23 @@ class _UnifiedConversationRuntime:
             user_id=user_id,
             exclude_user_text=current_user_text,
         )
+
+    def _profile_snapshot(self, *, user_id: Optional[str]) -> Dict[str, Any]:
+        helper = self.dialog_helper
+        if helper is None or not user_id or helper.user_memory is None:
+            return {}
+        try:
+            return helper.user_memory.profile_snapshot(user_id)
+        except Exception as exc:
+            logger.warning("profile snapshot failed: %s", exc)
+            return {}
+
+    @staticmethod
+    def _log_doc_probe(telemetry: Dict[str, Any]) -> None:
+        try:
+            logger.info("doc_rag probe %s", json.dumps(telemetry, ensure_ascii=False, sort_keys=True))
+        except Exception:
+            logger.info("doc_rag probe %s", telemetry)
 
     @staticmethod
     def _normalize_capability_label(label: str) -> str:
@@ -1834,6 +2102,8 @@ class _UnifiedConversationRuntime:
         normalized = self._normalized_query_text(followup_text)
         if not normalized:
             return False
+        if self._is_referential_doc_followup(followup_text) or self._is_short_confirmation_reply(followup_text):
+            return True
         if len(normalized.split()) <= 4:
             return True
         if any(
@@ -1860,10 +2130,263 @@ class _UnifiedConversationRuntime:
             return source
         return f"{source} {followup}".strip()
 
+    def _is_short_confirmation_reply(self, text: str) -> bool:
+        normalized = self._normalized_query_text(text)
+        return normalized in {
+            "yes",
+            "yeah",
+            "yep",
+            "sure",
+            "okay",
+            "ok",
+            "that one",
+            "the first one",
+            "first one",
+            "the second one",
+            "second one",
+            "it",
+            "them",
+            "the lab",
+            "the research",
+            "the team",
+        }
+
+    def _is_referential_doc_followup(self, text: str) -> bool:
+        normalized = f" {self._normalized_query_text(text)} "
+        if not normalized.strip():
+            return False
+        markers = (
+            " his ",
+            " her ",
+            " their ",
+            " its ",
+            " it ",
+            " them ",
+            " they ",
+            " the lab ",
+            " his lab ",
+            " her lab ",
+            " the research ",
+            " their research ",
+            " the team ",
+            " their team ",
+            " who works there ",
+        )
+        return any(marker in normalized for marker in markers)
+
+    def _resume_query_from_target(
+        self,
+        *,
+        target_domain: str,
+        target_answer_mode: str,
+        target_general_focus: str,
+        target_entity: str,
+        related_entities: Dict[str, List[str]],
+    ) -> str:
+        target = str(target_entity or "").strip()
+        if target_domain == "game":
+            if target_answer_mode == "compare":
+                compare_entities = [str(item).strip() for item in related_entities.get("compare", []) or [] if str(item).strip()]
+                if len(compare_entities) >= 2:
+                    return f"Compare {compare_entities[0]} and {compare_entities[1]}."
+            if target_answer_mode == "availability":
+                return "What games do you have?"
+            if target:
+                if target_answer_mode == "how_to":
+                    return f"How do I play {target}?"
+                if target_answer_mode == "factual":
+                    return f"Tell me about {target}."
+                return f"Tell me about {target}."
+            return ""
+
+        if target_general_focus == "people":
+            return f"Tell me about {target}." if target else ""
+        if target_general_focus == "research":
+            return f"What research does {target} work on?" if target else ""
+        if target_general_focus == "equipment":
+            return f"What equipment does {target} have?" if target else ""
+        if target_general_focus == "location_contact":
+            return f"Where is {target}?" if target else ""
+        if target_general_focus == "news":
+            return f"What are the latest updates about {target}?" if target else ""
+        if target:
+            return f"What is {target}?"
+        return ""
+
+    def _structured_clarification_followup_text(self, clarification: Any, followup_text: str) -> str:
+        normalized = self._normalized_query_text(followup_text)
+        if not normalized:
+            return ""
+        target_domain = str(getattr(clarification, "target_domain", "") or "").strip().lower()
+        target_answer_mode = str(getattr(clarification, "target_answer_mode", "") or "").strip().lower()
+        target_general_focus = str(getattr(clarification, "target_general_focus", "") or "").strip().lower()
+        target_entities = [
+            str(item).strip()
+            for item in getattr(clarification, "target_entities", []) or []
+            if str(item).strip()
+        ]
+        related_entities = getattr(clarification, "related_entities", {}) or {}
+        primary_target = target_entities[0] if target_entities else ""
+        if self._is_short_confirmation_reply(followup_text):
+            resumed = self._resume_query_from_target(
+                target_domain=target_domain,
+                target_answer_mode=target_answer_mode,
+                target_general_focus=target_general_focus,
+                target_entity=primary_target,
+                related_entities=related_entities,
+            )
+            if resumed:
+                return resumed
+        if self._is_referential_doc_followup(followup_text):
+            normalized_padded = f" {normalized} "
+            lab_target = ""
+            for key in ("lab", "labs"):
+                values = [str(item).strip() for item in related_entities.get(key, []) or [] if str(item).strip()]
+                if values:
+                    lab_target = values[0]
+                    break
+            if any(marker in normalized_padded for marker in (" the research ", " their research ", " its research ")):
+                target = lab_target or primary_target
+                return f"What research does {target} work on?" if target else ""
+            if any(marker in normalized_padded for marker in (" work on ", " works on ", " social robotics ", " serious games ", " virtual reality ", " hri ")):
+                target = lab_target or primary_target
+                return f"What research does {target} work on?" if target else ""
+            if any(marker in normalized_padded for marker in (" equipment ", " tools ", " devices ", " sensors ")):
+                target = lab_target or primary_target
+                return f"What equipment does {target} have?" if target else ""
+            if any(marker in normalized_padded for marker in (" the team ", " their team ", " who works there ", " researchers ")):
+                target = lab_target or primary_target
+                return f"What researchers does {target} have?" if target else ""
+            if any(marker in normalized_padded for marker in (" contact ", " email ", " phone ", " where is ")):
+                target = lab_target or primary_target
+                return f"Where is {target}?" if target else ""
+            if any(marker in normalized_padded for marker in (" his lab ", " her lab ", " the lab ")):
+                return f"What is {lab_target}?" if lab_target else ""
+            if any(marker in normalized_padded for marker in (" it ", " them ", " they ", " their ")):
+                resumed = self._resume_query_from_target(
+                    target_domain=target_domain,
+                    target_answer_mode=target_answer_mode,
+                    target_general_focus=target_general_focus,
+                    target_entity=primary_target,
+                    related_entities=related_entities,
+                )
+                if resumed:
+                    return resumed
+        return self._merged_clarification_text(clarification, followup_text)
+
+    def _confirmed_doc_followup_text(self, *, text: str, focus_state: Any) -> str:
+        active_capability = str(getattr(focus_state, "active_capability", "") or "").strip().lower()
+        focus_source = str(getattr(focus_state, "focus_source", "") or "").strip().lower()
+        focus_domain = str(getattr(focus_state, "focus_domain", "") or "").strip().lower()
+        focus_general_focus = str(getattr(focus_state, "focus_general_focus", "") or "").strip().lower()
+        focused_entity = str(getattr(focus_state, "focused_entity", "") or "").strip()
+        related_entities = getattr(focus_state, "related_entities", {}) or {}
+        if active_capability != "doc_query" or focus_source not in {"answer", "launch_command"}:
+            return ""
+        normalized = f" {self._normalized_query_text(text)} "
+        if not normalized.strip():
+            return ""
+        lab_target = ""
+        for key in ("lab", "labs"):
+            values = [str(item).strip() for item in related_entities.get(key, []) or [] if str(item).strip()]
+            if values:
+                lab_target = values[0]
+                break
+        if focus_domain == "general":
+            if any(marker in normalized for marker in (" the research ", " their research ", " its research ", " about the research ")):
+                target = lab_target or focused_entity
+                return f"What research does {target} work on?" if target else ""
+            if any(marker in normalized for marker in (" work on ", " works on ", " social robotics ", " serious games ", " virtual reality ", " hri ")):
+                target = lab_target or focused_entity
+                return f"What research does {target} work on?" if target else ""
+            if any(marker in normalized for marker in (" equipment ", " tools ", " devices ", " sensors ")):
+                target = lab_target or focused_entity
+                return f"What equipment does {target} have?" if target else ""
+            if any(marker in normalized for marker in (" researchers ", " team ", " members ", " collaborators ", " who works there ")):
+                target = lab_target or focused_entity
+                return f"What researchers does {target} have?" if target else ""
+            if any(marker in normalized for marker in (" contact ", " email ", " phone ", " where is ")):
+                target = lab_target or focused_entity
+                return f"Where is {target}?" if target else ""
+            if any(marker in normalized for marker in (" his lab ", " her lab ", " the lab ")):
+                target = lab_target or focused_entity
+                return f"What is {target}?" if target else ""
+            if any(marker in normalized for marker in (" do you know about it ", " tell me about it ", " know about it ", " do you know about them ")):
+                if focus_general_focus == "people" and lab_target:
+                    return f"What is {lab_target}?"
+                if focus_general_focus == "research":
+                    target = lab_target or focused_entity
+                    return f"What research does {target} work on?" if target else ""
+                if focused_entity:
+                    return f"Tell me about {focused_entity}."
+        if focus_domain == "game":
+            if any(marker in normalized for marker in (" option ", " options ", " all the game ", " all the games ", " describe all the game ", " describe all the games ")):
+                return "What games do you have?"
+            if any(marker in normalized for marker in (" do you know about it ", " tell me about it ", " describe it ")):
+                return f"Tell me about {focused_entity}." if focused_entity else ""
+        return ""
+
+    @staticmethod
+    def _has_explicit_vision_scope(text: str) -> bool:
+        normalized = f" {' '.join(re.sub(r'[^a-z0-9]+', ' ', str(text or '').lower()).split())} "
+        return any(
+            marker in normalized
+            for marker in (
+                " camera ",
+                " see ",
+                " frame ",
+                " image ",
+                " scene ",
+                " preview ",
+                " what do you see ",
+                " can you see ",
+                " look at ",
+            )
+        )
+
+    @staticmethod
+    def _decision_from_doc_probe(
+        *,
+        doc_probe: Any,
+        explicit_reference: bool,
+        routed_text: str,
+    ) -> CapabilityRouteDecision:
+        probe_telemetry = doc_probe.telemetry()
+        probe_fallback_reason = str(getattr(doc_probe, "fallback_reason", "") or "").strip()
+        reply_text = str(getattr(doc_probe, "response_text", "") or "").strip()
+        payload = dict(getattr(doc_probe, "payload", {}) or {})
+        if payload and "doc_confidence" not in payload:
+            payload["doc_confidence"] = round(float(getattr(doc_probe, "doc_confidence", 0.0) or 0.0), 4)
+        confidence = float(getattr(doc_probe, "doc_confidence", 0.0) or getattr(doc_probe, "routing_confidence", 0.0) or 0.0)
+        return CapabilityRouteDecision(
+            label="doc_query",
+            confidence=confidence,
+            clarification_text=reply_text,
+            clarification_kind=str(getattr(doc_probe, "clarify_kind", "") or "").strip(),
+            explicit_reference=explicit_reference,
+            routed_text=routed_text,
+            structured_payload=payload,
+            probe_telemetry=probe_telemetry,
+            fallback_reason=probe_fallback_reason,
+        )
+
     def _is_ambiguous_options_query(self, *, text: str, session_state: Any = None) -> bool:
         normalized = f" {self._normalized_query_text(text)} "
         if not any(marker in normalized for marker in (" option ", " options ", " choice ", " choices ", " available ", " availability ")):
             return False
+        if session_state is not None:
+            focused_game = str(
+                getattr(session_state, "focused_game", "")
+                or getattr(session_state, "primary_recommendation", "")
+                or ""
+            ).strip()
+            candidate_games = [
+                str(item).strip()
+                for item in getattr(session_state, "candidate_games", []) or []
+                if str(item).strip()
+            ]
+            if focused_game or candidate_games:
+                return False
         if self._has_game_scope_signal(text=text, session_state=session_state):
             return False
         if any(
@@ -1907,23 +2430,15 @@ class _UnifiedConversationRuntime:
         ]
         prompt = (
             "Classify the latest user message into exactly one label:\n"
-            "- game_availability\n"
-            "- game_recommend\n"
-            "- game_alternative\n"
-            "- game_introduce\n"
-            "- game_compare\n"
             "- memory_query\n"
             "- vision_query\n"
             "- general_chat\n"
             "- clarify\n\n"
             "Rules:\n"
-            "- Choose a game_* label only when the latest message is clearly about local games or explicitly refers back to a previously discussed game.\n"
-            "- Exercise planning, workout planning, and general help requests default to general_chat unless they are clearly about local games.\n"
+            "- Doc-grounded game and document queries are handled elsewhere; only use these labels for memory, vision, ordinary chat, or a general clarification.\n"
+            "- Exercise planning, workout planning, and general help requests default to general_chat.\n"
             "- If the message asks about vague options or choices without saying what kind and without an explicit game reference, choose clarify.\n"
             "- Choose general_chat for ordinary chat, self-introduction, or exercise planning that is not specifically about local games.\n"
-            "- Choose game_availability for fuzzy asks about what local games exist, including wording like 'exercise game', 'game options', or 'current game choices'.\n"
-            "- If recent unrelated general turns are 1 or more, do not reuse old game focus unless the latest message explicitly refers to it.\n"
-            "- If game reuse is currently suppressed, do not choose any game_* label unless the latest message explicitly says game/games or names a specific game.\n"
             "- If the user is answering a recent clarification, interpret the combined request before falling back to a raw fragment.\n"
             "- Return only the label.\n\n"
             f"Active capability: {str(getattr(focus_state, 'active_capability', '') or '').strip() or '(none)'}\n"
@@ -1979,7 +2494,7 @@ class _UnifiedConversationRuntime:
         except Exception:
             return ""
         normalized = self._normalize_capability_label(raw)
-        if normalized not in (_STRUCTURED_CAPABILITY_LABELS | {"general_chat"}):
+        if normalized not in {"memory_query", "vision_query", "general_chat", "clarify"}:
             return ""
         self._capability_cache_put(cache_key, normalized)
         return normalized
@@ -1990,18 +2505,23 @@ class _UnifiedConversationRuntime:
         user_id: Optional[str],
         text: str,
     ) -> CapabilityRouteDecision:
-        clarification = self.session_store.take_clarification(user_id)
-        if self._should_attempt_clarification_merge(clarification, text):
-            merged_text = self._merged_clarification_text(clarification, text)
-            merged_decision = await self._route_query_capability_once(
-                user_id=user_id,
-                text=merged_text,
-                clarification_hint=f"{clarification.kind}:{clarification.source_user_text}",
-            )
-            if merged_decision.label != "clarify":
-                merged_decision.routed_text = merged_text
-                merged_decision.merged_from_clarification = True
-                return merged_decision
+        clarification = self.session_store.clarification_state(user_id)
+        if str(getattr(clarification, "kind", "") or "").strip():
+            clarification_hint = f"{clarification.kind}:{clarification.source_user_text}"
+            if self._should_attempt_clarification_merge(clarification, text):
+                merged_text = self._structured_clarification_followup_text(clarification, text)
+                if merged_text:
+                    merged_decision = await self._route_query_capability_once(
+                        user_id=user_id,
+                        text=merged_text,
+                        clarification_hint=clarification_hint,
+                    )
+                    if merged_decision.label != "clarify":
+                        self.session_store.clear_clarification(user_id)
+                        merged_decision.routed_text = merged_text
+                        merged_decision.merged_from_clarification = True
+                        return merged_decision
+            self.session_store.clear_clarification(user_id)
         return await self._route_query_capability_once(user_id=user_id, text=text)
 
     async def _route_query_capability_once(
@@ -2014,6 +2534,40 @@ class _UnifiedConversationRuntime:
         self.ensure_ready()
         helper = self.dialog_helper
         assert helper is not None
+        focus_state = self.session_store.capability_state(user_id)
+        game_suppressed = self.session_store.is_game_suppressed(user_id)
+        raw_session_state = None if game_suppressed else self.session_store.game_state(user_id)
+        explicit_game_scope = self._has_game_scope_signal(text=text)
+        explicit_reference = False if game_suppressed else self._has_explicit_game_reference(text=text, session_state=raw_session_state)
+        recent_general_turns = int(getattr(focus_state, "consecutive_general_turns", 0) or 0)
+        effective_session_state = raw_session_state if recent_general_turns <= 0 or explicit_reference else None
+        probe_telemetry: Optional[Dict[str, Any]] = None
+        probe_fallback_reason = ""
+        local_docs_rag = getattr(self, "local_docs_rag", None)
+
+        confirmed_followup_text = self._confirmed_doc_followup_text(text=text, focus_state=focus_state)
+        if confirmed_followup_text and local_docs_rag is not None and getattr(local_docs_rag, "ready", False):
+            try:
+                doc_probe = local_docs_rag.probe(
+                    confirmed_followup_text,
+                    focus_state=focus_state,
+                    session_state=effective_session_state,
+                    user_profile=self._profile_snapshot(user_id=user_id),
+                )
+            except Exception as exc:
+                logger.warning("doc_rag follow-up probe failed: %s", exc)
+                doc_probe = None
+            if doc_probe is not None:
+                probe_telemetry = doc_probe.telemetry()
+                probe_fallback_reason = str(getattr(doc_probe, "fallback_reason", "") or "").strip()
+                self._log_doc_probe(probe_telemetry)
+                if doc_probe.stage1_result == "doc_candidate" or bool(getattr(doc_probe, "open_world_fallback_blocked", False)):
+                    return self._decision_from_doc_probe(
+                        doc_probe=doc_probe,
+                        explicit_reference=True,
+                        routed_text=confirmed_followup_text,
+                    )
+
         if helper._is_memory_query(text):
             return CapabilityRouteDecision(label="memory_query", confidence=1.0, routed_text=text)
         if helper.cfg.enable_vision_query and helper._is_vision_query(text):
@@ -2023,14 +2577,6 @@ class _UnifiedConversationRuntime:
         if any(marker in normalized for marker in (" introduce yourself ", " who are you ", " tell me about yourself ")):
             return CapabilityRouteDecision(label="general_chat", confidence=1.0, routed_text=text)
 
-        focus_state = self.session_store.capability_state(user_id)
-        game_suppressed = self.session_store.is_game_suppressed(user_id)
-        raw_session_state = None if game_suppressed else self.session_store.game_state(user_id)
-        explicit_game_scope = self._has_game_scope_signal(text=text)
-        explicit_reference = False if game_suppressed else self._has_explicit_game_reference(text=text, session_state=raw_session_state)
-        recent_general_turns = int(getattr(focus_state, "consecutive_general_turns", 0) or 0)
-        effective_session_state = raw_session_state if recent_general_turns <= 0 or explicit_reference else None
-
         if self._looks_like_general_planning_request(text=text, session_state=effective_session_state):
             return CapabilityRouteDecision(
                 label="general_chat",
@@ -2038,25 +2584,6 @@ class _UnifiedConversationRuntime:
                 explicit_reference=explicit_reference,
                 routed_text=text,
             )
-
-        if self.game_catalog is not None:
-            try:
-                explicit_game_decision = None
-                if explicit_game_scope or explicit_reference:
-                    explicit_game_decision = self.game_catalog.route_game_query(
-                        text,
-                        session_state=effective_session_state,
-                        user_profile=None,
-                    )
-            except Exception:
-                explicit_game_decision = None
-            if explicit_game_decision is not None and explicit_game_decision.intent in _GAME_CAPABILITY_LABELS:
-                return CapabilityRouteDecision(
-                    label=explicit_game_decision.intent,
-                    confidence=1.0,
-                    explicit_reference=explicit_reference,
-                    routed_text=text,
-                )
 
         if self._is_ambiguous_options_query(text=text, session_state=effective_session_state) or self._is_ambiguous_help_request(text=text, session_state=effective_session_state):
             clarify_kind, clarify_text = self._clarification_reply_for_text(text, session_state=effective_session_state)
@@ -2069,6 +2596,28 @@ class _UnifiedConversationRuntime:
                 routed_text=text,
             )
 
+        if local_docs_rag is not None and getattr(local_docs_rag, "ready", False):
+            try:
+                doc_probe = local_docs_rag.probe(
+                    text,
+                    focus_state=focus_state,
+                    session_state=effective_session_state,
+                    user_profile=self._profile_snapshot(user_id=user_id),
+                )
+            except Exception as exc:
+                logger.warning("doc_rag probe failed: %s", exc)
+                doc_probe = None
+            if doc_probe is not None:
+                probe_telemetry = doc_probe.telemetry()
+                probe_fallback_reason = doc_probe.fallback_reason
+                self._log_doc_probe(probe_telemetry)
+                if doc_probe.stage1_result == "doc_candidate" or bool(getattr(doc_probe, "open_world_fallback_blocked", False)):
+                    return self._decision_from_doc_probe(
+                        doc_probe=doc_probe,
+                        explicit_reference=explicit_reference,
+                        routed_text=text,
+                    )
+
         semantic_label = await self._semantic_capability_label(
             user_id=user_id,
             text=text,
@@ -2077,15 +2626,10 @@ class _UnifiedConversationRuntime:
             clarification_hint=clarification_hint,
             game_suppressed=game_suppressed,
         )
-        if semantic_label in _GAME_CAPABILITY_LABELS:
-            if explicit_game_scope or explicit_reference:
-                return CapabilityRouteDecision(
-                    label=semantic_label,
-                    confidence=0.75,
-                    explicit_reference=explicit_reference,
-                    routed_text=text,
-                )
-            return CapabilityRouteDecision(label="general_chat", confidence=0.55, explicit_reference=explicit_reference, routed_text=text)
+        if semantic_label == "memory_query" and not helper._is_memory_query(text):
+            semantic_label = "general_chat"
+        if semantic_label == "vision_query" and not self._has_explicit_vision_scope(text):
+            semantic_label = "general_chat"
         if semantic_label == "clarify":
             if self._is_ambiguous_options_query(text=text, session_state=effective_session_state) or self._is_ambiguous_help_request(text=text, session_state=effective_session_state):
                 clarify_kind, clarify_text = self._clarification_reply_for_text(text, session_state=effective_session_state)
@@ -2096,11 +2640,34 @@ class _UnifiedConversationRuntime:
                     clarification_kind=clarify_kind,
                     explicit_reference=explicit_reference,
                     routed_text=text,
+                    probe_telemetry=probe_telemetry,
+                    fallback_reason=probe_fallback_reason,
                 )
-            return CapabilityRouteDecision(label="general_chat", confidence=0.55, explicit_reference=explicit_reference, routed_text=text)
+            return CapabilityRouteDecision(
+                label="general_chat",
+                confidence=0.55,
+                explicit_reference=explicit_reference,
+                routed_text=text,
+                probe_telemetry=probe_telemetry,
+                fallback_reason=probe_fallback_reason,
+            )
         if semantic_label in {"memory_query", "vision_query"}:
-            return CapabilityRouteDecision(label=semantic_label, confidence=0.7, explicit_reference=explicit_reference, routed_text=text)
-        return CapabilityRouteDecision(label="general_chat", confidence=0.5, explicit_reference=explicit_reference, routed_text=text)
+            return CapabilityRouteDecision(
+                label=semantic_label,
+                confidence=0.7,
+                explicit_reference=explicit_reference,
+                routed_text=text,
+                probe_telemetry=probe_telemetry,
+                fallback_reason=probe_fallback_reason,
+            )
+        return CapabilityRouteDecision(
+            label="general_chat",
+            confidence=0.5,
+            explicit_reference=explicit_reference,
+            routed_text=text,
+            probe_telemetry=probe_telemetry,
+            fallback_reason=probe_fallback_reason,
+        )
 
     def _all_game_names(self) -> List[str]:
         cards = getattr(self.game_catalog, "cards", None)
@@ -2109,7 +2676,9 @@ class _UnifiedConversationRuntime:
         return [str(getattr(card, "name", "")).strip() for card in cards if str(getattr(card, "name", "")).strip()]
 
     async def _render_structured_reply(self, *, user_text: str, payload: Dict[str, Any]) -> str:
-        effective_payload = dict(payload)
+        effective_payload = await _prepare_structured_payload_for_render(user_text, payload)
+        payload.clear()
+        payload.update(effective_payload)
         if str(effective_payload.get("type") or "").strip().startswith("game_"):
             allowed = [
                 str(item).strip()
@@ -2126,6 +2695,23 @@ class _UnifiedConversationRuntime:
                 if name and name not in allowed:
                     allowed.append(name)
             effective_payload["allowed_game_names"] = allowed
+            return await _spoken_reply_from_payload(user_text, effective_payload, all_game_names=self._all_game_names())
+        if str(effective_payload.get("type") or "").strip() in {"doc_answer", "doc_clarify"} and str(effective_payload.get("domain") or "").strip() == "game":
+            allowed = [
+                str(item).strip()
+                for item in (
+                    effective_payload.get("allowed_entities")
+                    or effective_payload.get("candidate_entities")
+                    or effective_payload.get("game_names")
+                    or []
+                )
+                if str(item).strip()
+            ]
+            primary = str(effective_payload.get("primary_entity") or "").strip()
+            if primary and primary not in allowed:
+                allowed.append(primary)
+            effective_payload["allowed_entities"] = allowed
+            effective_payload["allowed_game_names"] = allowed[:]
             return await _spoken_reply_from_payload(user_text, effective_payload, all_game_names=self._all_game_names())
         return await _spoken_reply_from_payload(user_text, effective_payload)
 
@@ -2260,91 +2846,6 @@ class _UnifiedConversationRuntime:
             )
         return reply
 
-    async def try_game_reply(
-        self,
-        *,
-        user_id: Optional[str],
-        text: str,
-        dialog_request_ctx: Dict[str, str],
-        forced_intent: str = "",
-        session_state: Any = None,
-    ) -> str:
-        self.ensure_ready()
-        helper = self.dialog_helper
-        assert helper is not None
-        if self.game_catalog is None:
-            return ""
-        user_profile: Dict[str, Any] = {}
-        if user_id and helper.user_memory is not None:
-            try:
-                user_profile = helper.user_memory.profile_snapshot(user_id)
-            except Exception:
-                user_profile = {}
-        effective_session_state = session_state if session_state is not None else self.session_store.game_state(user_id)
-        try:
-            decision = self.game_catalog.route_game_query(
-                text,
-                session_state=effective_session_state,
-                user_profile=user_profile,
-                forced_intent=forced_intent,
-            )
-            if decision.intent == "none":
-                return ""
-            grounded = self.game_catalog.grounded_reply(
-                text,
-                user_profile=user_profile,
-                session_state=effective_session_state,
-                forced_intent=forced_intent,
-            )
-        except Exception as exc:
-            logger.warning("game grounding failed: %s", exc)
-            return ""
-        reply = await self._render_structured_reply(user_text=text, payload=grounded)
-        if not reply:
-            return ""
-        grounded_game_name = str(grounded.get("primary_game_name") or grounded.get("game_name") or "").strip()
-        candidate_games = [
-            str(item).strip()
-            for item in grounded.get("candidate_games", []) or []
-            if str(item).strip()
-        ]
-        router_intent = str(grounded.get("intent") or grounded.get("type") or "").strip()
-        if grounded_game_name or candidate_games or router_intent:
-            introduced_games: List[str] = []
-            if str(grounded.get("intent") or "").strip() in {"game_introduce", "game_compare"}:
-                introduced_games = candidate_games or ([grounded_game_name] if grounded_game_name else [])
-            elif str(grounded.get("type") or "").strip() == "game_alternative":
-                introduced_games = candidate_games or ([grounded_game_name] if grounded_game_name else [])
-            self.session_store.update_game_state(
-                user_id=user_id,
-                focused_game=grounded_game_name or None,
-                candidate_games=candidate_games or None,
-                primary_recommendation=(grounded_game_name if str(grounded.get("type") or "") == "game_recommend" else None),
-                last_introduced_games=(introduced_games or None),
-                last_router_intent=router_intent or None,
-            )
-        reply = _finalize_static_tts_reply(helper, reply)
-        if user_id and helper.user_memory is not None:
-            try:
-                helper._remember_game_context(
-                    user_id=user_id,
-                    text=reply,
-                    primary_game_name=grounded_game_name,
-                    reference_kind=str(grounded.get("type") or "game_reply").strip() or "game_reply",
-                    source="game_catalog",
-                )
-            except Exception as exc:
-                logger.warning("game reference update failed: %s", exc)
-        if reply:
-            self.finalize_assistant_turn(
-                user_id=user_id,
-                user_text=text,
-                answer_text=reply,
-                dialog_request_ctx=dialog_request_ctx,
-                track_game_mentions=False,
-            )
-        return reply
-
     def record_game_event(
         self,
         *,
@@ -2362,6 +2863,7 @@ class _UnifiedConversationRuntime:
             candidate_games=[game_name],
             primary_recommendation=None,
             last_router_intent="game_launch_followup" if str(action or "").strip().lower() == "launch" else "game_event",
+            focus_source="launch_command",
         )
         if not user_id or helper.user_memory is None:
             return
@@ -2938,19 +3440,33 @@ async def _generate_coach_reply(
 def _build_structured_render_prompt(user_text: str, payload: Dict[str, Any]) -> Tuple[str, str]:
     compact_payload = {
         "type": str(payload.get("type") or "").strip(),
+        "domain": str(payload.get("domain") or "").strip(),
+        "answer_mode": str(payload.get("answer_mode") or "").strip(),
+        "general_focus": str(payload.get("general_focus") or "").strip(),
         "result_kind": str(payload.get("result_kind") or "").strip(),
         "binding_state": str(payload.get("binding_state") or "").strip(),
         "primary_game_name": str(payload.get("primary_game_name") or payload.get("game_name") or "").strip(),
         "reference_game_name": str(payload.get("reference_game_name") or "").strip(),
         "candidate_games": [str(item).strip() for item in payload.get("candidate_games", []) or [] if str(item).strip()],
+        "primary_entity": str(payload.get("primary_entity") or "").strip(),
+        "candidate_entities": [str(item).strip() for item in payload.get("candidate_entities", []) or [] if str(item).strip()],
+        "allowed_entities": [str(item).strip() for item in payload.get("allowed_entities", []) or [] if str(item).strip()],
+        "related_entities": payload.get("related_entities", {}) or {},
+        "related_entity_roles": payload.get("related_entity_roles", {}) or {},
         "intent": str(payload.get("intent") or "").strip(),
         "facts": payload.get("facts", []) or [],
         "notes": payload.get("notes", []) or [],
         "reason_text": str(payload.get("reason_text") or "").strip(),
+        "recommendation_reason": str(payload.get("recommendation_reason") or "").strip(),
+        "summary_text": str(payload.get("summary_text") or "").strip(),
+        "summary_points": [str(item).strip() for item in payload.get("summary_points", []) or [] if str(item).strip()],
         "doc_snippets": [str(item).strip() for item in payload.get("doc_snippets", []) or [] if str(item).strip()],
+        "doc_source_ids": [str(item).strip() for item in payload.get("doc_source_ids", []) or [] if str(item).strip()],
         "required_terms": [str(item).strip() for item in payload.get("required_terms", []) or [] if str(item).strip()],
         "allowed_game_names": [str(item).strip() for item in payload.get("allowed_game_names", []) or [] if str(item).strip()],
-        "fallback_text": str(payload.get("text") or "").strip(),
+        "launchable_games": [str(item).strip() for item in payload.get("launchable_games", []) or [] if str(item).strip()],
+        "clarify_kind": str(payload.get("clarify_kind") or "").strip(),
+        "fallback_text": str(payload.get("summary_text") or payload.get("text") or "").strip(),
         "max_sentences": int(payload.get("max_sentences") or 2),
     }
     prompt = (
@@ -2958,6 +3474,7 @@ def _build_structured_render_prompt(user_text: str, payload: Dict[str, Any]) -> 
         "Keep the facts exact and keep every required term.\n"
         "Do not add any new facts.\n"
         "Do not mention any game outside allowed_game_names.\n"
+        "Do not mention any entity outside allowed_entities.\n"
         "Do not use labels or bullet lists.\n\n"
         f"Latest user message:\n{user_text}\n\n"
         "Structured result JSON:\n"
@@ -3034,20 +3551,61 @@ async def _spoken_reply_from_payload(
     *,
     all_game_names: Optional[List[str]] = None,
 ) -> str:
+    payload_type = str(payload.get("type") or "").strip().lower()
+    if payload_type == "doc_answer":
+        doc_snippets = [str(item).strip() for item in payload.get("doc_snippets", []) or [] if str(item).strip()]
+        if not doc_snippets:
+            return "I could not find that in the local documents."
     fallback_text = _normalize_final_reply_text(_structured_template_reply(payload, user_text) or str(payload.get("text") or ""))
     if fallback_text:
         payload = dict(payload)
         payload["text"] = fallback_text
-    try:
-        rendered = await _generate_structured_spoken_reply(user_text, payload)
-    except (OllamaError, OpenAIResponseError, RuntimeError) as exc:
-        logger.info("structured render fallback: %s", exc)
-        return fallback_text
-    valid, reason = _validate_structured_reply(rendered, payload, all_game_names=all_game_names)
-    if not valid:
+    attempt_payload = dict(payload)
+    for attempt in range(2):
+        try:
+            rendered = await _generate_structured_spoken_reply(user_text, attempt_payload)
+        except (OllamaError, OpenAIResponseError, RuntimeError) as exc:
+            logger.info("structured render fallback: %s", exc)
+            return fallback_text
+        valid, reason = _validate_structured_reply(rendered, attempt_payload, all_game_names=all_game_names)
+        if valid:
+            return rendered
+        if attempt == 0 and str(reason or "").startswith("unexpected_entity:"):
+            attempt_payload = dict(attempt_payload)
+            attempt_payload["text"] = fallback_text
+            attempt_payload["regenerate_allowed_only"] = True
+            logger.info("structured render retry with allowed_entities only: %s", reason)
+            continue
+        if str(reason or "") == "compare_entities_missing":
+            clarify_payload = dict(attempt_payload)
+            clarify_payload["type"] = "doc_clarify"
+            clarify_payload["answer_mode"] = "compare"
+            clarify_payload["clarify_kind"] = "clarify_missing_entity"
+            clarify_payload["text"] = ""
+            return _normalize_final_reply_text(_structured_template_reply(clarify_payload, user_text))
+        if str(reason or "") == "recommend_invalid_entity" or (
+            str(reason or "").startswith("unexpected_entity:")
+            and str(attempt_payload.get("answer_mode") or "").strip().lower() == "recommend"
+        ):
+            repaired_payload = dict(attempt_payload)
+            valid_candidates = [
+                str(item).strip()
+                for item in (
+                    repaired_payload.get("launchable_games")
+                    or repaired_payload.get("allowed_entities")
+                    or repaired_payload.get("candidate_entities")
+                    or []
+                )
+                if str(item).strip()
+            ]
+            if valid_candidates:
+                repaired_payload["primary_entity"] = valid_candidates[0]
+                repaired_payload["required_terms"] = [valid_candidates[0]]
+                repaired_payload["text"] = ""
+                return _normalize_final_reply_text(_structured_template_reply(repaired_payload, user_text))
         logger.info("structured render validation fallback: %s", reason)
         return fallback_text
-    return rendered
+    return fallback_text
 
 
 @app.on_event("startup")
@@ -4775,6 +5333,9 @@ def _try_general_query_reply_text(text: str) -> str:
     if not normalized:
         return ""
 
+    if normalized in {"can you hear me", "can you hear me?"}:
+        return "Yes, I can hear you."
+
     if "median" in normalized and any(token in normalized for token in ("numbers", "number set", "set of numbers", "dataset", "data set")):
         return "Sort the numbers and take the middle value. If there are two middle values, average them."
 
@@ -4935,6 +5496,22 @@ async def _stream_unified_conversation_events(
         text=text,
     )
     routed_query_text = capability_decision.routed_text or text
+    decision_final_meta: Dict[str, Any] = {}
+    if capability_decision.probe_telemetry:
+        decision_final_meta["doc_probe"] = dict(capability_decision.probe_telemetry)
+    if capability_decision.fallback_reason:
+        decision_final_meta["fallback_reason"] = capability_decision.fallback_reason
+    if capability_decision.label == "doc_query" and capability_decision.structured_payload:
+        structured_payload = dict(capability_decision.structured_payload)
+        decision_final_meta["structured_type"] = str(structured_payload.get("type") or "").strip()
+        decision_final_meta["domain"] = str(structured_payload.get("domain") or "").strip()
+        decision_final_meta["answer_mode"] = str(structured_payload.get("answer_mode") or "").strip()
+        general_focus = str(structured_payload.get("general_focus") or "").strip()
+        if general_focus:
+            decision_final_meta["general_focus"] = general_focus
+        clarify_kind = str(structured_payload.get("clarify_kind") or capability_decision.clarification_kind or "").strip()
+        if clarify_kind:
+            decision_final_meta["clarify_kind"] = clarify_kind
 
     if capability_decision.label == "clarify":
         clarification_text = capability_decision.clarification_text or "Could you clarify what kind of help you want?"
@@ -4952,7 +5529,17 @@ async def _stream_unified_conversation_events(
             dialog_request_ctx=dialog_request_ctx,
         )
         yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": clarification_text, "provider": "capability_router"})
-        yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": clarification_text, "provider": "capability_router", "user_id": user_id or ""})
+        yield _json_line(
+            {
+                "type": "final",
+                "corr_id": corr_id,
+                "route": route_type,
+                "text": clarification_text,
+                "provider": "capability_router",
+                "user_id": user_id or "",
+                **decision_final_meta,
+            }
+        )
         return
 
     if capability_decision.label == "memory_query":
@@ -4963,25 +5550,197 @@ async def _stream_unified_conversation_events(
         )
         if memory_reply:
             yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": memory_reply, "provider": "memory"})
-            yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": memory_reply, "provider": "memory", "user_id": user_id or ""})
+            yield _json_line(
+                {
+                    "type": "final",
+                    "corr_id": corr_id,
+                    "route": route_type,
+                    "text": memory_reply,
+                    "provider": "memory",
+                    "user_id": user_id or "",
+                    **decision_final_meta,
+                }
+            )
             return
 
-    if capability_decision.label in _GAME_CAPABILITY_LABELS:
-        focus_state = runtime.session_store.capability_state(user_id)
-        game_session_state = runtime.session_store.game_state(user_id)
-        if int(getattr(focus_state, "consecutive_general_turns", 0) or 0) >= 1 and not capability_decision.explicit_reference:
-            game_session_state = None
-        game_reply = await runtime.try_game_reply(
-            user_id=user_id,
-            text=routed_query_text,
-            dialog_request_ctx=dialog_request_ctx,
-            forced_intent=capability_decision.label,
-            session_state=game_session_state,
-        )
-        if game_reply:
-            yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": game_reply, "provider": "game_catalog"})
-            yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": game_reply, "provider": "game_catalog", "user_id": user_id or ""})
+    if capability_decision.label == "doc_query":
+        payload_data = dict(capability_decision.structured_payload or {})
+        payload_type = str(payload_data.get("type") or "").strip()
+        domain = str(payload_data.get("domain") or "").strip().lower()
+        answer_mode = str(payload_data.get("answer_mode") or "").strip().lower()
+        general_focus = str(payload_data.get("general_focus") or "").strip().lower()
+        clarify_kind = str(payload_data.get("clarify_kind") or capability_decision.clarification_kind or "").strip()
+        candidate_entities = [
+            str(item).strip()
+            for item in payload_data.get("candidate_entities", []) or []
+            if str(item).strip()
+        ]
+        primary_entity = str(payload_data.get("primary_entity") or "").strip()
+        related_entities = payload_data.get("related_entities", {}) or {}
+        doc_reply = ""
+        if payload_data:
+            doc_reply = await runtime._render_structured_reply(user_text=routed_query_text, payload=payload_data)
+        if not doc_reply:
+            doc_reply = str(payload_data.get("text") or capability_decision.clarification_text or "").strip()
+        if not doc_reply:
+            doc_reply = "I could not find stable local document evidence for that."
+        if payload_data.get("summary_used") is not None:
+            decision_final_meta["summary_used"] = bool(payload_data.get("summary_used"))
+        if str(payload_data.get("summary_model") or "").strip():
+            decision_final_meta["summary_model"] = str(payload_data.get("summary_model") or "").strip()
+        if str(payload_data.get("summary_fallback_reason") or "").strip():
+            decision_final_meta["summary_fallback_reason"] = str(payload_data.get("summary_fallback_reason") or "").strip()
+        if general_focus:
+            decision_final_meta["focus_domain"] = domain
+            decision_final_meta["focus_general_focus"] = general_focus
+        if payload_data.get("general_doc_kinds"):
+            decision_final_meta["general_doc_kinds"] = list(payload_data.get("general_doc_kinds") or [])
+
+        if payload_type == "doc_clarify":
+            runtime.session_store.save_clarification(
+                user_id=user_id,
+                kind=clarify_kind or "doc_clarify",
+                source_user_text=text,
+                assistant_clarify_text=doc_reply,
+                target_domain=domain,
+                target_answer_mode=answer_mode,
+                target_general_focus=general_focus,
+                target_entities=candidate_entities or ([primary_entity] if primary_entity else None),
+                related_entities=related_entities,
+                resume_strategy=str(payload_data.get("resume_strategy") or "").strip(),
+            )
+            runtime.session_store.record_structured_capability(
+                user_id=user_id,
+                active_capability="doc_query",
+                focused_entity="",
+                candidate_entities=None,
+                tentative_entity_hints=candidate_entities or None,
+                last_structured_intent=answer_mode,
+                focus_domain=domain,
+                focus_general_focus=general_focus,
+                related_entities=related_entities,
+                focus_source="",
+                tentative_source="clarify_hint",
+            )
+            if str(payload_data.get("resume_strategy") or "").strip():
+                decision_final_meta["clarification_resume_strategy"] = str(payload_data.get("resume_strategy") or "").strip()
+            runtime.finalize_assistant_turn(
+                user_id=user_id,
+                user_text=text,
+                answer_text=doc_reply,
+                dialog_request_ctx=dialog_request_ctx,
+            )
+            yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": doc_reply, "provider": "doc_rag"})
+            yield _json_line(
+                {
+                    "type": "final",
+                    "corr_id": corr_id,
+                    "route": route_type,
+                    "text": doc_reply,
+                    "provider": "doc_rag",
+                    "user_id": user_id or "",
+                    **decision_final_meta,
+                }
+            )
             return
+
+        if payload_type == "doc_answer":
+            if domain == "game":
+                launchable_games = [
+                    str(item).strip()
+                    for item in payload_data.get("launchable_games", []) or []
+                    if str(item).strip()
+                ]
+                recommendation_reason = str(payload_data.get("recommendation_reason") or "").strip()
+                runtime.session_store.update_game_state(
+                    user_id=user_id,
+                    focused_game=primary_entity or None,
+                    candidate_games=candidate_entities or None,
+                    primary_recommendation=(primary_entity if answer_mode == "recommend" else None),
+                    last_introduced_games=(candidate_entities[:4] if answer_mode in {"introduce", "compare", "availability"} and candidate_entities else None),
+                    last_router_intent=answer_mode or "doc_answer",
+                    focus_source="answer",
+                )
+                runtime.session_store.record_structured_capability(
+                    user_id=user_id,
+                    active_capability="doc_query",
+                    focused_entity=primary_entity,
+                    candidate_entities=candidate_entities or None,
+                    last_structured_intent=answer_mode,
+                    focus_domain=domain,
+                    related_entities=related_entities,
+                    focus_source="answer",
+                )
+                helper = runtime.dialog_helper
+                if user_id and helper is not None and helper.user_memory is not None and primary_entity:
+                    try:
+                        helper._remember_game_context(
+                            user_id=user_id,
+                            text=doc_reply,
+                            primary_game_name=primary_entity,
+                            reference_kind=answer_mode or "doc_answer",
+                            source="doc_rag",
+                        )
+                    except Exception as exc:
+                        logger.warning("doc_rag game reference update failed: %s", exc)
+                payload_data["launchable_games"] = launchable_games
+                payload_data["recommendation_reason"] = recommendation_reason
+            else:
+                runtime.session_store.record_structured_capability(
+                    user_id=user_id,
+                    active_capability="doc_query",
+                    focused_entity=primary_entity,
+                    candidate_entities=candidate_entities or None,
+                    last_structured_intent=answer_mode,
+                    focus_domain=domain,
+                    focus_general_focus=general_focus,
+                    related_entities=related_entities,
+                    focus_source="answer",
+                )
+            runtime.finalize_assistant_turn(
+                user_id=user_id,
+                user_text=text,
+                answer_text=doc_reply,
+                dialog_request_ctx=dialog_request_ctx,
+            )
+            yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": doc_reply, "provider": "doc_rag"})
+            yield _json_line(
+                {
+                    "type": "final",
+                    "corr_id": corr_id,
+                    "route": route_type,
+                    "text": doc_reply,
+                    "provider": "doc_rag",
+                    "user_id": user_id or "",
+                    **decision_final_meta,
+                }
+            )
+            return
+
+        runtime.session_store.record_structured_capability(
+            user_id=user_id,
+            active_capability="doc_query",
+            last_structured_intent="no_evidence",
+        )
+        runtime.finalize_assistant_turn(
+            user_id=user_id,
+            user_text=text,
+            answer_text=doc_reply,
+            dialog_request_ctx=dialog_request_ctx,
+        )
+        yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": doc_reply, "provider": "doc_rag"})
+        yield _json_line(
+            {
+                "type": "final",
+                "corr_id": corr_id,
+                "route": route_type,
+                "text": doc_reply,
+                "provider": "doc_rag",
+                "user_id": user_id or "",
+                **decision_final_meta,
+            }
+        )
+        return
 
     if capability_decision.label == "vision_query":
         vision_reply = runtime.try_vision_reply(
@@ -4991,7 +5750,17 @@ async def _stream_unified_conversation_events(
         )
         if vision_reply:
             yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": vision_reply, "provider": "vision"})
-            yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": vision_reply, "provider": "vision", "user_id": user_id or ""})
+            yield _json_line(
+                {
+                    "type": "final",
+                    "corr_id": corr_id,
+                    "route": route_type,
+                    "text": vision_reply,
+                    "provider": "vision",
+                    "user_id": user_id or "",
+                    **decision_final_meta,
+                }
+            )
             return
 
     general_reply = runtime.try_general_query_reply(
@@ -5001,7 +5770,17 @@ async def _stream_unified_conversation_events(
     )
     if general_reply:
         yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": general_reply, "provider": "general_guard"})
-        yield _json_line({"type": "final", "corr_id": corr_id, "route": route_type, "text": general_reply, "provider": "general_guard", "user_id": user_id or ""})
+        yield _json_line(
+            {
+                "type": "final",
+                "corr_id": corr_id,
+                "route": route_type,
+                "text": general_reply,
+                "provider": "general_guard",
+                "user_id": user_id or "",
+                **decision_final_meta,
+            }
+        )
         return
 
     stream_provider = _conversation_effective_response_provider(_conversation_profile())
@@ -5116,6 +5895,7 @@ async def _stream_unified_conversation_events(
             "text": final_text,
             "provider": stream_provider,
             "user_id": user_id or "",
+            **decision_final_meta,
         }
     )
 

@@ -59,6 +59,8 @@ namespace RobotVoice
 		private bool scanModelsRecursively = true;
 
         [Header("Server")]
+        [SerializeField, Tooltip("Enable the legacy built-in HTTP control panel inside Unity. Leave off when desktop_runtime provides the panel.")]
+        private bool enableEmbeddedHttpServer = false;
         [SerializeField, Tooltip("TCP port for the built-in HTTP control panel")]
         private int httpPort = 8787;
         [SerializeField, Tooltip("Automatically start the listener when the scene loads")]
@@ -157,7 +159,7 @@ namespace RobotVoice
             }
             _hasExternalRawImageBinding = externalCameraRawImage != null;
             _hasExternalRendererBinding = externalCameraRenderer != null;
-            if (autoStart)
+            if (enableEmbeddedHttpServer && autoStart)
             {
                 StartServer();
             }
@@ -212,6 +214,12 @@ namespace RobotVoice
 
         public void StartServer()
         {
+            if (!enableEmbeddedHttpServer)
+            {
+                Debug.Log("[UserTestPanel] Embedded HTTP control panel is disabled; desktop_runtime should provide the panel.");
+                return;
+            }
+
             if (listener != null)
             {
                 return;

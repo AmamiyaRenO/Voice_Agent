@@ -76,6 +76,23 @@ def _looks_like_explicit_reference(text: str) -> bool:
     return any(marker in normalized for marker in _EXPLICIT_REFERENCE_MARKERS)
 
 
+def _copy_related_entities_map(value: Optional[Dict[str, List[str]]]) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    if not isinstance(value, dict):
+        return out
+    for raw_key, raw_items in value.items():
+        key = _clean_text(str(raw_key or ""), max_len=48)
+        if not key:
+            continue
+        if isinstance(raw_items, list):
+            items = _dedupe_names([str(item) for item in raw_items], limit=GAME_MAX_CANDIDATES)
+        else:
+            items = _dedupe_names([str(raw_items)], limit=GAME_MAX_CANDIDATES)
+        if items:
+            out[key] = items
+    return out
+
+
 @dataclass
 class GameDialogState:
     focused_game: str = ""
@@ -83,6 +100,7 @@ class GameDialogState:
     primary_recommendation: str = ""
     last_introduced_games: List[str] = field(default_factory=list)
     last_router_intent: str = ""
+    focus_source: str = ""
     updated_at: float = 0.0
 
 
@@ -91,7 +109,14 @@ class CapabilityFocusState:
     active_capability: str = ""
     focused_entity: str = ""
     candidate_entities: List[str] = field(default_factory=list)
+    tentative_entity_hints: List[str] = field(default_factory=list)
+    tentative_source: str = ""
+    tentative_updated_at: float = 0.0
     last_structured_intent: str = ""
+    focus_domain: str = ""
+    focus_general_focus: str = ""
+    related_entities: Dict[str, List[str]] = field(default_factory=dict)
+    focus_source: str = ""
     consecutive_general_turns: int = 0
     updated_at: float = 0.0
 
@@ -101,6 +126,12 @@ class ClarificationState:
     kind: str = ""
     source_user_text: str = ""
     assistant_clarify_text: str = ""
+    target_domain: str = ""
+    target_answer_mode: str = ""
+    target_general_focus: str = ""
+    target_entities: List[str] = field(default_factory=list)
+    related_entities: Dict[str, List[str]] = field(default_factory=dict)
+    resume_strategy: str = ""
     created_at: float = 0.0
 
 
@@ -174,6 +205,13 @@ class SessionContextStore:
         return (now_ts - created_at) <= CLARIFICATION_MAX_AGE_SEC
 
     @staticmethod
+    def _tentative_is_fresh(focus: CapabilityFocusState, *, now_ts: float) -> bool:
+        created_at = float(focus.tentative_updated_at or 0.0)
+        if not focus.tentative_entity_hints or created_at <= 0.0:
+            return False
+        return (now_ts - created_at) <= CLARIFICATION_MAX_AGE_SEC
+
+    @staticmethod
     def _reset_game_focus(game: GameDialogState, *, preserve_candidates: bool = False) -> None:
         game.focused_game = ""
         if not preserve_candidates:
@@ -181,10 +219,17 @@ class SessionContextStore:
         game.primary_recommendation = ""
         game.last_introduced_games = []
         game.last_router_intent = ""
+        game.focus_source = ""
 
     @staticmethod
     def _clear_game_suppression_unlocked(state: Dict[str, Any]) -> None:
         state["suppression"] = GameSuppressionState()
+
+    @staticmethod
+    def _clear_tentative_focus(focus: CapabilityFocusState) -> None:
+        focus.tentative_entity_hints = []
+        focus.tentative_source = ""
+        focus.tentative_updated_at = 0.0
 
     @staticmethod
     def _sync_focus_from_game(game: GameDialogState, focus: CapabilityFocusState, *, now_ts: float) -> None:
@@ -200,7 +245,12 @@ class SessionContextStore:
         focus.active_capability = "game"
         focus.focused_entity = focused_entity
         focus.candidate_entities = candidate_entities
+        SessionContextStore._clear_tentative_focus(focus)
         focus.last_structured_intent = _clean_text(game.last_router_intent, max_len=48)
+        focus.focus_domain = "game"
+        focus.focus_general_focus = ""
+        focus.related_entities = {}
+        focus.focus_source = _clean_text(game.focus_source, max_len=32)
         focus.consecutive_general_turns = 0
         focus.updated_at = now_ts
 
@@ -288,6 +338,7 @@ class SessionContextStore:
         primary_recommendation: Optional[str] = None,
         last_introduced_games: Optional[List[str]] = None,
         last_router_intent: Optional[str] = None,
+        focus_source: Optional[str] = None,
     ) -> None:
         now_ts = time.time()
         with self._lock:
@@ -307,6 +358,8 @@ class SessionContextStore:
                 game.last_introduced_games = _dedupe_names(last_introduced_games, limit=GAME_MAX_CANDIDATES)
             if last_router_intent is not None:
                 game.last_router_intent = _clean_text(last_router_intent, max_len=48)
+            if focus_source is not None:
+                game.focus_source = _clean_text(focus_source, max_len=32)
             game.updated_at = now_ts
             self._clear_game_suppression_unlocked(state)
             self._sync_focus_from_game(game, focus, now_ts=now_ts)
@@ -327,6 +380,7 @@ class SessionContextStore:
                 primary_recommendation=game.primary_recommendation,
                 last_introduced_games=list(game.last_introduced_games),
                 last_router_intent=game.last_router_intent,
+                focus_source=game.focus_source,
                 updated_at=game.updated_at,
             )
 
@@ -339,11 +393,21 @@ class SessionContextStore:
                 return CapabilityFocusState()
             focus = state["focus"]
             assert isinstance(focus, CapabilityFocusState)
+            tentative_hints = list(focus.tentative_entity_hints) if self._tentative_is_fresh(focus, now_ts=now_ts) else []
+            tentative_source = focus.tentative_source if tentative_hints else ""
+            tentative_updated_at = float(focus.tentative_updated_at or 0.0) if tentative_hints else 0.0
             return CapabilityFocusState(
                 active_capability=focus.active_capability,
                 focused_entity=focus.focused_entity,
                 candidate_entities=list(focus.candidate_entities),
+                tentative_entity_hints=tentative_hints,
+                tentative_source=tentative_source,
+                tentative_updated_at=tentative_updated_at,
                 last_structured_intent=focus.last_structured_intent,
+                focus_domain=focus.focus_domain,
+                focus_general_focus=focus.focus_general_focus,
+                related_entities=_copy_related_entities_map(focus.related_entities),
+                focus_source=focus.focus_source,
                 consecutive_general_turns=int(focus.consecutive_general_turns or 0),
                 updated_at=focus.updated_at,
             )
@@ -355,11 +419,18 @@ class SessionContextStore:
         active_capability: str,
         focused_entity: str = "",
         candidate_entities: Optional[List[str]] = None,
+        tentative_entity_hints: Optional[List[str]] = None,
         last_structured_intent: str = "",
+        focus_domain: str = "",
+        focus_general_focus: str = "",
+        related_entities: Optional[Dict[str, List[str]]] = None,
+        focus_source: str = "",
+        tentative_source: str = "",
     ) -> None:
         now_ts = time.time()
         normalized_capability = _clean_text(active_capability, max_len=48)
         entities = _dedupe_names(list(candidate_entities or []), limit=GAME_MAX_CANDIDATES)
+        tentative_entities = _dedupe_names(list(tentative_entity_hints or []), limit=GAME_MAX_CANDIDATES)
         normalized_focus = _clean_text(focused_entity, max_len=80)
         if not normalized_focus and entities:
             normalized_focus = entities[0]
@@ -373,7 +444,17 @@ class SessionContextStore:
             focus.active_capability = normalized_capability
             focus.focused_entity = normalized_focus
             focus.candidate_entities = entities
+            if normalized_focus or entities:
+                self._clear_tentative_focus(focus)
+            else:
+                focus.tentative_entity_hints = tentative_entities
+                focus.tentative_source = _clean_text(tentative_source, max_len=32)
+                focus.tentative_updated_at = now_ts if tentative_entities else 0.0
             focus.last_structured_intent = _clean_text(last_structured_intent, max_len=48)
+            focus.focus_domain = _clean_text(focus_domain, max_len=24)
+            focus.focus_general_focus = _clean_text(focus_general_focus, max_len=32)
+            focus.related_entities = _copy_related_entities_map(related_entities)
+            focus.focus_source = _clean_text(focus_source, max_len=32)
             focus.consecutive_general_turns = 0
             focus.updated_at = now_ts
             if normalized_capability.startswith("game"):
@@ -384,6 +465,8 @@ class SessionContextStore:
                     game.candidate_games = entities[:]
                 if last_structured_intent:
                     game.last_router_intent = _clean_text(last_structured_intent, max_len=48)
+                if focus_source:
+                    game.focus_source = _clean_text(focus_source, max_len=32)
                 game.updated_at = now_ts
             state["updated_at"] = now_ts
 
@@ -402,11 +485,16 @@ class SessionContextStore:
             else:
                 focus.consecutive_general_turns = 0
             focus.active_capability = normalized_capability
+            self._clear_tentative_focus(focus)
             focus.updated_at = now_ts
             if focus.consecutive_general_turns >= FOCUS_CLEAR_AFTER_GENERAL_TURNS:
                 focus.focused_entity = ""
                 focus.candidate_entities = []
                 focus.last_structured_intent = ""
+                focus.focus_domain = ""
+                focus.focus_general_focus = ""
+                focus.related_entities = {}
+                focus.focus_source = ""
                 self._reset_game_focus(game)
                 game.updated_at = now_ts
             state["updated_at"] = now_ts
@@ -441,7 +529,12 @@ class SessionContextStore:
             focus.active_capability = "general_chat"
             focus.focused_entity = ""
             focus.candidate_entities = []
+            self._clear_tentative_focus(focus)
             focus.last_structured_intent = ""
+            focus.focus_domain = ""
+            focus.focus_general_focus = ""
+            focus.related_entities = {}
+            focus.focus_source = ""
             focus.consecutive_general_turns = 0
             focus.updated_at = now_ts
             self._reset_game_focus(game)
@@ -485,6 +578,12 @@ class SessionContextStore:
         kind: str,
         source_user_text: str,
         assistant_clarify_text: str,
+        target_domain: str = "",
+        target_answer_mode: str = "",
+        target_general_focus: str = "",
+        target_entities: Optional[List[str]] = None,
+        related_entities: Optional[Dict[str, List[str]]] = None,
+        resume_strategy: str = "",
     ) -> None:
         now_ts = time.time()
         with self._lock:
@@ -495,6 +594,12 @@ class SessionContextStore:
             clarification.kind = _clean_text(kind, max_len=48)
             clarification.source_user_text = _clean_text(source_user_text, max_len=240)
             clarification.assistant_clarify_text = _clean_text(assistant_clarify_text, max_len=180)
+            clarification.target_domain = _clean_text(target_domain, max_len=24)
+            clarification.target_answer_mode = _clean_text(target_answer_mode, max_len=32)
+            clarification.target_general_focus = _clean_text(target_general_focus, max_len=32)
+            clarification.target_entities = _dedupe_names(list(target_entities or []), limit=GAME_MAX_CANDIDATES)
+            clarification.related_entities = _copy_related_entities_map(related_entities)
+            clarification.resume_strategy = _clean_text(resume_strategy, max_len=48)
             clarification.created_at = now_ts
             state["updated_at"] = now_ts
 
@@ -513,6 +618,12 @@ class SessionContextStore:
                 kind=clarification.kind,
                 source_user_text=clarification.source_user_text,
                 assistant_clarify_text=clarification.assistant_clarify_text,
+                target_domain=clarification.target_domain,
+                target_answer_mode=clarification.target_answer_mode,
+                target_general_focus=clarification.target_general_focus,
+                target_entities=list(clarification.target_entities),
+                related_entities=_copy_related_entities_map(clarification.related_entities),
+                resume_strategy=clarification.resume_strategy,
                 created_at=clarification.created_at,
             )
 
@@ -530,6 +641,12 @@ class SessionContextStore:
                 kind=clarification.kind,
                 source_user_text=clarification.source_user_text,
                 assistant_clarify_text=clarification.assistant_clarify_text,
+                target_domain=clarification.target_domain,
+                target_answer_mode=clarification.target_answer_mode,
+                target_general_focus=clarification.target_general_focus,
+                target_entities=list(clarification.target_entities),
+                related_entities=_copy_related_entities_map(clarification.related_entities),
+                resume_strategy=clarification.resume_strategy,
                 created_at=clarification.created_at,
             ) if fresh else ClarificationState()
             state["clarification"] = ClarificationState()

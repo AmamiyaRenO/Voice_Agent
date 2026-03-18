@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -186,6 +187,90 @@ def test_smoke_intent_identity_passthrough():
     assert node.get("speaker_id") == 42
 
 
+def test_start_local_services_normalizes_bare_uvicorn_env_overrides(monkeypatch):
+    module = _load_module("smoke_start_local_services", SCRIPTS_DIR / "start_local_services.py")
+
+    monkeypatch.setenv("VOICE_AGENT_AUTO_BOOTSTRAP_VENV", "0")
+    monkeypatch.setenv("VOICE_AGENT_VOICE_CMD", "uvicorn main:app --host 0.0.0.0 --port 8000")
+    monkeypatch.setenv(
+        "VOICE_AGENT_DESKTOP_RUNTIME_CMD",
+        "uvicorn desktop_runtime:app --host 0.0.0.0 --port 8787",
+    )
+
+    defaults = module._build_defaults(ROOT)
+
+    assert defaults.asr_python.endswith(str(Path(".venv_asr") / "Scripts" / "python.exe"))
+    assert os.environ["VOICE_AGENT_VOICE_CMD"].startswith(f"{defaults.asr_python} -m uvicorn main:app")
+    assert os.environ["VOICE_AGENT_DESKTOP_RUNTIME_CMD"].startswith(
+        f"{defaults.asr_python} -m uvicorn desktop_runtime:app"
+    )
+
+
+def test_start_local_services_selects_repo_service_roots_for_cleanup():
+    module = _load_module("smoke_start_local_services_cleanup", SCRIPTS_DIR / "start_local_services.py")
+    defaults = module._build_defaults(ROOT)
+    markers = module._repo_service_cleanup_markers(defaults)
+
+    processes = [
+        {
+            "ProcessId": 101,
+            "ParentProcessId": 1,
+            "CommandLine": f'{defaults.asr_python} -m uvicorn main:app --host 0.0.0.0 --port 8000',
+        },
+        {
+            "ProcessId": 102,
+            "ParentProcessId": 101,
+            "CommandLine": '"C:\\Users\\tianj\\AppData\\Local\\Programs\\Python\\Python312\\python.exe" -m uvicorn main:app --host 0.0.0.0 --port 8000',
+        },
+        {
+            "ProcessId": 201,
+            "ParentProcessId": 1,
+            "CommandLine": "C:\\Elsewhere\\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000",
+        },
+        {
+            "ProcessId": 301,
+            "ParentProcessId": 1,
+            "CommandLine": f'{defaults.asr_python} {ROOT / "scripts" / "dialog_service" / "main.py"}',
+        },
+    ]
+
+    pids = module._select_repo_service_root_pids(
+        processes,
+        repo_root=ROOT,
+        markers=markers,
+        current_pid=99999,
+    )
+
+    assert pids == [101, 301]
+
+
+def test_start_local_services_doc_rag_preflight_requires_ready_embedder(monkeypatch, tmp_path: Path):
+    module = _load_module("smoke_start_local_services_preflight", SCRIPTS_DIR / "start_local_services.py")
+    defaults = module._build_defaults(ROOT)
+    docs_dir = tmp_path / "qmd" / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "lab.md").write_text("# Lab\n", encoding="utf-8")
+    env = {
+        "DOC_RAG_ENABLE": "1",
+        "DOC_RAG_ROOT": str(tmp_path / "qmd"),
+    }
+
+    monkeypatch.setattr(module, "_probe_doc_rag_embedder", lambda *_args, **_kwargs: (False, "embedder unavailable"))
+
+    ok, error = module._run_doc_rag_preflight(defaults, env)
+
+    assert ok is False
+    assert error == "embedder unavailable"
+
+
+def test_local_docs_rag_module_resolves_onnx_embedder_from_dialog_service():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+    module = _load_module("smoke_local_docs_rag_import", PYTHON_VOICE_DIR / "local_docs_rag.py")
+
+    assert getattr(module, "OnnxTextEmbedder", None) is not None
+
+
 def test_smoke_dialog_context_summary_and_slots(tmp_path: Path):
     if str(DIALOG_DIR) not in sys.path:
         sys.path.insert(0, str(DIALOG_DIR))
@@ -301,11 +386,11 @@ def test_smoke_dialog_game_context_accepts_new_manifest_games(tmp_path: Path):
     assert snapshot["recent_game_candidates"][0]["game_name"] == "Balance Quest"
 
 
-def test_smoke_game_catalog_alternatives_scale_beyond_two_games(tmp_path: Path):
+def test_smoke_game_catalog_extracts_alias_mentions(tmp_path: Path):
     if str(PYTHON_VOICE_DIR) not in sys.path:
         sys.path.insert(0, str(PYTHON_VOICE_DIR))
 
-    game_grounding = _load_module("smoke_game_grounding_scale_module", PYTHON_VOICE_DIR / "game_grounding.py")
+    game_grounding = _load_module("smoke_game_grounding_alias_module", PYTHON_VOICE_DIR / "game_grounding.py")
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(
         json.dumps(
@@ -322,26 +407,16 @@ def test_smoke_game_catalog_alternatives_scale_beyond_two_games(tmp_path: Path):
     )
 
     catalog = game_grounding.GameCatalog(manifest_path)
-    result = catalog.grounded_reply(
-        "What about the other game?",
-        user_profile={
-            "last_game_recommended": "Bean Bag Toss",
-            "last_game_recommended_ts": time.time(),
-        },
-    )
+    mentions = catalog.extract_game_mentions("Could we compare disc golf and bean bag toss today?", limit=4)
 
-    assert result["type"] == "game_alternative"
-    assert result["game_name"] == "Balance Quest"
-    assert set(result["candidates"]) == {"Disc Golf", "Balance Quest"}
-    assert "Disc Golf" in result["text"]
-    assert "Balance Quest" in result["text"]
+    assert mentions == ["Disc Golf", "Bean Bag Toss"]
 
 
-def test_smoke_game_catalog_other_recommendation_uses_alternative_branch(tmp_path: Path):
+def test_smoke_game_catalog_followup_uses_recent_session_context(tmp_path: Path):
     if str(PYTHON_VOICE_DIR) not in sys.path:
         sys.path.insert(0, str(PYTHON_VOICE_DIR))
 
-    game_grounding = _load_module("smoke_game_grounding_alt_recommend_module", PYTHON_VOICE_DIR / "game_grounding.py")
+    game_grounding = _load_module("smoke_game_grounding_followup_context_module", PYTHON_VOICE_DIR / "game_grounding.py")
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(
         json.dumps(
@@ -358,18 +433,15 @@ def test_smoke_game_catalog_other_recommendation_uses_alternative_branch(tmp_pat
     )
 
     catalog = game_grounding.GameCatalog(manifest_path)
-    result = catalog.grounded_reply(
-        "Any other recommendation?",
-        user_profile={
-            "last_game_recommended": "Bean Bag Toss",
-            "last_game_recommended_ts": time.time(),
-        },
-    )
+    session_state = {
+        "focused_game": "Bean Bag Toss",
+        "candidate_games": ["Bean Bag Toss", "Disc Golf"],
+        "primary_recommendation": "Bean Bag Toss",
+        "updated_at": time.time(),
+    }
 
-    assert result["type"] == "game_alternative"
-    assert result["game_name"] != "Bean Bag Toss"
-    assert "Bean Bag Toss" in result["text"]
-    assert result["game_name"] in result["text"]
+    assert catalog.looks_like_game_followup("Tell me more about it.", session_state=session_state) is True
+    assert catalog.looks_like_game_followup("Can you hear me clearly?", session_state=session_state) is False
 
 
 def test_smoke_dialog_game_mentions_route_new_game_followups(tmp_path: Path):

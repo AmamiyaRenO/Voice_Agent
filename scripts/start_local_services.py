@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import shlex
@@ -11,6 +12,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -736,6 +738,12 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         python_exe=tts_python,
         port=5007,
     )
+    _maybe_normalize_bare_uvicorn_env(
+        env_var="VOICE_AGENT_DESKTOP_RUNTIME_CMD",
+        app="desktop_runtime:app",
+        python_exe=asr_python,
+        port=8787,
+    )
 
     intent_manifest = _config_get_string(paths_cfg, "intent_manifest") or _config_get_string(
         launcher_config, "intent_manifest_path"
@@ -1111,6 +1119,11 @@ def _build_parser(defaults: LauncherDefaults) -> argparse.ArgumentParser:
         action="store_true",
         help="Do not block waiting for the processes to exit.",
     )
+    parser.add_argument(
+        "--no-cleanup-old-services",
+        action="store_true",
+        help="Do not kill existing repo-owned service process trees before launch.",
+    )
     return parser
 
 
@@ -1319,6 +1332,8 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     env.setdefault("VOICE_CLOUD_RESPONSE_PROVIDER", "openai")
     env.setdefault("VOICE_AGENT_TTS_BACKEND", "piper")
     env.setdefault("OPENAI_RESPONSE_MODEL", "gpt-4o-mini")
+    env.setdefault("DOC_RAG_ENABLE", "1")
+    env.setdefault("DOC_RAG_ROOT", str(defaults.repo_root / "runtime" / "qmd"))
     if explicit_transcribe_mode:
         env["TRANSCRIBE_MODE"] = explicit_transcribe_mode
     else:
@@ -1368,6 +1383,16 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
         or str(defaults.script_dir / "intent_service" / "manifest.json"),
     )
 
+    doc_root = Path(str(env.get("DOC_RAG_ROOT", "") or "")).expanduser()
+    docs_dir = doc_root / "docs" if str(doc_root) else Path()
+    if str(doc_root):
+        env["DOC_RAG_ROOT"] = str(doc_root)
+    if docs_dir and (not docs_dir.exists() or not any(docs_dir.rglob("*.md")) and not any(docs_dir.rglob("*.qmd")) and not any(docs_dir.rglob("*.txt"))):
+        print(
+            "[voice-agent] warning: DOC_RAG_ROOT is configured but no general docs were found in "
+            f"{docs_dir}"
+        )
+
     # Optional sample defaults so LAUNCH_GAME can work immediately on dev machines.
     sample_flappy = defaults.repo_root.parent / "Voice Flippy Bird" / "Flappy Bird.exe"
     if sample_flappy.exists():
@@ -1384,6 +1409,171 @@ def _is_tcp_port_in_use(host: str, port: int, timeout_sec: float = 0.25) -> bool
             return True
     except OSError:
         return False
+
+
+def _repo_service_cleanup_markers(defaults: LauncherDefaults) -> List[str]:
+    script_dir = defaults.script_dir
+    markers = [
+        " -m uvicorn main:app ",
+        " -m uvicorn desktop_runtime:app ",
+        " -m uvicorn piper_http:app ",
+        " -m uvicorn qwen_tts_http:app ",
+        " -m uvicorn kokoro_tts_http:app ",
+        str(script_dir / "intent_service" / "main.py"),
+        str(script_dir / "dialog_service" / "main.py"),
+        str(script_dir / "game_launcher" / "main.py"),
+        str(script_dir / "telemetry_service" / "main.py"),
+    ]
+    return [marker.replace("/", "\\").strip().lower() for marker in markers if str(marker).strip()]
+
+
+def _normalize_process_command_line(value: object) -> str:
+    return str(value or "").strip().replace("/", "\\").lower()
+
+
+def _select_repo_service_root_pids(
+    processes: List[Dict[str, object]],
+    *,
+    repo_root: Path,
+    markers: List[str],
+    current_pid: int,
+) -> List[int]:
+    repo_root_text = str(repo_root.resolve()).replace("/", "\\").lower()
+    selected: List[int] = []
+    parent_by_pid: Dict[int, int] = {}
+    for item in processes:
+        try:
+            pid = int(item.get("ProcessId") or 0)
+        except Exception:
+            pid = 0
+        try:
+            parent_by_pid[pid] = int(item.get("ParentProcessId") or 0)
+        except Exception:
+            parent_by_pid[pid] = 0
+        if pid <= 0 or pid == current_pid:
+            continue
+        command_line = _normalize_process_command_line(item.get("CommandLine"))
+        if not command_line or repo_root_text not in command_line:
+            continue
+        if not any(marker in command_line for marker in markers):
+            continue
+        selected.append(pid)
+    selected_set = set(selected)
+    root_pids = [pid for pid in selected_set if parent_by_pid.get(pid, 0) not in selected_set]
+    return sorted(root_pids)
+
+
+def _list_windows_processes() -> List[Dict[str, object]]:
+    if os.name != "nt":
+        return []
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | "
+                "Select-Object ProcessId,ParentProcessId,CommandLine | "
+                "ConvertTo-Json -Compress",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        return [payload]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _cleanup_repo_service_processes(defaults: LauncherDefaults) -> None:
+    if os.name != "nt":
+        return
+    markers = _repo_service_cleanup_markers(defaults)
+    processes = _list_windows_processes()
+    target_pids = _select_repo_service_root_pids(
+        processes,
+        repo_root=defaults.repo_root,
+        markers=markers,
+        current_pid=os.getpid(),
+    )
+    if not target_pids:
+        return
+    print(f"[voice-agent] cleaning {len(target_pids)} existing repo service process(es) before launch.")
+    for pid in target_pids:
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            print(f"[voice-agent] cleaned old service tree rooted at PID {pid}.")
+        else:
+            stderr = (result.stderr or result.stdout or "").strip()
+            print(f"[voice-agent] warning: failed to clean PID {pid}: {stderr}")
+    time.sleep(1.0)
+
+
+def _probe_doc_rag_embedder(defaults: LauncherDefaults, env: Dict[str, str]) -> Tuple[bool, str]:
+    dialog_dir = defaults.script_dir / "dialog_service"
+    dialog_dir_text = str(dialog_dir)
+    if dialog_dir_text not in sys.path:
+        sys.path.insert(0, dialog_dir_text)
+    try:
+        module = importlib.import_module("onnx_embedder")
+    except Exception as exc:
+        return False, f"failed to import onnx_embedder: {exc}"
+
+    embedder_cls = getattr(module, "OnnxTextEmbedder", None)
+    if embedder_cls is None:
+        return False, "OnnxTextEmbedder class unavailable"
+
+    try:
+        embedder = embedder_cls(
+            embedder=(env.get("DOC_RAG_EMBEDDER", "bge") or "bge").strip().lower(),
+            repo_id=(env.get("DOC_RAG_EMBEDDING_REPO_ID", "") or "").strip(),
+            model_dir=(env.get("DOC_RAG_EMBEDDING_MODEL_DIR", "") or "").strip(),
+            model_file=(env.get("DOC_RAG_EMBEDDING_MODEL_FILE", "") or "").strip(),
+            tokenizer_file=(env.get("DOC_RAG_EMBEDDING_TOKENIZER_FILE", "") or "").strip(),
+            max_length=max(16, int((env.get("DOC_RAG_EMBEDDING_MAX_LENGTH", "256") or "256").strip() or "256")),
+            auto_download=((env.get("DOC_RAG_EMBEDDING_AUTO_DOWNLOAD", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}),
+            cache_dir=(env.get("DOC_RAG_EMBEDDING_CACHE_DIR", "") or "").strip(),
+            query_prefix=(env.get("DOC_RAG_QUERY_PREFIX", "") or "").strip(),
+            doc_prefix=(env.get("DOC_RAG_DOC_PREFIX", "") or "").strip(),
+        )
+    except Exception as exc:
+        return False, f"failed to initialize doc_rag embedder: {exc}"
+    return bool(getattr(embedder, "ready", False)), str(getattr(embedder, "error", "") or "")
+
+
+def _run_doc_rag_preflight(defaults: LauncherDefaults, env: Dict[str, str]) -> Tuple[bool, str]:
+    if (env.get("DOC_RAG_ENABLE", "1") or "1").strip().lower() not in {"1", "true", "yes", "on"}:
+        return True, ""
+    doc_root = Path(str(env.get("DOC_RAG_ROOT", "") or "")).expanduser()
+    docs_dir = doc_root / "docs" if str(doc_root) else Path()
+    if not docs_dir.exists():
+        return True, ""
+    if not any(docs_dir.rglob("*.md")) and not any(docs_dir.rglob("*.qmd")) and not any(docs_dir.rglob("*.txt")):
+        return True, ""
+    ready, error = _probe_doc_rag_embedder(defaults, env)
+    if ready:
+        return True, ""
+    return False, error or "doc_rag embedder unavailable"
 
 
 def _build_handles(commands: CommandSet, dirs: DirectorySet, env: Dict[str, str]) -> List[ProcessHandle]:
@@ -1490,6 +1680,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     print("[voice-agent] VOICE_PIPELINE_MODE=" + str(env.get("VOICE_PIPELINE_MODE", "")))
     print("[voice-agent] VOICE_CONVERSATION_PROFILE=" + str(env.get("VOICE_CONVERSATION_PROFILE", "")))
+    print("[voice-agent] ASR_PYTHON=" + str(defaults.asr_python))
+    print("[voice-agent] TTS_PYTHON=" + str(defaults.tts_python))
+    print("[voice-agent] DOC_RAG_ENABLE=" + str(env.get("DOC_RAG_ENABLE", "")))
+    print("[voice-agent] DOC_RAG_ROOT=" + str(env.get("DOC_RAG_ROOT", "")))
+    doc_rag_ok, doc_rag_error = _run_doc_rag_preflight(defaults, env)
+    if not doc_rag_ok:
+        print("[voice-agent] error: DOC_RAG preflight failed: " + str(doc_rag_error))
+        return 2
+    if not args.no_cleanup_old_services:
+        _cleanup_repo_service_processes(defaults)
     handles = _build_handles(commands, dirs, env)
     return _run_supervisor(handles, env, no_wait=args.no_wait)
 

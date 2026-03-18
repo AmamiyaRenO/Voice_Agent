@@ -838,64 +838,6 @@ class DialogService:
                         self._tts_and_play(memory_reply, corr_id)
                     return
 
-        if self.game_catalog is not None:
-            try:
-                user_profile = self.user_memory.profile_snapshot(user_id) if user_id and self.user_memory is not None else {}
-                grounded = self.game_catalog.grounded_reply(text, user_profile=user_profile)
-            except Exception as exc:
-                print(f"[dialog] game grounding failed: {exc}")
-                grounded = {}
-            grounded_reply = sanitize_tts_text(str(grounded.get("text") or "").strip())
-            if grounded_reply:
-                grounded_game_name = str(grounded.get("game_name") or "").strip()
-                if user_id and self.user_memory is not None:
-                    try:
-                        self._remember_game_context(
-                            user_id=user_id,
-                            text=grounded_reply,
-                            primary_game_name=grounded_game_name,
-                            reference_kind=str(grounded.get("type") or "game_reply").strip() or "game_reply",
-                            source="game_catalog",
-                        )
-                    except Exception as exc:
-                        print(f"[dialog] game reference update failed: {exc}")
-                if self.reply_compress:
-                    grounded_reply = compress_reply_for_latency(
-                        grounded_reply,
-                        max_sentences=self.reply_max_sentences,
-                        max_chars=self.reply_max_chars,
-                    )
-                    grounded_reply = compress_reply_by_words(grounded_reply, self.reply_max_words)
-                    grounded_reply = trim_trailing_connectors(grounded_reply)
-                    if grounded_reply and grounded_reply[-1] not in ".!?":
-                        grounded_reply = f"{grounded_reply}."
-                self._publish_answer_ex(
-                    text=grounded_reply,
-                    corr_id=corr_id,
-                    tts_speaker=self.tts_voice or None,
-                    user_id=user_id,
-                )
-                if user_id and self.user_memory is not None and self.cfg.enable_dialog_context:
-                    try:
-                        self.user_memory.remember_dialog_turn(
-                            user_id,
-                            "assistant",
-                            grounded_reply,
-                            max_turns=self.cfg.dialog_history_turns,
-                            summary_max_chars=self.cfg.dialog_summary_max_chars,
-                        )
-                        self._update_dialog_slots_after_reply(
-                            user_id=user_id,
-                            user_text=text,
-                            answer_text=grounded_reply,
-                            previous_topic=dialog_request_ctx.get("current_topic", ""),
-                        )
-                    except Exception as exc:
-                        print(f"[dialog] dialog slot update failed: {exc}")
-                if self.cfg.speak_audio:
-                    self._tts_and_play(grounded_reply, corr_id)
-                return
-
         if self.cfg.enable_vision_query and self._is_vision_query(text):
             print("[dialog] vision query routed to camera describe endpoint")
             vision_reply = self._request_vision_description()

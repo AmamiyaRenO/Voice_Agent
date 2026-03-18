@@ -1,0 +1,212 @@
+{
+  "transcripts": [
+    {
+      "id": "bioadaptive_basics",
+      "notes": "Earlier factual BioAdaptive lab checks from user-provided prompts.",
+      "turns": [
+        {
+          "user": "What is the BioAdaptive Interface Lab?",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type": "doc_answer",
+            "domain": "general",
+            "general_focus": "overview",
+            "contains": ["BioAdaptive Interface Lab", "Wilfrid Laurier University"],
+            "reject_contains": ["Description:", "News and Updates"]
+          }
+        },
+        {
+          "user": "What equipment does the lab have?",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type": "doc_answer",
+            "domain": "general",
+            "general_focus": "equipment",
+            "contains": ["EEG", "VR"],
+            "reject_contains": ["News and Updates"]
+          }
+        },
+        {
+          "user": "Does the lab work on social robotics?",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type": "doc_answer",
+            "domain": "general",
+            "general_focus": "research",
+            "contains": ["social robotics"],
+            "reject_contains": ["I couldn't confirm", "Recent news"]
+          }
+        },
+        {
+          "user": "Who is John E. Munoz?",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type": "doc_answer",
+            "domain": "general",
+            "general_focus": "people",
+            "contains": ["John E. Munoz", "Director"],
+            "reject_contains": ["News and Updates", "personal history"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "bioadaptive_followups",
+      "notes": "Live follow-up failures the user reported for general/doc smoothness.",
+      "turns": [
+        {
+          "user": "Can you hear me?",
+          "expected": {
+            "provider": "general_guard",
+            "contains": ["hear"],
+            "reject_contains": ["BioAdaptive", "personal history"]
+          }
+        },
+        {
+          "user": "Do you know John?",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type_any": ["doc_answer", "doc_clarify"],
+            "domain": "general",
+            "general_focus": "people",
+            "reject_contains": ["personal record", "personal history", "your name"]
+          }
+        },
+        {
+          "user": "Do you know his lab?",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type": "doc_answer",
+            "domain": "general",
+            "general_focus": "overview",
+            "contains": ["BioAdaptive Interface Lab"],
+            "reject_contains": ["personal record", "memory"]
+          }
+        },
+        {
+          "user": "Do you know BIO Adaptive Interface Lab?",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type": "doc_answer",
+            "domain": "general",
+            "general_focus": "overview",
+            "contains": ["BioAdaptive Interface Lab", "Wilfrid Laurier University"],
+            "reject_contains": ["Description:", "March 2026", "January 2026"]
+          }
+        },
+        {
+          "user": "Do you know about the research?",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type": "doc_answer",
+            "domain": "general",
+            "general_focus": "research",
+            "contains": ["serious games"],
+            "reject_contains": ["Did you mean", "Which project"]
+          }
+        },
+        {
+          "user": "What researchers do they have?",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type": "doc_answer",
+            "domain": "general",
+            "general_focus": "people",
+            "contains": ["John E. Munoz", "Nahomi Ramirez"],
+            "reject_contains": ["March 2026", "January 2026"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "bioadaptive_clarify_resume",
+      "notes": "Clarify-resume flow should stay in the same doc target.",
+      "turns": [
+        {
+          "user": "What do you know about John?",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type": "doc_clarify",
+            "domain": "general",
+            "general_focus": "people",
+            "contains": ["John E. Munoz"],
+            "reject_contains": ["personal history"]
+          }
+        },
+        {
+          "user": "Yes.",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type": "doc_answer",
+            "domain": "general",
+            "general_focus": "people",
+            "contains": ["John E. Munoz", "Director"],
+            "reject_contains": ["Which lab or person", "personal history"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "game_followups",
+      "notes": "Game context follow-ups should stay in game/doc-game routing and not fall into vision.",
+      "turns": [
+        {
+          "user": "What games do you have?",
+          "expected": {
+            "provider": "doc_rag",
+            "structured_type": "doc_answer",
+            "domain": "game",
+            "answer_mode": "availability",
+            "contains": ["Bean Bag Toss", "Disc Golf"],
+            "reject_contains": ["camera preview"]
+          }
+        },
+        {
+          "user": "What options do you have?",
+          "expected": {
+            "provider": "doc_rag",
+            "domain": "game",
+            "contains": ["Bean Bag Toss", "Disc Golf"],
+            "reject_contains": ["camera preview"]
+          }
+        },
+        {
+          "user": "Describe all the game.",
+          "expected": {
+            "provider": "doc_rag",
+            "domain": "game",
+            "contains": ["Bean Bag Toss", "Disc Golf"],
+            "reject_contains": ["camera preview"]
+          }
+        },
+        {
+          "user": "All the game.",
+          "expected": {
+            "provider": "doc_rag",
+            "domain": "game",
+            "contains": ["Bean Bag Toss", "Disc Golf"],
+            "reject_contains": ["camera preview"]
+          }
+        },
+        {
+          "user": "Do you know about it?",
+          "expected": {
+            "provider": "doc_rag",
+            "domain": "game",
+            "contains": ["Bean Bag Toss"],
+            "reject_contains": ["camera preview"]
+          }
+        },
+        {
+          "user": "The cornhole game.",
+          "expected": {
+            "provider": "command",
+            "route": "LAUNCH_GAME",
+            "contains": ["Opening Bean Bag Toss"],
+            "reject_contains": ["camera preview"]
+          }
+        }
+      ]
+    }
+  ]
+}

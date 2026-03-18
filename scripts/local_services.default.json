@@ -54,6 +54,8 @@
     "OLLAMA_TEMPERATURE": "0.7",
     "OLLAMA_TOP_P": "0.8",
     "OLLAMA_TOP_K": "20",
+    "DOC_RAG_ENABLE": "1",
+    "DOC_RAG_ROOT": "runtime/qmd",
     "DIALOG_ENABLE_CONTEXT_MEMORY": "1",
     "DIALOG_ENABLE_POLICY": "1",
     "DIALOG_HISTORY_TURNS": "8",

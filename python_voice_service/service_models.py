@@ -179,3 +179,6 @@ class CapabilityRouteDecision:
     routed_text: str = ""
     clarification_kind: str = ""
     merged_from_clarification: bool = False
+    structured_payload: Optional[dict] = None
+    probe_telemetry: Optional[dict] = None
+    fallback_reason: str = ""
