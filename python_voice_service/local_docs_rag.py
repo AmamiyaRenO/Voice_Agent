@@ -277,7 +277,7 @@ _GENERAL_KEYWORD_RULES = (
     },
 )
 _GAME_DOMAINS = {"game", "mixed"}
-_DEFAULT_DOC_ROOT = Path(__file__).resolve().parents[1] / "runtime" / "qmd"
+_DEFAULT_DOC_ROOT = Path(__file__).resolve().parents[1] / "docs" / "rag" / "bioadaptive_lab"
 _DEFAULT_TOP_K = 4
 _DEFAULT_FTS_LIMIT = 20
 _DEFAULT_DENSE_LIMIT = 20
@@ -463,6 +463,37 @@ def _should_skip_general_doc_path(path: Path) -> bool:
     if "query examples" in stem or "query example" in stem:
         return True
     return False
+
+
+def _candidate_general_doc_bases(doc_root: Path) -> List[Path]:
+    root = Path(doc_root).expanduser()
+    candidates: List[Path] = []
+    nested_docs = root / "docs"
+    if nested_docs.exists():
+        candidates.append(nested_docs)
+    candidates.append(root)
+    seen: set[str] = set()
+    out: List[Path] = []
+    for candidate in candidates:
+        key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(candidate)
+    return out
+
+
+def _resolve_alias_override_path(doc_root: Path) -> Path:
+    root = Path(doc_root).expanduser()
+    nested = root / "docs" / "entity_aliases.json"
+    direct = root / "entity_aliases.json"
+    if nested.exists():
+        return nested
+    if direct.exists():
+        return direct
+    if (root / "docs").exists():
+        return nested
+    return direct
 
 
 def _is_news_like_text(value: str) -> bool:
@@ -1099,7 +1130,7 @@ class LocalDocsRAG:
         self.vector_path = self.index_dir / "vectors.npy"
         self.meta_path = self.index_dir / "meta.json"
         self.entity_registry_path = self.index_dir / "entity_registry.json"
-        self.alias_override_path = self.doc_root / "docs" / "entity_aliases.json"
+        self.alias_override_path = _resolve_alias_override_path(self.doc_root)
         self.enabled = _env_bool("DOC_RAG_ENABLE", True)
         self.include_games = _env_bool("DOC_RAG_INCLUDE_GAMES", True)
         self.top_k = _env_int("DOC_RAG_TOP_K", _DEFAULT_TOP_K, floor=1)
@@ -1186,15 +1217,21 @@ class LocalDocsRAG:
             return None
 
     def _iter_general_doc_paths(self) -> Iterable[Path]:
-        base = self.doc_root / "docs"
-        if not base.exists():
-            return []
+        bases = _candidate_general_doc_bases(self.doc_root)
         paths: List[Path] = []
-        for pattern in ("*.qmd", "*.md", "*.txt"):
-            for path in sorted(base.rglob(pattern)):
-                if _should_skip_general_doc_path(path):
-                    continue
-                paths.append(path)
+        seen: set[str] = set()
+        for base in bases:
+            if not base.exists():
+                continue
+            for pattern in ("*.qmd", "*.md", "*.txt"):
+                for path in sorted(base.rglob(pattern)):
+                    if _should_skip_general_doc_path(path):
+                        continue
+                    key = str(path.resolve())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    paths.append(path)
         return paths
 
     def _iter_game_doc_paths(self) -> Iterable[Path]:

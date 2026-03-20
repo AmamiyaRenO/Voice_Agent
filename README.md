@@ -191,7 +191,7 @@ flowchart LR
 
 For local document grounding, the maintained default doc root is:
 
-- `runtime/qmd/docs`
+- `docs/rag/bioadaptive_lab`
 
 Place `.md`, `.qmd`, and `.txt` corpora there when you want them to participate in general/doc retrieval. Game knowledge is still loaded from the manifest/QMD side, but general documents now share the same doc-grounded conversation path.
 
@@ -271,8 +271,9 @@ Important:
 - The maintained source runtime is `.venv_asr`; avoid running a second unmanaged Python service stack in parallel on the same ports.
 - Intent alias matching uses `scripts/intent_service/manifest.json` by default (override with `INTENT_MANIFEST_PATH`).
 - Game launching reads the same manifest file (override with `GAME_LAUNCHER_MANIFEST_PATH`).
-- Local doc-rag defaults to `runtime/qmd` as the corpus root and looks for general docs under `runtime/qmd/docs`.
-- Optional curated entity aliases for ASR/pronunciation edge cases can be stored at `runtime/qmd/docs/entity_aliases.json`.
+- Local doc-rag defaults to `docs/rag/bioadaptive_lab`.
+- The loader supports either a direct corpus root (`docs/rag/bioadaptive_lab/*.md`) or the older nested layout (`<root>/docs/*.md`) for backward compatibility.
+- Optional curated entity aliases for ASR/pronunciation edge cases can be stored at `docs/rag/bioadaptive_lab/entity_aliases.json`.
 - Each game entry can include `exec`, `workdir`, `args`, and `env`; `LAUNCH_GAME` only opens a process when `exec` is configured.
 - If one managed process exits, the launcher shuts down the remaining processes.
 
@@ -313,7 +314,7 @@ Recommended env vars when you want to control it explicitly:
 
 The maintained grounded conversation path now uses a unified local doc index for both:
 
-- general documents under `runtime/qmd/docs`
+- general documents under `docs/rag/bioadaptive_lab`
 - game knowledge from the manifest and game docs
 
 Current behavior:

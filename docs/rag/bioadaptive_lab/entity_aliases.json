@@ -1,0 +1,30 @@
+{
+  "entries": [
+    {
+      "canonical": "BioAdaptive Interface Lab",
+      "domain": "general",
+      "entity_type": "lab",
+      "alias_strength": "strong",
+      "aliases": [
+        "bio adaptive interface lab",
+        "bio adaptive interface",
+        "bioadaptive interface",
+        "bio adactive interface lab",
+        "bio ductive interface lab",
+        "bioductive interface lab"
+      ]
+    },
+    {
+      "canonical": "John E. Munoz",
+      "domain": "general",
+      "entity_type": "person",
+      "alias_strength": "strong",
+      "aliases": [
+        "john e munoz",
+        "john munoz",
+        "professor munoz",
+        "prof munoz"
+      ]
+    }
+  ]
+}

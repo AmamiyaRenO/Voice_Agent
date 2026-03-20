@@ -263,6 +263,25 @@ def test_start_local_services_doc_rag_preflight_requires_ready_embedder(monkeypa
     assert error == "embedder unavailable"
 
 
+def test_start_local_services_doc_rag_preflight_accepts_direct_repo_tracked_doc_root(monkeypatch, tmp_path: Path):
+    module = _load_module("smoke_start_local_services_preflight_direct_root", SCRIPTS_DIR / "start_local_services.py")
+    defaults = module._build_defaults(ROOT)
+    doc_root = tmp_path / "bioadaptive_lab"
+    doc_root.mkdir(parents=True, exist_ok=True)
+    (doc_root / "01_lab_identity.md").write_text("# BioAdaptive Interface Lab\n", encoding="utf-8")
+    env = {
+        "DOC_RAG_ENABLE": "1",
+        "DOC_RAG_ROOT": str(doc_root),
+    }
+
+    monkeypatch.setattr(module, "_probe_doc_rag_embedder", lambda *_args, **_kwargs: (True, ""))
+
+    ok, error = module._run_doc_rag_preflight(defaults, env)
+
+    assert ok is True
+    assert error == ""
+
+
 def test_local_docs_rag_module_resolves_onnx_embedder_from_dialog_service():
     if str(PYTHON_VOICE_DIR) not in sys.path:
         sys.path.insert(0, str(PYTHON_VOICE_DIR))

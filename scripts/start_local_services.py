@@ -1333,7 +1333,7 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     env.setdefault("VOICE_AGENT_TTS_BACKEND", "piper")
     env.setdefault("OPENAI_RESPONSE_MODEL", "gpt-4o-mini")
     env.setdefault("DOC_RAG_ENABLE", "1")
-    env.setdefault("DOC_RAG_ROOT", str(defaults.repo_root / "runtime" / "qmd"))
+    env.setdefault("DOC_RAG_ROOT", str(defaults.repo_root / "docs" / "rag" / "bioadaptive_lab"))
     if explicit_transcribe_mode:
         env["TRANSCRIBE_MODE"] = explicit_transcribe_mode
     else:
@@ -1384,10 +1384,10 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     )
 
     doc_root = Path(str(env.get("DOC_RAG_ROOT", "") or "")).expanduser()
-    docs_dir = doc_root / "docs" if str(doc_root) else Path()
+    docs_dir = _resolve_general_docs_dir(doc_root) if str(doc_root) else Path()
     if str(doc_root):
         env["DOC_RAG_ROOT"] = str(doc_root)
-    if docs_dir and (not docs_dir.exists() or not any(docs_dir.rglob("*.md")) and not any(docs_dir.rglob("*.qmd")) and not any(docs_dir.rglob("*.txt"))):
+    if docs_dir and not _has_general_docs(doc_root):
         print(
             "[voice-agent] warning: DOC_RAG_ROOT is configured but no general docs were found in "
             f"{docs_dir}"
@@ -1425,6 +1425,21 @@ def _repo_service_cleanup_markers(defaults: LauncherDefaults) -> List[str]:
         str(script_dir / "telemetry_service" / "main.py"),
     ]
     return [marker.replace("/", "\\").strip().lower() for marker in markers if str(marker).strip()]
+
+
+def _resolve_general_docs_dir(doc_root: Path) -> Path:
+    root = Path(str(doc_root or "")).expanduser()
+    nested = root / "docs"
+    if nested.exists():
+        return nested
+    return root
+
+
+def _has_general_docs(doc_root: Path) -> bool:
+    docs_dir = _resolve_general_docs_dir(doc_root)
+    if not docs_dir.exists():
+        return False
+    return any(docs_dir.rglob("*.md")) or any(docs_dir.rglob("*.qmd")) or any(docs_dir.rglob("*.txt"))
 
 
 def _normalize_process_command_line(value: object) -> str:
@@ -1565,10 +1580,10 @@ def _run_doc_rag_preflight(defaults: LauncherDefaults, env: Dict[str, str]) -> T
     if (env.get("DOC_RAG_ENABLE", "1") or "1").strip().lower() not in {"1", "true", "yes", "on"}:
         return True, ""
     doc_root = Path(str(env.get("DOC_RAG_ROOT", "") or "")).expanduser()
-    docs_dir = doc_root / "docs" if str(doc_root) else Path()
+    docs_dir = _resolve_general_docs_dir(doc_root) if str(doc_root) else Path()
     if not docs_dir.exists():
         return True, ""
-    if not any(docs_dir.rglob("*.md")) and not any(docs_dir.rglob("*.qmd")) and not any(docs_dir.rglob("*.txt")):
+    if not _has_general_docs(doc_root):
         return True, ""
     ready, error = _probe_doc_rag_embedder(defaults, env)
     if ready:

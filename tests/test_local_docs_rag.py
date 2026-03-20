@@ -103,6 +103,7 @@ def _build_rag(
     *,
     answer_threshold: float | None = None,
     embedder=None,
+    doc_root: Path | None = None,
 ):
     if str(PYTHON_VOICE_DIR) not in sys.path:
         sys.path.insert(0, str(PYTHON_VOICE_DIR))
@@ -266,7 +267,7 @@ def _build_rag(
     rag = local_docs_rag.LocalDocsRAG(
         manifest_path=manifest_path,
         game_catalog=catalog,
-        doc_root=qmd_root,
+        doc_root=doc_root or qmd_root,
         embedder=embedder or DummyEmbedder(),
     )
     assert rag.ready, rag.error
@@ -348,6 +349,26 @@ def test_local_docs_rag_general_factual_queries_get_doc_prior_and_rescue(tmp_pat
     assert robotics_probe.stage2_result == "doc_answer"
     assert "social robotics" in robotics_probe.payload["text"].lower()
     rag.close()
+
+
+def test_local_docs_rag_supports_repo_tracked_direct_doc_root_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    original_root = tmp_path / "qmd"
+    rag = _build_rag(tmp_path, monkeypatch)
+    direct_root = tmp_path / "repo_docs"
+    direct_root.mkdir(parents=True, exist_ok=True)
+    for path in (original_root / "docs").iterdir():
+        target = direct_root / path.name
+        target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    rag.close()
+
+    direct_rag = _build_rag(tmp_path, monkeypatch, doc_root=direct_root)
+    probe = direct_rag.probe("What is the BioAdaptive Interface Lab?")
+
+    assert probe.stage1_result == "doc_candidate"
+    assert probe.stage2_result == "doc_answer"
+    assert probe.domain == "general"
+    assert "bioadaptive interface lab" in probe.payload["text"].lower()
+    direct_rag.close()
 
 
 def test_local_docs_rag_clarifies_missing_entity_and_ambiguous_intent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
