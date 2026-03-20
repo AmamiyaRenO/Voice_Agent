@@ -3108,17 +3108,7 @@ class DesktopAudioAgent:
 
     async def publish_flower(self, payload: Dict[str, Any]) -> None:
         action = str((payload or {}).get("action") or (payload or {}).get("value") or "").strip().lower()
-        mapping = {
-            "open": "open",
-            "open_hold": "open",
-            "open_slow": "open",
-            "close": "close",
-            "close_hold": "close",
-            "close_slow": "close",
-            "center": "center",
-            "stop": "stop",
-        }
-        value = mapping.get(action, action or "open")
+        value = action or "open"
         await self._publish_mqtt("robot/pi/servo/cmd", {"action": "servo", "value": value})
 
     async def _publish_mqtt(self, topic: str, payload: Dict[str, Any]) -> None:
