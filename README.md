@@ -15,6 +15,7 @@ The repository also includes:
 | Run the full voice loop with the least setup | `.\helper.bat` -> `http://127.0.0.1:8787` | The maintained path: browser panel, runtime switching, memory tools, game manifest tools, camera, and logs |
 | Control the agent from Python without opening Unity | [`python_sdk/README.md`](python_sdk/README.md) | SDK access to speech, face, LED, servo, game intents, and prompt control |
 | Keep Unity in the loop for avatar/gameplay/camera UI | Start services first, then open the Unity project | Unity acts as an optional shell around the desktop runtime and MQTT actions |
+| Work on Raspberry Pi display / LED / servo control | [`Firmware/README.md`](Firmware/README.md) | Live Pi-synced scripts, MQTT topics, and current hardware runtime notes |
 | Package the stack for Windows deployment | [`scripts/packaging/`](scripts/packaging/) and [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WINDOWS.md) | Service executables, installer assets, and a near one-click runtime |
 
 ### Default runtime ports
@@ -42,6 +43,8 @@ The repository also includes:
 - Confirmed doc follow-ups such as `his lab`, `the research`, `they`, `it`, and `Yes.` now resume the prior grounded doc target instead of falling back to memory or vision.
 - Piper runs as a persistent worker instead of a per-request process, which reduces TTS startup cost.
 - Kokoro TTS is now available as a third compatible backend on `:5007`, alongside Piper and Qwen.
+- Raspberry Pi hardware scripts were re-synced from the live device into `Firmware/`, replacing stale local LCD copies with the current face / servo / LED runtime sources and notes.
+- Pi-side servo handling now uses the synced `servoScript.py`, which preserves last-angle state and supports hold / slow / center motions for more predictable flower control.
 - The source launcher now auto-bootstraps/detects `.venv_asr` and `.venv_tts`, validates the local doc-rag embedder before startup, clears stale repo-owned service trees, and reuses an existing MQTT broker on `1883`.
 - Repeatable regression now includes transcript-level dialogue cases with machine-readable and human-readable reports under `runtime/evals/`.
 
@@ -65,6 +68,7 @@ It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for 
 - [Detailed Setup](#detailed-setup)
 - [Windows Packaging](#windows-packaging)
 - [Service Endpoints and MQTT Topics](#service-endpoints-and-mqtt-topics)
+- [Raspberry Pi Hardware Runtime](#raspberry-pi-hardware-runtime)
 - [Python SDK](#python-sdk)
 - [SDK Visualizer](#sdk-visualizer)
 - [Python Voice Service (ASR + LLM)](#python-voice-service-asr--llm)
@@ -135,7 +139,7 @@ sequenceDiagram
 | `runtime/` | Runtime outputs and assets such as eval results, captions, local models, and packaged-service payloads |
 | `docs/` | Deployment, integration, live captions, and benchmark planning notes |
 | `installer/` | Windows installer scripts and launcher entrypoints |
-| `Firmware/` | Hardware-side firmware assets for robot/peripheral integration |
+| `Firmware/` | Live Pi-synced hardware scripts, face assets, and deployment notes for face / servo / LED control |
 | `tests/` | Smoke tests, route checks, and regression helpers |
 | `native/` | Native audio processing helpers |
 
@@ -431,9 +435,9 @@ See full deployment notes in [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WIND
 | Topic | Direction | Purpose |
 |---|---|---|
 | `robot/intent` | publish | Launch/exit game intents |
-| `robot/pi/face/cmd` | publish | Face expression commands |
-| `robot/pi/servo/cmd` | publish | Servo/flower commands |
-| `robot/pi/led/cmd` | publish | LED commands |
+| `robot/pi/face/cmd` | publish | Face expression commands handled by the Pi display renderer (`Firmware/faceScript.py`) |
+| `robot/pi/servo/cmd` | publish | Servo/flower commands handled by the Pi hardware agent (`Firmware/face_agent.py` -> `servoScript.py`) |
+| `robot/pi/led/cmd` | publish | LED commands handled by the Pi hardware agent (`Firmware/face_agent.py` -> `ledScript.py`) |
 | `robot/dialog/query` | publish/subscribe | Dialog query path |
 | `robot/dialog/answer` | publish/subscribe | Dialog answer path |
 | `robot/tts/options` | publish/subscribe | TTS voice/model/speaker options |
@@ -447,6 +451,32 @@ Telemetry quick check (mock data enabled by default):
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8101/metrics/user/demo_user/weekly?days=14
 ```
+
+## Raspberry Pi Hardware Runtime
+
+`Firmware/` now mirrors the scripts currently running on the Raspberry Pi, replacing older duplicate LCD-side copies with the live versions synced from `/home/RACHEL/RACHEL`.
+Start there when you need to verify hardware behavior, re-deploy the Pi, or understand how desktop MQTT commands map onto the robot peripherals.
+
+Current runtime split:
+
+- `Firmware/faceScript.py`
+  Persistent face renderer for the Pi display. It subscribes to `robot/pi/face/cmd` and swaps PNG expressions from `Firmware/LCD Output/facialExpressions/`.
+- `Firmware/face_agent.py`
+  Unified Pi MQTT agent for hardware control. It subscribes to `robot/pi/servo/cmd` and `robot/pi/led/cmd`, then launches `servoScript.py` / `ledScript.py` locally.
+- `Firmware/servoScript.py`
+  GPIO servo/flower controller with `open`, `close`, `center`, hold, slow-move, and stop behaviors, plus a persisted last-angle state for smoother repeated commands.
+- `Firmware/ledScript.py`
+  NeoPixel SPI controller with solid, off, and breathe modes.
+
+Live Pi service model:
+
+- `face-neutral.service` keeps the display renderer running through `faceScript.py`.
+- `face-agent.service` handles servo and LED dispatch through `face_agent.py`.
+
+Deployment note:
+
+- The checked-in Pi env sample is `Firmware/face_agent.env`. It currently points at broker host `10.0.0.1` on port `1884`, while the default local dev launcher in this repo uses `1883`. Align the Pi env/systemd settings with your actual broker topology before deployment.
+- See [`Firmware/README.md`](Firmware/README.md) for the synced source summary and current file inventory.
 
 ## Python SDK
 
@@ -917,6 +947,7 @@ For Windows packaging, Piper remains the default turnkey option.
 - MQTT commands not received:
   - Verify broker host/port and credentials.
   - Confirm topic names match your robot-side subscribers.
+  - If the Pi is idle but the desktop runtime is publishing, check whether the Pi-side env/systemd is still targeting `10.0.0.1:1884` while your local launcher is using `1883`.
 - `/api/speak` fails:
   - Ensure the desktop runtime is listening on `8787`.
   - If `VOICE_AGENT_TTS_BACKEND=kokoro`, confirm `http://127.0.0.1:5007/healthz` responds and the TTS venv has the `kokoro` dependency installed.
