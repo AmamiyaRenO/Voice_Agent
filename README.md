@@ -13,7 +13,7 @@ The repository also includes:
 | If you want to... | Start here | What you get |
 |---|---|---|
 | Run the full voice loop with the least setup | `.\helper.bat` -> `http://127.0.0.1:8787` | The maintained path: browser panel, runtime switching, memory tools, game manifest tools, camera, and logs |
-| Control the agent from Python without opening Unity | [`python_sdk/README.md`](python_sdk/README.md) | SDK access to speech, face, LED, servo, game intents, and prompt control |
+| Control the agent from Python without opening Unity | [`python_sdk/README.md`](python_sdk/README.md) | SDK access to speech, face, LED, flower, game intents, and prompt/model control |
 | Keep Unity in the loop for avatar/gameplay/camera UI | Start services first, then open the Unity project | Unity acts as an optional shell around the desktop runtime and MQTT actions |
 | Work on Raspberry Pi display / LED / servo control | [`Firmware/README.md`](Firmware/README.md) | Live Pi-synced scripts, MQTT topics, and current hardware runtime notes |
 | Package the stack for Windows deployment | [`scripts/packaging/`](scripts/packaging/) and [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WINDOWS.md) | Service executables, installer assets, and a near one-click runtime |
@@ -25,7 +25,6 @@ The repository also includes:
 | Desktop runtime / browser panel | `8787` | Main operator surface for runtime config, memory, games, SDK visualizer, and camera tools |
 | Python voice service | `8000` | Conversation, ASR, and response APIs |
 | Piper HTTP wrapper | `5005` | Main low-latency local TTS path |
-| Qwen TTS wrapper | `5006` | Optional alternate TTS backend |
 | Kokoro TTS wrapper | `5007` | Optional neural TTS backend for source/developer runs |
 | Telemetry service | `8101` | Exercise/usage metrics aggregation |
 | MQTT broker | `1883` | Robot, dialog, intent, and telemetry messaging |
@@ -42,7 +41,7 @@ The repository also includes:
 - Contextual command carryover works for phrases such as `Open it.` after a recommendation or grounded explanation.
 - Confirmed doc follow-ups such as `his lab`, `the research`, `they`, `it`, and `Yes.` now resume the prior grounded doc target instead of falling back to memory or vision.
 - Piper runs as a persistent worker instead of a per-request process, which reduces TTS startup cost.
-- Kokoro TTS is now available as a third compatible backend on `:5007`, alongside Piper and Qwen.
+- Kokoro TTS is now available as the alternate compatible backend on `:5007`, alongside Piper.
 - Raspberry Pi hardware scripts were re-synced from the live device into `Firmware/`, replacing stale local LCD copies with the current face / servo / LED runtime sources and notes.
 - Pi-side servo handling now uses the synced `servoScript.py`, which preserves last-angle state and supports hold / slow / center motions for more predictable flower control.
 - The source launcher now auto-bootstraps/detects `.venv_asr` and `.venv_tts`, validates the local doc-rag embedder before startup, clears stale repo-owned service trees, and reuses an existing MQTT broker on `1883`.
@@ -54,7 +53,7 @@ If your goal is to control the robot/agent from Python (without editing Unity sc
 
 - **SDK guide:** [`python_sdk/README.md`](python_sdk/README.md)
 
-This SDK mirrors the desktop runtime API surface (and remains compatible with the legacy Unity control flows) for TTS, face/LED/servo commands, game intents, and runtime LLM prompt control.
+This SDK mirrors the desktop runtime API surface (and remains compatible with the legacy Unity control flows) for TTS, face/LED/flower commands, game intents, runtime prompt control, and runtime model switching.
 It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for interactive API testing and flow prototyping.
 
 ## Table of Contents
@@ -75,7 +74,7 @@ It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for 
 - [Intent Service (Routing + Manifest)](#intent-service-routing--manifest)
 - [Dialog Service (Speaker Identity + Persistent Memory)](#dialog-service-speaker-identity--persistent-memory)
 - [Runtime Config: Save vs Apply](#runtime-config-save-vs-apply)
-- [TTS Backends (Piper, Qwen, and Kokoro)](#tts-backends-piper-qwen-and-kokoro)
+- [TTS Backends (Piper and Kokoro)](#tts-backends-piper-and-kokoro)
 - [Troubleshooting](#troubleshooting)
 - [Development and Tests](#development-and-tests)
 - [License](#license)
@@ -133,7 +132,7 @@ sequenceDiagram
 | Path | Purpose |
 |---|---|
 | `Assets/` | Unity scenes, scripts, prefabs, browser panel assets, and optional shell integration |
-| `python_voice_service/` | FastAPI services for conversation, ASR, desktop runtime, Piper/Qwen/Kokoro wrappers, grounding, speaker ID, and streaming audio tools |
+| `python_voice_service/` | FastAPI services for conversation, ASR, desktop runtime, Piper/Kokoro wrappers, grounding, speaker ID, and streaming audio tools |
 | `python_sdk/` | Python client SDK for robot controls and runtime APIs |
 | `scripts/` | Local launcher plus helper services (`intent_service`, `dialog_service`, `telemetry_service`, `game_launcher`, packaging) |
 | `runtime/` | Runtime outputs and assets such as eval results, captions, local models, and packaged-service payloads |
@@ -162,7 +161,7 @@ sequenceDiagram
 - Optional vision-assisted replies through the desktop runtime camera describe endpoint.
 - Telemetry aggregation service for elder-exercise metrics (supports mock seeding).
 - Browser control panel over HTTP (default port `8787`) with runtime switching, memory/QMD tools, games, camera, and logs.
-- Pluggable TTS backend on stable endpoint (`/speak`) with persistent Piper worker plus optional Qwen and Kokoro wrappers.
+- Pluggable TTS backend on stable endpoint (`/speak`) with persistent Piper worker plus optional Kokoro wrapper.
 - Python SDK parity with Unity panel actions.
 - SDK Visualizer (`/sdk`) with step-by-step flow building, execution, and JSON import/export.
 - Local multi-process launcher (`scripts/start_local_services.py`).
@@ -210,7 +209,7 @@ Place `.md`, `.qmd`, and `.txt` corpora there when you want them to participate 
 
 1. Install SDK dependencies from `python_sdk/requirements.txt`.
 2. Import `voice_agent_sdk` from `python_sdk/`.
-3. Connect to broker and call SDK methods (TTS, face, LED, servo, intents).
+3. Call the desktop runtime HTTP API through the SDK methods (TTS, face, LED, flower, ASR, vision, and intents).
 4. See [`python_sdk/README.md`](python_sdk/README.md).
 
 ## Environment Requirements
@@ -225,7 +224,6 @@ Optional dependencies:
 - Faster-Whisper model files (for Python ASR route)
 - Ollama runtime (for `/respond` endpoint)
 - Piper executable + ONNX model (for Piper TTS wrapper)
-- Qwen TTS environment (separate venv recommended)
 - Kokoro TTS Python environment (`python_voice_service/.venv_tts`, auto-bootstrapped when possible)
 
 ## Detailed Setup
@@ -259,7 +257,7 @@ Important:
 - By default, the launcher auto-starts a local MQTT broker (Mosquitto) if available.
 - `--hub-cmd` is optional and only needed when you want to override broker startup.
 - Use `--no-hub` if you already have an external broker running.
-- By default, the script starts voice service + Piper HTTP + Qwen HTTP + Kokoro HTTP + intent service + dialog service + telemetry service + game launcher.
+- By default, the script starts voice service + Piper HTTP + Kokoro HTTP + intent service + dialog service + telemetry service + game launcher.
 - Startup now validates the local doc-rag embedder before bringing the stack up. If the ONNX embedder is unavailable, startup fails fast instead of silently dropping to a partial general-doc mode.
 - Before starting fresh services, the launcher clears stale repo-owned service process trees so `:8000` and `:8787` are not left on old Python worker chains.
 - Launcher config files:
@@ -362,12 +360,6 @@ If you want a near one-click deployment for non-programmers:
 powershell -ExecutionPolicy Bypass -File scripts\packaging\build_services_exe.ps1
 ```
 
-Optional (include Qwen TTS executable):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\packaging\build_services_exe.ps1 -IncludeQwen
-```
-
 The default packaged service set now includes:
 - `voice_service.exe`
 - `piper_http.exe`
@@ -426,7 +418,6 @@ See full deployment notes in [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WIND
 | Desktop Runtime / Panel | `8787` | `/`, `/games`, `/runtime`, `/memory`, `/setup`, `/sdk`, `/api/speak`, `/api/kokoro/options`, `/api/kokoro/speak`, `/api/llm/prompt`, `/api/vision/describe`, `/api/face`, `/api/flower`, `/api/led`, `/api/game`, `/api/game/manifest`, `/api/memory`, `/api/speaker-profiles`, `/api/qmd`, `/api/runtime/config`, `/api/runtime/prereq`, `/api/runtime/ollama`, `/api/asr`, `/api/logs/stream` |
 | Python Voice Service | `8000` | `/healthz`, `/conversation/config`, `/conversation/turn/stream`, `/transcribe`, `/transcribe/config`, `/respond`, `/respond/config`, `/respond/metrics` |
 | Piper wrapper | `5005` | `/speak` (GET), `/speak_stream` (GET) |
-| Qwen wrapper | `5006` | `/speak` (GET), `/metrics` |
 | Kokoro wrapper | `5007` | `/healthz`, `/speak` (GET) |
 | Telemetry service | `8101` | `/healthz`, `/users`, `/dashboard`, `/metrics/user/{user_id}/weekly`, `/admin/seed-fake`, `/ingest` |
 
@@ -519,13 +510,15 @@ from voice_agent_sdk import VoiceAgentClient
 
 client = VoiceAgentClient(host="10.0.0.1")
 
-# Audible TTS via Unity panel API
-client.speak("Hello Rachel", voice="en_US", speed=1.0, volume=1.0)
+# Audible TTS via desktop runtime API
+client.speak("Hello Rachel", voice="en_US", backend="piper", speed=1.0, volume=1.0)
+client.set_tts_backend("kokoro")
+client.set_kokoro_voice("af_heart")
 
-# MQTT controls
-client.face_happy(duration=3)
+# Runtime controls
+client.face_happy(seconds=3)
 client.led_breathe(color="#00BFFF", brightness=0.8, period=2.5)
-client.servo_open_hold()
+client.flower_open()
 
 # Intents
 client.launch_game("cornhole")
@@ -543,22 +536,37 @@ vision = client.describe_current_camera("Describe what you see in the current ca
 ### Key method groups
 
 - Speech:
-  - `speak(...)` -> Unity panel `/api/speak` (audible)
-  - `synthesize_wav(...)` -> TTS wrapper `/speak` (WAV bytes)
-- LLM prompt:
+  - `get_logs()`
+  - `get_tts_options()`
+  - `get_kokoro_options()`
+  - `speak(...)`
+  - `set_voice(...)`
+  - `set_tts_model(...)`
+  - `set_tts_backend(...)`
+  - `set_kokoro_voice(...)`
+  - `kokoro_speak(...)`
+- Runtime prompt/model:
   - `get_llm_prompt()`
   - `set_llm_prompt(prompt)`
   - `reset_llm_prompt()`
+  - `get_runtime_config()`
+  - `set_local_model(model)`
+- ASR:
+  - `get_asr_status()`
+  - `set_asr_mode(mode)`
+  - `set_backend_asr_mode(mode)`
+  - `start_listening()`
+  - `pause_listening()`
 - Vision:
   - `describe_current_camera(prompt, model=None)`
 - Face:
-  - `face_happy()`, `face_neutral()`, `face_sad()`, `face_very_sad()`, `face_excited()`, `face_idle()`, `face_custom(...)`
-- Servo:
-  - `servo_open()`, `servo_close()`, `servo_open_hold()`, `servo_close_hold()`, `servo_center_hold()`, `servo_stop()`, `servo_open_slow()`, `servo_close_slow()`
+  - `face_preset(...)`, `face_custom(...)`, `face_happy()`, `face_neutral()`, `face_sad()`, `face_very_sad()`, `face_excited()`
 - LED:
   - `led_breathe()`, `led_solid()`, `led_random()`, `led_off()`
-- Intents/options:
-  - `launch_game(...)`, `exit_game()`, `set_tts_options(...)`, `set_dialog_style(...)`
+- Flower:
+  - `flower_open()`, `flower_close()`, `flower_stop()`, `flower_open_slow()`, `flower_close_slow()`
+- Game:
+  - `launch_game(...)`, `exit_game()`
 
 ## SDK Visualizer
 
@@ -589,21 +597,26 @@ This page calls the same `/api/*` routes used by `python_sdk/voice_agent_sdk/cli
 
 ### Built-in method templates
 
-Current built-ins in the visualizer method list:
+Current built-ins are generated from `Assets/StreamingAssets/panel/sdk-manifest.json`, which is also the parity source for `VoiceAgentClient`.
 
-- `speak(text,voice,model,speed,volume)` -> `/api/speak`
-- `qwen_speak(text,speaker,instruct)` -> `/api/qwen/speak`
-- `set_tts_options(voice,model)` -> `/api/voice`
-- `set_tts_model(model)` -> `/api/voice`
-- `get_llm_prompt()` -> `/api/llm/prompt` (GET)
-- `set_llm_prompt(prompt)` -> `/api/llm/prompt`
-- `reset_llm_prompt()` -> `/api/llm/prompt`
-- `describe_camera(prompt,model)` -> `/api/vision/describe`
-- `launch_game(name)` -> `/api/game`
-- `exit_game()` -> `/api/game`
-- `face_preset(mode,seconds)` -> `/api/face`
-- `flower_open()` -> `/api/flower`
-- `led_breathe(color,brightness,period,duration)` -> `/api/led`
+Representative built-ins in the visualizer method list:
+
+- `get_logs()` -> `/api/logs`
+- `get_tts_options()` -> `/api/voice/options`
+- `get_kokoro_options()` -> `/api/kokoro/options`
+- `speak(text, voice, model, backend, speed, volume)` -> `/api/speak`
+- `set_tts_backend(backend)` -> `/api/voice`
+- `set_kokoro_voice(voice)` -> `/api/voice`
+- `kokoro_speak(text, voice, speed)` -> `/api/kokoro/speak`
+- `get_llm_prompt()` / `set_llm_prompt(prompt)` / `reset_llm_prompt()` -> `/api/llm/prompt`
+- `get_runtime_config()` / `set_local_model(model)` -> `/api/runtime/config`
+- `get_asr_status()` / `set_asr_mode(mode)` / `set_backend_asr_mode(mode)` -> `/api/asr`, `/api/asr/backend`
+- `start_listening()` / `pause_listening()` -> `/api/listening`
+- `describe_current_camera(prompt, model)` -> `/api/vision/describe`
+- `launch_game(name)` / `exit_game()` -> `/api/game`
+- `face_preset(mode, seconds)` / `face_custom(image, seconds)` -> `/api/face`
+- `led_breathe(...)`, `led_solid(...)`, `led_random()`, `led_off()` -> `/api/led`
+- `flower_open()`, `flower_close()`, `flower_stop()`, `flower_open_slow()`, `flower_close_slow()` -> `/api/flower`
 
 ### Flow node types and fields
 
@@ -898,30 +911,27 @@ Not every panel save is instant for all services. Use the table below:
 | Switch ASR mode | `POST /api/asr` (`set_mode`) | immediate (calls voice service runtime config API) |
 | Set/reset respond system prompt | `POST /respond/config` or panel `/api/llm/prompt` | immediate |
 
-## TTS Backends (Piper, Qwen, and Kokoro)
+## TTS Backends (Piper and Kokoro)
 
-All three wrappers expose compatible `/speak` routes:
+Both wrappers expose compatible `/speak` routes:
 - Piper wrapper: `python_voice_service/piper_http.py`
-- Qwen wrapper: `python_voice_service/qwen_tts_http.py`
 - Kokoro wrapper: `python_voice_service/kokoro_tts_http.py`
 
 Typical defaults:
 - Piper on `5005`
-- Qwen on `5006`
 - Kokoro on `5007`
 
-The desktop runtime stable endpoint (`/api/speak`) can target `piper`, `qwen`, or `kokoro`, controlled by runtime config / panel settings and `VOICE_AGENT_TTS_BACKEND`.
+The desktop runtime stable endpoint (`/api/speak`) can target `piper` or `kokoro`, controlled by runtime config / panel settings and `VOICE_AGENT_TTS_BACKEND`.
 
 Override commands explicitly with launcher arguments:
 
 ```powershell
 python scripts/start_local_services.py `
   --piper-http-cmd "uvicorn piper_http:app --host 0.0.0.0 --port 5005" `
-  --qwen-http-cmd "uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5006" `
   --kokoro-http-cmd "uvicorn kokoro_tts_http:app --host 0.0.0.0 --port 5007"
 ```
 
-If you use Qwen or Kokoro TTS alongside Faster-Whisper, keep separate virtual environments to avoid dependency conflicts.
+If you use Kokoro TTS alongside Faster-Whisper, keeping a separate `.venv_tts` remains the simplest source setup.
 For Windows packaging, Piper remains the default turnkey option.
 
 ## Troubleshooting

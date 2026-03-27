@@ -77,6 +77,14 @@ def _service_specs() -> Dict[str, ServiceSpec]:
             required_modules=["uvicorn", "fastapi"],
         ),
         ServiceSpec(
+            name="kokoro_tts_http",
+            entry=SCRIPTS_DIR / "packaging" / "entrypoints" / "kokoro_tts_http_entry.py",
+            python_paths=[VOICE_DIR],
+            hidden_imports=_uvicorn_hidden_imports(),
+            collect_all=["kokoro"],
+            required_modules=["uvicorn", "fastapi", "numpy", "kokoro"],
+        ),
+        ServiceSpec(
             name="desktop_runtime",
             entry=SCRIPTS_DIR / "packaging" / "entrypoints" / "desktop_runtime_entry.py",
             python_paths=[VOICE_DIR, SCRIPTS_DIR / "dialog_service"],
@@ -89,15 +97,6 @@ def _service_specs() -> Dict[str, ServiceSpec]:
                 (REPO_ROOT / "runtime" / "live_captions", "runtime/live_captions"),
             ],
             required_modules=["uvicorn", "fastapi", "httpx", "numpy"],
-        ),
-        ServiceSpec(
-            name="qwen_tts_http",
-            entry=SCRIPTS_DIR / "packaging" / "entrypoints" / "qwen_tts_http_entry.py",
-            python_paths=[VOICE_DIR],
-            hidden_imports=_uvicorn_hidden_imports(),
-            collect_all=["qwen_tts", "torch", "torchaudio", "transformers"],
-            enabled_by_default=False,
-            required_modules=["uvicorn", "fastapi", "numpy", "qwen_tts"],
         ),
         ServiceSpec(
             name="intent_service",
@@ -153,19 +152,17 @@ def _service_specs() -> Dict[str, ServiceSpec]:
     return {spec.name: spec for spec in specs}
 
 
-def _default_service_names(specs: Dict[str, ServiceSpec], include_qwen: bool) -> List[str]:
+def _default_service_names(specs: Dict[str, ServiceSpec]) -> List[str]:
     names: List[str] = []
     for name, spec in specs.items():
         if spec.enabled_by_default:
             names.append(name)
-    if include_qwen and "qwen_tts_http" not in names:
-        names.append("qwen_tts_http")
     return names
 
 
-def _parse_services(raw: str, specs: Dict[str, ServiceSpec], include_qwen: bool) -> List[ServiceSpec]:
+def _parse_services(raw: str, specs: Dict[str, ServiceSpec]) -> List[ServiceSpec]:
     if raw.strip().lower() == "default":
-        names = _default_service_names(specs, include_qwen)
+        names = _default_service_names(specs)
     else:
         names = [part.strip() for part in raw.split(",") if part.strip()]
 
@@ -262,7 +259,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--services", default="default", help="Comma-separated service names, or 'default'.")
-    parser.add_argument("--include-qwen", action="store_true", help="Include qwen_tts_http in default selection.")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -293,7 +289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
-        selected = _parse_services(args.services, specs, include_qwen=args.include_qwen)
+        selected = _parse_services(args.services, specs)
     except ValueError as exc:
         parser.error(str(exc))
         return 2

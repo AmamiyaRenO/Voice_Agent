@@ -120,6 +120,60 @@ namespace RobotVoice
             }
         }
 
+        private async Task HandleAsrBackendAsync(HttpListenerContext context)
+        {
+            var method = (context.Request.HttpMethod ?? string.Empty).Trim().ToUpperInvariant();
+            if (method == "GET")
+            {
+                await WriteBackendAsrStatusAsync(context.Response, string.Empty).ConfigureAwait(false);
+                return;
+            }
+
+            if (method != "POST")
+            {
+                context.Response.StatusCode = 405;
+                context.Response.Headers["Allow"] = "GET,POST,OPTIONS";
+                await WriteJsonAsync(context.Response, 405, "error", "method not allowed").ConfigureAwait(false);
+                return;
+            }
+
+            var request = ParseJsonBody<AsrRequest>(context.Request);
+            var action = (request.action ?? string.Empty).Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(action) || action == "status")
+            {
+                await WriteBackendAsrStatusAsync(context.Response, string.Empty).ConfigureAwait(false);
+                return;
+            }
+
+            if (action == "set_mode" || action == "mode")
+            {
+                var modeRaw = string.IsNullOrWhiteSpace(request.mode) ? request.value : request.mode;
+                var normalizedMode = NormalizeAsrMode(modeRaw);
+                if (string.IsNullOrWhiteSpace(normalizedMode))
+                {
+                    await WriteJsonAsync(
+                        context.Response,
+                        400,
+                        "error",
+                        "mode must be whisper-large-v3, moonshine-small, moonshine-medium, or api"
+                    ).ConfigureAwait(false);
+                    return;
+                }
+
+                var setResult = await SetAsrModeAsync(normalizedMode).ConfigureAwait(false);
+                if (!setResult.Success)
+                {
+                    await WriteJsonAsync(context.Response, setResult.StatusCode, "error", setResult.Error).ConfigureAwait(false);
+                    return;
+                }
+
+                await WriteBackendAsrStatusAsync(context.Response, $"backend asr mode set to {normalizedMode}").ConfigureAwait(false);
+                return;
+            }
+
+            await WriteJsonAsync(context.Response, 400, "error", "unknown backend asr action").ConfigureAwait(false);
+        }
+
         private async Task WriteAsrStatusAsync(HttpListenerResponse response, string message)
         {
             var config = await LoadAsrConfigAsync().ConfigureAwait(false);
@@ -158,6 +212,46 @@ namespace RobotVoice
                 payload.Append('\"').Append(EscapeJson(modes[i] ?? string.Empty)).Append('\"');
             }
 
+            payload.Append("]}");
+            await WriteRawJsonAsync(response, 200, payload.ToString()).ConfigureAwait(false);
+        }
+
+        private async Task WriteBackendAsrStatusAsync(HttpListenerResponse response, string message)
+        {
+            var config = await LoadAsrConfigAsync().ConfigureAwait(false);
+            if (!config.Success)
+            {
+                await WriteJsonAsync(response, config.StatusCode, "error", config.Error).ConfigureAwait(false);
+                return;
+            }
+
+            var modes = config.Config.available_modes;
+            if (modes == null || modes.Length == 0)
+            {
+                modes = new[] { "whisper-large-v3", "moonshine-small", "moonshine-medium", "api" };
+            }
+
+            var payload = new StringBuilder(192);
+            payload.Append("{\"status\":\"ok\"");
+            if (!string.IsNullOrWhiteSpace(message))
+            {
+                payload.Append(",\"message\":\"").Append(EscapeJson(message)).Append('\"');
+            }
+            payload.Append(",\"mode\":\"")
+                .Append(EscapeJson(config.Config.mode))
+                .Append("\",\"openai_configured\":")
+                .Append(config.Config.openai_configured ? "true" : "false")
+                .Append(",\"openai_model\":\"")
+                .Append(EscapeJson(config.Config.openai_model ?? string.Empty))
+                .Append("\",\"available_modes\":[");
+            for (var i = 0; i < modes.Length; i++)
+            {
+                if (i > 0)
+                {
+                    payload.Append(',');
+                }
+                payload.Append('\"').Append(EscapeJson(modes[i] ?? string.Empty)).Append('\"');
+            }
             payload.Append("]}");
             await WriteRawJsonAsync(response, 200, payload.ToString()).ConfigureAwait(false);
         }
@@ -563,7 +657,12 @@ namespace RobotVoice
                 }
                 builder.Append('\"').Append(EscapeJson(models[i])).Append('\"');
             }
-            builder.Append("],\"modelCurrent\":\"").Append(EscapeJson(activeTtsModel ?? DetermineInitialTtsModel())).Append("\"}");
+            builder.Append("],\"modelCurrent\":\"").Append(EscapeJson(activeTtsModel ?? DetermineInitialTtsModel()))
+                .Append("\",\"backends\":[\"piper\",\"kokoro\"],\"backendCurrent\":\"")
+                .Append(EscapeJson(string.IsNullOrWhiteSpace(activeTtsBackend) ? "piper" : activeTtsBackend))
+                .Append("\",\"kokoroVoiceCurrent\":\"")
+                .Append(EscapeJson(activeKokoroVoice ?? DetermineInitialKokoroVoice()))
+                .Append("\"}");
             var payload = Encoding.UTF8.GetBytes(builder.ToString());
             context.Response.StatusCode = 200;
             context.Response.ContentType = "application/json";
@@ -572,18 +671,18 @@ namespace RobotVoice
             context.Response.Close();
         }
 
-        private async Task HandleQwenOptionsAsync(HttpListenerContext context)
+        private async Task HandleKokoroOptionsAsync(HttpListenerContext context)
         {
-            var list = EnumerateQwenSpeakers().ToArray();
-            var current = string.IsNullOrWhiteSpace(activeQwenSpeaker) ? DetermineInitialQwenSpeaker() : activeQwenSpeaker;
+            var list = EnumerateKokoroVoices().ToArray();
+            var current = string.IsNullOrWhiteSpace(activeKokoroVoice) ? DetermineInitialKokoroVoice() : activeKokoroVoice;
             var sb = new StringBuilder(256);
-            sb.Append("{\"speakers\":[");
+            sb.Append("{\"voices\":[");
             for (int i = 0; i < list.Length; i++)
             {
                 if (i > 0) sb.Append(',');
                 sb.Append('\"').Append(EscapeJson(list[i])).Append('\"');
             }
-            sb.Append("],\"current\":\"").Append(EscapeJson(current)).Append("\"}");
+            sb.Append("],\"current\":\"").Append(EscapeJson(current)).Append("\",\"langCode\":\"a\"}");
             var payload = Encoding.UTF8.GetBytes(sb.ToString());
             context.Response.StatusCode = 200;
             context.Response.ContentType = "application/json";
@@ -708,39 +807,55 @@ namespace RobotVoice
             }
         }
 
-        private string DetermineInitialQwenSpeaker()
+        private string DetermineInitialKokoroVoice()
         {
-            if (!string.IsNullOrWhiteSpace(defaultQwenSpeaker))
+            if (!string.IsNullOrWhiteSpace(defaultKokoroVoice))
             {
-                return defaultQwenSpeaker.Trim();
+                return defaultKokoroVoice.Trim();
             }
-            var candidate = qwenSpeakers?.FirstOrDefault(s => !string.IsNullOrWhiteSpace(s));
-            return string.IsNullOrWhiteSpace(candidate) ? "Ryan" : candidate.Trim();
+            var envVoice = Environment.GetEnvironmentVariable("KOKORO_TTS_VOICE");
+            if (!string.IsNullOrWhiteSpace(envVoice))
+            {
+                return envVoice.Trim();
+            }
+            var candidate = availableKokoroVoices?.FirstOrDefault(s => !string.IsNullOrWhiteSpace(s));
+            return string.IsNullOrWhiteSpace(candidate) ? "af_heart" : candidate.Trim();
         }
 
-        private IEnumerable<string> EnumerateQwenSpeakers()
+        private IEnumerable<string> EnumerateKokoroVoices()
         {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (!string.IsNullOrWhiteSpace(defaultQwenSpeaker))
+            if (!string.IsNullOrWhiteSpace(defaultKokoroVoice))
             {
-                var trimmed = defaultQwenSpeaker.Trim();
+                var trimmed = defaultKokoroVoice.Trim();
                 if (seen.Add(trimmed))
                 {
                     yield return trimmed;
                 }
             }
-            if (qwenSpeakers != null)
+            var envList = Environment.GetEnvironmentVariable("KOKORO_TTS_VOICES");
+            if (!string.IsNullOrWhiteSpace(envList))
             {
-                foreach (var s in qwenSpeakers)
+                var parts = envList.Split(new[] { ',', ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var part in parts)
                 {
-                    var trimmed = (s ?? string.Empty).Trim();
+                    var trimmed = (part ?? string.Empty).Trim();
+                    if (string.IsNullOrWhiteSpace(trimmed)) continue;
+                    if (seen.Add(trimmed)) yield return trimmed;
+                }
+            }
+            if (availableKokoroVoices != null)
+            {
+                foreach (var voice in availableKokoroVoices)
+                {
+                    var trimmed = (voice ?? string.Empty).Trim();
                     if (string.IsNullOrWhiteSpace(trimmed)) continue;
                     if (seen.Add(trimmed)) yield return trimmed;
                 }
             }
             if (seen.Count == 0)
             {
-                yield return "Ryan";
+                yield return "af_heart";
             }
         }
 
@@ -944,6 +1059,11 @@ namespace RobotVoice
             response.Close();
         }
 
+        private static async Task RespondWithSdkManifestAsync(HttpListenerResponse response)
+        {
+            await RespondWithPanelAssetAsync(response, "sdk-manifest.json", "application/json; charset=utf-8").ConfigureAwait(false);
+        }
+
         private static async Task RespondWithMemoryHtmlAsync(HttpListenerResponse response)
         {
             var html = BuildMemoryHtml();
@@ -1009,6 +1129,24 @@ namespace RobotVoice
         private static string BuildSdkPanelHtml()
         {
             return LoadPanelTemplateOrFallback("sdk.html");
+        }
+
+        private static async Task RespondWithPanelAssetAsync(HttpListenerResponse response, string fileName, string contentType)
+        {
+            var content = LoadPanelTemplate(fileName);
+            if (string.IsNullOrEmpty(content))
+            {
+                response.StatusCode = 404;
+                response.Close();
+                return;
+            }
+
+            var buffer = Encoding.UTF8.GetBytes(content);
+            response.StatusCode = 200;
+            response.ContentType = contentType;
+            response.ContentLength64 = buffer.Length;
+            await response.OutputStream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            response.Close();
         }
 
         private static string LoadPanelTemplateOrFallback(string fileName)

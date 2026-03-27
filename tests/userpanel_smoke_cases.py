@@ -29,6 +29,8 @@ USERPANEL_SMOKE_CASES: Dict[str, List[PanelOp]] = {
     "/setup.html": [PanelOp(method="GET", expected_statuses=(200,))],
     "/sdk": [PanelOp(method="GET", expected_statuses=(200,))],
     "/sdk.html": [PanelOp(method="GET", expected_statuses=(200,))],
+    "/sdk-manifest": [PanelOp(method="GET", expected_statuses=(200,))],
+    "/sdk-manifest.json": [PanelOp(method="GET", expected_statuses=(200,))],
     "/telemetry": [PanelOp(method="GET", expected_statuses=(200,))],
     "/telemetry.html": [PanelOp(method="GET", expected_statuses=(200,))],
     "/camera.mjpg": [PanelOp(method="GET", timeout_sec=2.5, expected_statuses=(200, 503, 0))],
@@ -46,10 +48,10 @@ USERPANEL_SMOKE_CASES: Dict[str, List[PanelOp]] = {
     "/api/led": [PanelOp(method="POST", body_json={"mode": "invalid"})],
     "/api/voice": [PanelOp(method="POST", body_json={"action": "invalid"})],
     "/api/voice/options": [PanelOp(method="GET", expected_statuses=(200,))],
-    "/api/qwen/options": [PanelOp(method="GET", expected_statuses=(200,))],
+    "/api/kokoro/options": [PanelOp(method="GET", expected_statuses=(200,))],
     "/api/logs": [PanelOp(method="GET", expected_statuses=(200,))],
     "/api/speak": [PanelOp(method="POST", body_json={"text": ""}, expected_statuses=(400, 503))],
-    "/api/qwen/speak": [PanelOp(method="POST", body_json={"text": ""}, expected_statuses=(400, 503))],
+    "/api/kokoro/speak": [PanelOp(method="POST", body_json={"text": ""}, expected_statuses=(400, 503))],
     "/api/llm/prompt": [
         PanelOp(method="GET"),
         PanelOp(method="POST", body_json={"prompt": ""}, expected_statuses=(400, 502, 503)),
@@ -73,6 +75,10 @@ USERPANEL_SMOKE_CASES: Dict[str, List[PanelOp]] = {
         PanelOp(method="POST", body_json={"action": "invalid"}, expected_statuses=(400, 500)),
     ],
     "/api/asr": [
+        PanelOp(method="GET"),
+        PanelOp(method="POST", body_json={"action": "invalid"}, expected_statuses=(400, 502, 503)),
+    ],
+    "/api/asr/backend": [
         PanelOp(method="GET"),
         PanelOp(method="POST", body_json={"action": "invalid"}, expected_statuses=(400, 502, 503)),
     ],

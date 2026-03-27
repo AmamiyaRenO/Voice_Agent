@@ -1983,7 +1983,6 @@ MonoBehaviour:
   wakeListeningProgressImage: {fileID: 0}
   wakeListeningCountdownText: {fileID: 0}
   piperSpeakUrl: http://127.0.0.1:5005/speak
-  qwenSpeakUrl: http://127.0.0.1:5006/speak
   enableTrueStreamingTts: 1
   piperSpeakStreamUrl: http://127.0.0.1:5005/speak_stream
   ttsStreamSampleRate: 22050
@@ -1991,16 +1990,12 @@ MonoBehaviour:
   ttsStreamRingBufferSeconds: 20
   fixedDialogTtsSpeaker: Ryan
   fixedDialogTtsInstruct: friendly
-  forcePiperForDialogAnswers: 1
   wakeAcknowledgeUserText: 
   muteMicDuringTtsWhenAecInactive: 1
   enableTtsPseudoStreaming: 1
   ttsStreamSplitMinChars: 180
   ttsStreamChunkMaxChars: 220
   ttsStreamPrefetchNext: 1
-  qwenFirstChunkMaxChars: 70
-  qwenChunkMaxChars: 90
-  qwenTtsRequestTimeoutSeconds: 120
   autoEnableMqttPublishing: 1
   voiceTextTopic: robot/voice/text
   firstCommandListenSeconds: 3
@@ -2079,18 +2074,6 @@ MonoBehaviour:
   - zh_CN
   - en_US
   - es_ES
-  defaultQwenSpeaker: Ryan
-  fixedQwenInstruct: friendly
-  qwenSpeakers:
-  - Ryan
-  - Aiden
-  - Vivian
-  - Serena
-  - Uncle_Fu
-  - Dylan
-  - Eric
-  - Ono_Anna
-  - Sohee
   defaultTtsModel: piper-zh
   availableTtsModels:
   - piper-zh

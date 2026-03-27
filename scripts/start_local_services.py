@@ -46,8 +46,6 @@ class LauncherDefaults:
     default_voice_dir: str
     default_piper_http_cmd: str
     default_piper_http_dir: str
-    default_qwen_http_cmd: str
-    default_qwen_http_dir: str
     default_kokoro_http_cmd: str
     default_kokoro_http_dir: str
     default_desktop_runtime_cmd: str
@@ -68,7 +66,6 @@ class CommandSet:
     voice: List[str]
     orchestrator: Optional[List[str]]
     piper_http: Optional[List[str]]
-    qwen_http: Optional[List[str]]
     kokoro_http: Optional[List[str]]
     desktop_runtime: Optional[List[str]]
     intent: Optional[List[str]]
@@ -83,7 +80,6 @@ class DirectorySet:
     voice: Path
     orchestrator: Path
     piper_http: Path
-    qwen_http: Path
     kokoro_http: Path
     desktop_runtime: Path
     intent: Path
@@ -686,7 +682,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
     if auto_bootstrap_venv and not tts_override:
         tts_ok = _ensure_python_venv(
             venv_dir=service_dir / ".venv_tts",
-            requirements_files=[service_dir / "requirements_qwen_tts.txt"],
+            requirements_files=[service_dir / "requirements_tts.txt"],
             import_checks=["fastapi", "uvicorn", "numpy", "kokoro"],
             bootstrap_python=bootstrap_python,
             cwd=service_dir,
@@ -725,12 +721,6 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         app="piper_http:app",
         python_exe=tts_python,
         port=5005,
-    )
-    _maybe_normalize_bare_uvicorn_env(
-        env_var="VOICE_AGENT_QWEN_HTTP_CMD",
-        app="qwen_tts_http:app",
-        python_exe=tts_python,
-        port=5006,
     )
     _maybe_normalize_bare_uvicorn_env(
         env_var="VOICE_AGENT_KOKORO_HTTP_CMD",
@@ -795,7 +785,6 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
     if use_packaged_services:
         voice_exe = _find_packaged_service_executable(repo_root, "voice_service")
         piper_exe = _find_packaged_service_executable(repo_root, "piper_http")
-        qwen_exe = _find_packaged_service_executable(repo_root, "qwen_tts_http")
         kokoro_exe = _find_packaged_service_executable(repo_root, "kokoro_tts_http")
         desktop_runtime_exe = _find_packaged_service_executable(repo_root, "desktop_runtime")
         intent_exe = _find_packaged_service_executable(repo_root, "intent_service")
@@ -805,7 +794,6 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
     else:
         voice_exe = ""
         piper_exe = ""
-        qwen_exe = ""
         kokoro_exe = ""
         desktop_runtime_exe = ""
         intent_exe = ""
@@ -827,17 +815,6 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         else f"{tts_python_cmd} -m uvicorn piper_http:app --host 0.0.0.0 --port 5005"
     )
     default_piper_http_dir = str(Path(piper_exe).resolve().parent) if piper_exe else str(service_dir)
-    if qwen_exe:
-        default_qwen_http_cmd = _quote_command_token(qwen_exe)
-        default_qwen_http_dir = str(Path(qwen_exe).resolve().parent)
-    elif source_service_available:
-        default_qwen_http_cmd = f"{tts_python_cmd} -m uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5006"
-        default_qwen_http_dir = str(service_dir)
-    else:
-        # Packaged installs that do not ship qwen_tts_http.exe should not fail
-        # validation by default.
-        default_qwen_http_cmd = ""
-        default_qwen_http_dir = str(repo_root)
     if kokoro_exe:
         default_kokoro_http_cmd = _quote_command_token(kokoro_exe)
         default_kokoro_http_dir = str(Path(kokoro_exe).resolve().parent)
@@ -936,8 +913,6 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         default_voice_dir=default_voice_dir,
         default_piper_http_cmd=default_piper_http_cmd,
         default_piper_http_dir=default_piper_http_dir,
-        default_qwen_http_cmd=default_qwen_http_cmd,
-        default_qwen_http_dir=default_qwen_http_dir,
         default_kokoro_http_cmd=default_kokoro_http_cmd,
         default_kokoro_http_dir=default_kokoro_http_dir,
         default_desktop_runtime_cmd=default_desktop_runtime_cmd,
@@ -1012,19 +987,6 @@ def _build_parser(defaults: LauncherDefaults) -> argparse.ArgumentParser:
         "--piper-http-dir",
         default=_env_or_default("VOICE_AGENT_PIPER_HTTP_CWD", defaults.default_piper_http_dir),
         help="Working directory for the Piper HTTP wrapper service.",
-    )
-    parser.add_argument(
-        "--qwen-http-cmd",
-        default=defaults.default_qwen_http_cmd,
-        help=(
-            "Optional command used to start a Qwen TTS HTTP wrapper service. "
-            "Pass --qwen-http-cmd to override."
-        ),
-    )
-    parser.add_argument(
-        "--qwen-http-dir",
-        default=_env_or_default("VOICE_AGENT_QWEN_HTTP_CWD", defaults.default_qwen_http_dir),
-        help="Working directory for the Qwen HTTP wrapper service.",
     )
     parser.add_argument(
         "--kokoro-http-cmd",
@@ -1151,11 +1113,6 @@ def _parse_commands(
                 if args.piper_http_cmd
                 else None
             ),
-            qwen_http=(
-                parse_command(args.qwen_http_cmd, windows=windows)
-                if args.qwen_http_cmd
-                else None
-            ),
             kokoro_http=(
                 parse_command(args.kokoro_http_cmd, windows=windows)
                 if args.kokoro_http_cmd
@@ -1202,7 +1159,6 @@ def _resolve_directories(args: argparse.Namespace) -> DirectorySet:
         voice=Path(args.voice_dir).resolve(),
         orchestrator=Path(args.orchestrator_dir).resolve(),
         piper_http=Path(args.piper_http_dir).resolve(),
-        qwen_http=Path(args.qwen_http_dir).resolve(),
         kokoro_http=Path(args.kokoro_http_dir).resolve(),
         desktop_runtime=Path(args.desktop_runtime_dir).resolve(),
         intent=Path(args.intent_dir).resolve(),
@@ -1232,8 +1188,6 @@ def _validate_paths(
         parser.error(f"Orchestrator directory does not exist: {dirs.orchestrator}")
     if commands.piper_http is not None and not dirs.piper_http.exists():
         parser.error(f"Piper HTTP directory does not exist: {dirs.piper_http}")
-    if commands.qwen_http is not None and not dirs.qwen_http.exists():
-        parser.error(f"Qwen HTTP directory does not exist: {dirs.qwen_http}")
     if commands.kokoro_http is not None and not dirs.kokoro_http.exists():
         parser.error(f"Kokoro HTTP directory does not exist: {dirs.kokoro_http}")
     if commands.desktop_runtime is not None and not dirs.desktop_runtime.exists():
@@ -1345,18 +1299,12 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     env.setdefault("DIALOG_MAX_REPLY_SENTENCES", "3")
     env.setdefault("DIALOG_MAX_REPLY_CHARS", "0")
     env.setdefault("DIALOG_MAX_REPLY_WORDS", "0")
-    env.setdefault("QWEN_TTS_SPEED_PROFILE", "fast")
-    env.setdefault("QWEN_TTS_SPEAKER", "Ryan")
-    env.setdefault("QWEN_TTS_INSTRUCT", "")
-    env.setdefault("QWEN_TTS_DO_SAMPLE", "0")
     env.setdefault("KOKORO_TTS_VOICE", "af_heart")
     env.setdefault("KOKORO_TTS_LANG_CODE", "a")
     env.setdefault("KOKORO_TTS_SPEED", "1.0")
     # Do not hard-truncate reply text by default; this can sound like the last
     # 1-2 words are "swallowed" on longer sentences. Users can still opt-in.
-    env.setdefault("QWEN_TTS_MAX_TEXT_CHARS", "0")
-    env.setdefault("QWEN_TTS_FAST_SHORT_MAX_NEW_TOKENS", "240")
-    env.setdefault("QWEN_TTS_WARMUP_TEXT", "Hello. I am ready.")
+    env.setdefault("KOKORO_TTS_MAX_TEXT_CHARS", "0")
     env.setdefault("MQTT_HOST", "127.0.0.1")
     env.setdefault("MQTT_PORT", "1883")
     env.setdefault("PANEL_PORT", "8787")
@@ -1417,7 +1365,6 @@ def _repo_service_cleanup_markers(defaults: LauncherDefaults) -> List[str]:
         " -m uvicorn main:app ",
         " -m uvicorn desktop_runtime:app ",
         " -m uvicorn piper_http:app ",
-        " -m uvicorn qwen_tts_http:app ",
         " -m uvicorn kokoro_tts_http:app ",
         str(script_dir / "intent_service" / "main.py"),
         str(script_dir / "dialog_service" / "main.py"),
@@ -1601,8 +1548,6 @@ def _build_handles(commands: CommandSet, dirs: DirectorySet, env: Dict[str, str]
         handles.append(ProcessHandle("orchestrator", commands.orchestrator, dirs.orchestrator))
     if commands.piper_http is not None:
         handles.append(ProcessHandle("piper-http", commands.piper_http, dirs.piper_http))
-    if commands.qwen_http is not None:
-        handles.append(ProcessHandle("qwen-http", commands.qwen_http, dirs.qwen_http))
     if commands.kokoro_http is not None:
         handles.append(ProcessHandle("kokoro-http", commands.kokoro_http, dirs.kokoro_http))
     if commands.desktop_runtime is not None:

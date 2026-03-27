@@ -1,6 +1,5 @@
 param(
     [string]$Services = "default",
-    [switch]$IncludeQwen,
     [switch]$Clean,
     [switch]$SkipInstall,
     [string]$PythonExe = ""
@@ -161,16 +160,13 @@ if (-not $SkipInstall) {
     Write-Host "[build-exe] install build/runtime dependencies"
     Invoke-Checked $VenvPython -m pip install --prefer-binary -U pip setuptools wheel pyinstaller
     Invoke-Checked $VenvPython -m pip install --prefer-binary -r (Join-Path $RepoRoot "python_voice_service\requirements.txt")
+    Invoke-Checked $VenvPython -m pip install --prefer-binary -r (Join-Path $RepoRoot "python_voice_service\requirements_tts.txt")
     Invoke-Checked $VenvPython -m pip install --prefer-binary -r (Join-Path $RepoRoot "scripts\intent_service\requirements.txt")
     Invoke-Checked $VenvPython -m pip install --prefer-binary -r (Join-Path $RepoRoot "scripts\dialog_service\requirements.txt")
-    if ($IncludeQwen -or ($Services -match "(^|,)\s*qwen_tts_http\s*(,|$)")) {
-        Invoke-Checked $VenvPython -m pip install --prefer-binary -r (Join-Path $RepoRoot "python_voice_service\requirements_qwen_tts.txt")
-    }
 }
 
 $BuildScript = Join-Path $RepoRoot "scripts\packaging\build_services_exe.py"
 $args = @($BuildScript, "--services", $Services)
-if ($IncludeQwen) { $args += "--include-qwen" }
 if ($Clean) { $args += "--clean" }
 
 Publish-LiveCaptionsHelper

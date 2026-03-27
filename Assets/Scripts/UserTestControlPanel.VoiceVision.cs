@@ -225,6 +225,41 @@ namespace RobotVoice
                     }
                     await WriteJsonAsync(context.Response, 200, "ok", $"voice set to {activeVoiceCode}").ConfigureAwait(false);
                     return;
+                case "set_backend":
+                case "backend":
+                    var rawBackend = string.IsNullOrWhiteSpace(request.backend) ? request.value : request.backend;
+                    rawBackend = (rawBackend ?? string.Empty).Trim().ToLowerInvariant();
+                    if (rawBackend != "piper" && rawBackend != "kokoro")
+                    {
+                        await WriteJsonAsync(context.Response, 400, "error", "backend must be piper or kokoro").ConfigureAwait(false);
+                        return;
+                    }
+                    activeTtsBackend = rawBackend;
+                    if (voiceLauncher != null)
+                    {
+                        var voiceToSend = activeTtsBackend == "kokoro" ? activeKokoroVoice : activeVoiceCode;
+                        var modelToSend = activeTtsBackend == "kokoro" ? string.Empty : activeTtsModel;
+                        PostToMainThread(() => voiceLauncher.SetTtsOptionsForTester(voiceToSend, modelToSend));
+                    }
+                    await WriteJsonAsync(context.Response, 200, "ok", $"tts backend set to {activeTtsBackend}").ConfigureAwait(false);
+                    return;
+                case "set_kokoro_voice":
+                case "kokoro_voice":
+                    var newKokoroVoice = string.IsNullOrWhiteSpace(request.voice) ? request.value : request.voice;
+                    newKokoroVoice = (newKokoroVoice ?? string.Empty).Trim();
+                    if (string.IsNullOrEmpty(newKokoroVoice))
+                    {
+                        await WriteJsonAsync(context.Response, 400, "error", "kokoro voice required").ConfigureAwait(false);
+                        return;
+                    }
+                    activeKokoroVoice = newKokoroVoice;
+                    if (voiceLauncher != null && string.Equals(activeTtsBackend, "kokoro", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var voiceToSend = activeKokoroVoice;
+                        PostToMainThread(() => voiceLauncher.SetTtsOptionsForTester(voiceToSend, string.Empty));
+                    }
+                    await WriteJsonAsync(context.Response, 200, "ok", $"kokoro voice set to {activeKokoroVoice}").ConfigureAwait(false);
+                    return;
                 case "set_model":
                 case "model":
                     var newModel = string.IsNullOrWhiteSpace(request.model) ? request.value : request.model;
@@ -259,39 +294,51 @@ namespace RobotVoice
                 return;
             }
 
-            var requestedVoice = string.IsNullOrWhiteSpace(request.speaker) ? request.voice : request.speaker;
-            requestedVoice = string.IsNullOrWhiteSpace(requestedVoice) ? activeVoiceCode : requestedVoice.Trim();
+            var requestedBackend = (request.backend ?? string.Empty).Trim().ToLowerInvariant();
+            if (requestedBackend != "kokoro")
+            {
+                requestedBackend = "piper";
+            }
+
+            var requestedVoice = string.IsNullOrWhiteSpace(request.voice)
+                ? (requestedBackend == "kokoro" ? activeKokoroVoice : activeVoiceCode)
+                : request.voice.Trim();
             if (string.IsNullOrWhiteSpace(requestedVoice))
             {
-                requestedVoice = DetermineInitialVoiceCode();
+                requestedVoice = requestedBackend == "kokoro" ? DetermineInitialKokoroVoice() : DetermineInitialVoiceCode();
             }
 
             var requestedModel = string.IsNullOrWhiteSpace(request.model) ? activeTtsModel : request.model.Trim();
-            if (string.IsNullOrWhiteSpace(requestedModel))
+            if (requestedBackend == "kokoro")
+            {
+                requestedModel = string.Empty;
+            }
+            else if (string.IsNullOrWhiteSpace(requestedModel))
             {
                 requestedModel = DetermineInitialTtsModel();
             }
 
             var requestedSpeed = request.speed > 0f ? request.speed : 1f;
             var requestedVolume = request.volume > 0f ? request.volume : 1f;
-            var requestedInstruct = string.IsNullOrWhiteSpace(request.instruct) ? string.Empty : request.instruct.Trim();
-            if (string.IsNullOrWhiteSpace(requestedInstruct))
-            {
-                requestedInstruct = string.Empty;
-            }
 
-            // Prefer Unity local playback via VoiceGameLauncher -> Piper /speak.
+            // Prefer Unity local playback via VoiceGameLauncher.
             if (voiceLauncher != null)
             {
                 ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel");
                 var voiceToSend = requestedVoice;
                 var modelToSend = requestedModel;
-                PostToMainThread(() => voiceLauncher.TriggerManualTesterSpeak(text, voiceToSend, modelToSend, requestedInstruct));
-                await WriteJsonAsync(context.Response, 200, "ok", "playing locally").ConfigureAwait(false);
+                PostToMainThread(() => voiceLauncher.TriggerManualTesterSpeak(text, voiceToSend, modelToSend, null));
+                await WriteJsonAsync(context.Response, 200, "ok", $"playing locally ({requestedBackend})").ConfigureAwait(false);
                 return;
             }
 
-            // Fallback: if VoiceGameLauncher is not bound, call voice service directly (no local playback).
+            if (requestedBackend == "kokoro")
+            {
+                await WriteJsonAsync(context.Response, 503, "error", "kokoro playback requires VoiceGameLauncher").ConfigureAwait(false);
+                return;
+            }
+
+            // Fallback: if VoiceGameLauncher is not bound, call Piper directly (no local playback).
             var url = (voiceServiceUrl ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(url))
             {
@@ -321,9 +368,9 @@ namespace RobotVoice
             }
         }
 
-        private async Task HandleQwenSpeakAsync(HttpListenerContext context)
+        private async Task HandleKokoroSpeakAsync(HttpListenerContext context)
         {
-            var request = ParseJsonBody<QwenSpeakRequest>(context.Request);
+            var request = ParseJsonBody<KokoroSpeakRequest>(context.Request);
             var text = (request.text ?? string.Empty).Trim();
             if (string.IsNullOrEmpty(text))
             {
@@ -331,66 +378,24 @@ namespace RobotVoice
                 return;
             }
 
-            // Respect tester-selected speaker first, then fall back to remembered/default values.
-            var speaker = string.IsNullOrWhiteSpace(request.speaker) ? request.voice : request.speaker;
-            speaker = string.IsNullOrWhiteSpace(speaker) ? activeQwenSpeaker : speaker.Trim();
-            speaker = string.IsNullOrWhiteSpace(speaker) ? defaultQwenSpeaker : speaker;
-            if (string.IsNullOrWhiteSpace(speaker))
+            var voice = string.IsNullOrWhiteSpace(request.voice) ? request.speaker : request.voice;
+            voice = string.IsNullOrWhiteSpace(voice) ? activeKokoroVoice : voice.Trim();
+            if (string.IsNullOrWhiteSpace(voice))
             {
-                speaker = DetermineInitialQwenSpeaker();
+                voice = DetermineInitialKokoroVoice();
             }
-            speaker = string.IsNullOrWhiteSpace(speaker) ? string.Empty : speaker.Trim();
+            activeKokoroVoice = voice;
 
-            activeQwenSpeaker = speaker;
-
-            // Force a fixed style prompt for Qwen requests.
-            var instruct = string.IsNullOrWhiteSpace(fixedQwenInstruct) ? "friendly" : fixedQwenInstruct.Trim();
-
-            // Always route through Unity playback so AEC/render tap works.
             if (voiceLauncher != null)
             {
-                ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel_qwen");
-                var speakerToSend = speaker;
-                PostToMainThread(() => voiceLauncher.TriggerManualTesterSpeak(text, speakerToSend, modelPath: null, ttsInstruct: instruct));
-                await WriteJsonAsync(context.Response, 200, "ok", "playing locally (qwen)").ConfigureAwait(false);
+                ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel_kokoro");
+                var voiceToSend = voice;
+                PostToMainThread(() => voiceLauncher.TriggerManualTesterSpeak(text, voiceToSend, modelPath: null, ttsInstruct: null));
+                await WriteJsonAsync(context.Response, 200, "ok", "playing locally (kokoro)").ConfigureAwait(false);
                 return;
             }
 
-            // Fallback: send to voice service (won't play locally).
-            var url = (voiceServiceUrl ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(url))
-            {
-                await WriteJsonAsync(context.Response, 503, "error", "voice service URL not configured").ConfigureAwait(false);
-                return;
-            }
-
-            try
-            {
-                // Use GET /speak for Qwen so we can pass instruct.
-                var query = new List<string>
-                {
-                    "text=" + Uri.EscapeDataString(text),
-                    "voice=" + Uri.EscapeDataString(speaker),
-                };
-                if (!string.IsNullOrWhiteSpace(instruct))
-                {
-                    query.Add("instruct=" + Uri.EscapeDataString(instruct));
-                }
-                var fullUrl = url + (url.Contains("?") ? "&" : "?") + string.Join("&", query);
-                var response = await SharedHttpClient.GetAsync(fullUrl).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode)
-                {
-                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    await WriteJsonAsync(context.Response, (int)response.StatusCode, "error", $"voice service error: {body}").ConfigureAwait(false);
-                    return;
-                }
-                ConversationLog.AddEntry(ConversationRole.Wizard, text, "tester_panel_qwen");
-                await WriteJsonAsync(context.Response, 200, "ok", "synthesis complete (no local playback)").ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                await WriteJsonAsync(context.Response, 500, "error", $"voice request failed: {ex.Message}").ConfigureAwait(false);
-            }
+            await WriteJsonAsync(context.Response, 503, "error", "kokoro playback requires VoiceGameLauncher").ConfigureAwait(false);
         }
 
         private string ResolveLlmServiceBaseUrl()

@@ -57,8 +57,8 @@ namespace RobotVoice
         [SerializeField] private Text wakeListeningCountdownText;
         [Header("TTS (Piper)")]
         [SerializeField] private string piperSpeakUrl = VoiceAgentDefaults.PiperSpeakUrl;
-        [SerializeField, Tooltip("Optional Qwen /speak endpoint for tester-only Qwen voices. Leave empty to use piperSpeakUrl.")]
-        private string qwenSpeakUrl = VoiceAgentDefaults.QwenSpeakUrl;
+        [SerializeField, Tooltip("Optional Kokoro /speak endpoint for Kokoro voices. Leave empty to use piperSpeakUrl.")]
+        private string kokoroSpeakUrl = VoiceAgentDefaults.KokoroSpeakUrl;
         [SerializeField, Tooltip("Enable true streaming TTS via /speak_stream (PCM chunked transfer). Falls back to /speak when unavailable.")]
         private bool enableTrueStreamingTts = true;
         [SerializeField, Tooltip("HTTP endpoint for true streaming TTS (raw PCM chunks).")]
@@ -77,8 +77,6 @@ namespace RobotVoice
         private string fixedDialogTtsSpeaker = "en_US";
         [SerializeField, Tooltip("Force a fixed style for dialog answer playback (ignores dialog_service tts_instruct). Leave empty to disable instruct.")]
         private string fixedDialogTtsInstruct = string.Empty;
-        [SerializeField, Tooltip("If true, dialog answers are always routed to a Piper speaker (Qwen speakers are ignored for main dialog).")]
-        private bool forcePiperForDialogAnswers = true;
         [SerializeField, Tooltip("Prompt text sent to LLM when wake word is detected. Keep it short.")]
         private string wakeAcknowledgeUserText = "Wake word detected. Reply briefly that you are listening.";
         [SerializeField, Tooltip("Fallback: mute mic capture while TTS is playing (prevents echo if AEC is not active).")]
@@ -94,15 +92,6 @@ namespace RobotVoice
         private int ttsStreamChunkMaxChars = 140;
         [SerializeField, Tooltip("If true, start downloading the next chunk while the current chunk is playing.")]
         private bool ttsStreamPrefetchNext = true;
-        [SerializeField, Tooltip("For Qwen voices, cap the first TTS chunk length to reduce time-to-first-audio.")]
-        [Range(30, 220)]
-        private int qwenFirstChunkMaxChars = 52;
-        [SerializeField, Tooltip("For Qwen voices, try to keep every chunk below this many chars.")]
-        [Range(40, 220)]
-        private int qwenChunkMaxChars = 72;
-        [SerializeField, Tooltip("HTTP timeout (seconds) for Qwen /speak requests.")]
-        [Range(30, 240)]
-        private int qwenTtsRequestTimeoutSeconds = 120;
         [Header("Backend Voice Pipeline")]
         [SerializeField, Tooltip("Auto-enable MQTT publishing on the MqttIntentPublisher so speech can reach intent_service/dialog_service.")]
         private bool autoEnableMqttPublishing = true;
@@ -224,19 +213,6 @@ namespace RobotVoice
         private static readonly Regex CommandKeywordRegex = new Regex(
             @"\b(open|launch|start|stop|robot)\b",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
-        private static readonly HashSet<string> QwenVoices = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "Ryan",
-            "Aiden",
-            "Vivian",
-            "Serena",
-            "Uncle_Fu",
-            "Dylan",
-            "Eric",
-            "Ono_Anna",
-            "Sohee",
-        };
 
         [Serializable]
         private struct CoachRespondPayload

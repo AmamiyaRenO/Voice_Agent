@@ -215,17 +215,6 @@ DEFAULT_VISION_PROMPT = os.getenv(
     "VOICE_AGENT_DEFAULT_VISION_PROMPT",
     "Describe what you see in this camera frame in 2-4 concise sentences.",
 ).strip() or "Describe what you see in this camera frame in 2-4 concise sentences."
-QWEN_SPEAKERS = [
-    "Ryan",
-    "Aiden",
-    "Vivian",
-    "Serena",
-    "Uncle_Fu",
-    "Dylan",
-    "Eric",
-    "Ono_Anna",
-    "Sohee",
-]
 KOKORO_VOICES = [
     "af_alloy",
     "af_aoede",
@@ -432,8 +421,6 @@ def _normalize_cloud_response_provider(value: Optional[str]) -> str:
 
 def _normalize_tts_backend(value: Optional[str]) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {"qwen", "qwen_tts", "qwen-tts"}:
-        return "qwen"
     if normalized in {"kokoro", "kokoro_tts", "kokoro-tts"}:
         return "kokoro"
     return "piper"
@@ -1344,7 +1331,7 @@ async def _pick_file_dialog(title: str, filter_text: str, initial_dir: str, init
 @app.get("/index.html")
 @app.get("/panel.html")
 async def panel_index() -> FileResponse:
-    return _panel_file_response("panel.html")
+    return _panel_legacy_file_response("panel.html")
 
 
 @app.get("/panel-legacy")
@@ -1381,6 +1368,12 @@ async def panel_setup() -> FileResponse:
 @app.get("/sdk.html")
 async def panel_sdk() -> FileResponse:
     return _panel_file_response("sdk.html")
+
+
+@app.get("/sdk-manifest")
+@app.get("/sdk-manifest.json")
+async def panel_sdk_manifest() -> FileResponse:
+    return _panel_file_response("sdk-manifest.json")
 
 
 @app.get("/telemetry")
@@ -1453,16 +1446,10 @@ async def api_voice_options() -> Dict[str, Any]:
         "current": audio_agent.active_voice_code,
         "models": models or ([current_model] if current_model else []),
         "modelCurrent": current_model,
-        "backends": ["piper", "qwen", "kokoro"],
+        "backends": ["piper", "kokoro"],
         "backendCurrent": audio_agent.active_tts_backend,
-        "qwenSpeakerCurrent": audio_agent.active_qwen_speaker,
         "kokoroVoiceCurrent": audio_agent.active_kokoro_voice,
     }
-
-
-@app.get("/api/qwen/options")
-async def api_qwen_options() -> Dict[str, Any]:
-    return {"speakers": QWEN_SPEAKERS, "current": audio_agent.active_qwen_speaker}
 
 
 @app.get("/api/kokoro/options")
@@ -1500,12 +1487,6 @@ async def api_voice(request: Request) -> Dict[str, Any]:
         backend = _normalize_tts_backend(payload.get("backend") or payload.get("value"))
         await audio_agent.set_tts_options(backend=backend)
         return {"status": "ok", "message": f"tts backend set to {backend}"}
-    if action in {"set_qwen_speaker", "qwen_speaker"}:
-        qwen_speaker = str(payload.get("speaker") or payload.get("voice") or payload.get("value") or "").strip()
-        if not qwen_speaker:
-            raise HTTPException(status_code=400, detail="qwen speaker required")
-        await audio_agent.set_tts_options(qwen_speaker=qwen_speaker)
-        return {"status": "ok", "message": f"qwen speaker set to {qwen_speaker}"}
     if action in {"set_kokoro_voice", "kokoro_voice"}:
         kokoro_voice = str(payload.get("voice") or payload.get("value") or "").strip()
         if not kokoro_voice:
@@ -1531,23 +1512,6 @@ async def api_speak(request: Request) -> Dict[str, Any]:
         source="tester_panel",
     )
     return {"status": "ok", "message": f"playing locally ({backend})"}
-
-
-@app.post("/api/qwen/speak")
-async def api_qwen_speak(request: Request) -> Dict[str, Any]:
-    payload = await request.json()
-    text = str(payload.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="text required")
-    speaker = str(payload.get("speaker") or payload.get("voice") or "").strip() or audio_agent.active_qwen_speaker
-    await audio_agent.manual_speak(
-        text=text,
-        voice=speaker,
-        instruct=str(payload.get("instruct") or "").strip(),
-        backend="qwen",
-        source="tester_panel_qwen",
-    )
-    return {"status": "ok", "message": "playing locally (qwen)"}
 
 
 @app.post("/api/kokoro/speak")

@@ -2,7 +2,6 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$UnityBuildDir,
     [string]$Services = "default",
-    [switch]$IncludeQwen,
     [switch]$Clean,
     [switch]$SkipServiceBuild,
     [switch]$SkipInstallDeps,
@@ -27,7 +26,6 @@ if (-not $SkipServiceBuild) {
     $svcArgs = @{
         Services   = $Services
     }
-    if ($IncludeQwen) { $svcArgs.IncludeQwen = $true }
     if ($Clean) { $svcArgs.Clean = $true }
     if ($SkipInstallDeps) { $svcArgs.SkipInstall = $true }
     if ($PythonExe) { $svcArgs.PythonExe = $PythonExe }

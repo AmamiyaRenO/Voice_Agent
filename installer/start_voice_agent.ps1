@@ -180,8 +180,8 @@ function Clear-LauncherOverrides {
         "VOICE_AGENT_VOICE_CWD",
         "VOICE_AGENT_PIPER_HTTP_CMD",
         "VOICE_AGENT_PIPER_HTTP_CWD",
-        "VOICE_AGENT_QWEN_HTTP_CMD",
-        "VOICE_AGENT_QWEN_HTTP_CWD",
+        "VOICE_AGENT_KOKORO_HTTP_CMD",
+        "VOICE_AGENT_KOKORO_HTTP_CWD",
         "VOICE_AGENT_INTENT_CMD",
         "VOICE_AGENT_INTENT_CWD",
         "VOICE_AGENT_DIALOG_CMD",
@@ -208,7 +208,7 @@ function Clear-ExistingServiceProcesses {
         "service_launcher",
         "voice_service",
         "piper_http",
-        "qwen_tts_http",
+        "kokoro_tts_http",
         "intent_service",
         "dialog_service",
         "telemetry_service",
@@ -231,7 +231,7 @@ function Clear-ExistingServiceProcesses {
         "telemetry_service\main.py",
         "python_voice_service\main.py",
         "python_voice_service\piper_http.py",
-        "python_voice_service\qwen_tts_http.py"
+        "python_voice_service\kokoro_tts_http.py"
     )
 
     $root = Normalize-PathForCompare $AppRoot
@@ -446,10 +446,10 @@ function Start-ServiceStack {
     Clear-ExistingServiceProcesses
 
     $launcherArgs = @("--no-wait")
-    $qwenExe = Join-Path $RuntimeServicesDir "qwen_tts_http.exe"
-    if (-not (Test-Path $qwenExe)) {
-        # Avoid fallback to source-mode qwen command in installed environments.
-        $env:VOICE_AGENT_QWEN_HTTP_CMD = ""
+    $kokoroExe = Join-Path $RuntimeServicesDir "kokoro_tts_http.exe"
+    if (-not (Test-Path $kokoroExe)) {
+        # Avoid fallback to source-mode kokoro command in installed environments.
+        $env:VOICE_AGENT_KOKORO_HTTP_CMD = ""
     }
 
     $brokerListening = Test-TcpPort -HostName "127.0.0.1" -Port 1883

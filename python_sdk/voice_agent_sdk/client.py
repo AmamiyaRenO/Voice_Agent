@@ -1,94 +1,35 @@
 from __future__ import annotations
 
-import json
-import random
-from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-import paho.mqtt.client as mqtt
 import requests
 
 
-@dataclass(frozen=True)
-class MqttConfig:
-    host: str = "127.0.0.1"
-    port: int = 1883
-    username: Optional[str] = None
-    password: Optional[str] = None
-    qos: int = 1
-    retain: bool = False
-
-
 class VoiceAgentClient:
-    """Python SDK for controlling the Robot Voice Agent via HTTP + MQTT."""
+    """HTTP SDK that mirrors the Assets full-control panel surface."""
 
     def __init__(
         self,
         host: str = "127.0.0.1",
-        tts_port: int = 5005,
         panel_port: int = 8787,
-        mqtt_config: Optional[MqttConfig] = None,
-        mqtt_client: Optional[mqtt.Client] = None,
         http_session: Optional[requests.Session] = None,
     ) -> None:
         self._host = host
-        self._tts_port = tts_port
         self._panel_port = panel_port
-        self._mqtt_config = mqtt_config or MqttConfig(host=host)
-        self._mqtt_client = mqtt_client
         self._http = http_session or requests.Session()
 
-        self.default_face_seconds = 3.0
-        self.default_servo_seconds = 2.0
-        self.default_slow_seconds = 3.0
-        self.default_speed_percent = 30
-        self.default_led_breath_seconds = 2.0
-        self.default_led_on_seconds = 1.0
-
-        self.face_topic = "robot/pi/face/cmd"
-        self.servo_topic = "robot/pi/servo/cmd"
-        self.led_topic = "robot/pi/led/cmd"
-        self.intent_topic = "robot/intent"
-        self.dialog_style_topic = "robot/dialog/style"
-        self.tts_options_topic = "robot/tts/options"
-
     @property
-    def piper_url(self) -> str:
-        return f"http://{self._host}:{self._tts_port}/speak"
+    def panel_base_url(self) -> str:
+        return f"http://{self._host}:{self._panel_port}"
 
-    @property
-    def panel_speak_url(self) -> str:
-        # Mirrors UserTestControlPanel: POST /api/speak
-        return f"http://{self._host}:{self._panel_port}/api/speak"
+    def get_logs(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json("GET", "/api/logs", timeout=timeout)
 
-    @property
-    def panel_llm_prompt_url(self) -> str:
-        # Mirrors UserTestControlPanel: GET/POST /api/llm/prompt
-        return f"http://{self._host}:{self._panel_port}/api/llm/prompt"
+    def get_tts_options(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json("GET", "/api/voice/options", timeout=timeout)
 
-    @property
-    def panel_vision_describe_url(self) -> str:
-        # Mirrors UserTestControlPanel: POST /api/vision/describe
-        return f"http://{self._host}:{self._panel_port}/api/vision/describe"
-
-    def connect_mqtt(self, start_loop: bool = True) -> None:
-        if self._mqtt_client is None:
-            self._mqtt_client = mqtt.Client()
-            if self._mqtt_config.username:
-                self._mqtt_client.username_pw_set(
-                    self._mqtt_config.username,
-                    self._mqtt_config.password,
-                )
-        self._mqtt_client.connect(self._mqtt_config.host, self._mqtt_config.port)
-        if start_loop:
-            self._mqtt_client.loop_start()
-
-    def disconnect_mqtt(self, stop_loop: bool = True) -> None:
-        if self._mqtt_client is None:
-            return
-        if stop_loop:
-            self._mqtt_client.loop_stop()
-        self._mqtt_client.disconnect()
+    def get_kokoro_options(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json("GET", "/api/kokoro/options", timeout=timeout)
 
     def speak(
         self,
@@ -97,123 +38,86 @@ class VoiceAgentClient:
         model: Optional[str] = None,
         speed: float = 1.0,
         volume: float = 1.0,
+        backend: Optional[str] = None,
         timeout: float = 30.0,
     ) -> Dict[str, Any]:
-        """
-        Trigger audible speech via Unity UserTestControlPanel (/api/speak).
-
-        This is intentionally aligned with the UserTestControlPanel's speak payload shape:
-        text / voice / model / speed / volume.
-
-        Notes:
-        - Unity must be running with UserTestControlPanel listening on panel_port.
-        - UserTestControlPanel must have VoiceGameLauncher assigned to actually play audio.
-        """
-        if not text or not text.strip():
-            raise ValueError("text is required")
-
+        self._require_text(text)
         payload: Dict[str, Any] = {
-            "text": text,
+            "text": text.strip(),
             "voice": voice,
             "model": model,
             "speed": speed,
             "volume": volume,
+            "backend": backend,
         }
-        filtered = {k: v for k, v in payload.items() if v is not None}
-        r = self._http.post(self.panel_speak_url, json=filtered, timeout=timeout)
-        r.raise_for_status()
-        try:
-            return r.json()
-        except Exception:
-            return {"raw": r.text}
+        return self._request_json("POST", "/api/speak", payload=self._filter_none(payload), timeout=timeout)
 
-    def synthesize_wav(
-        self,
-        text: str,
-        voice: Optional[str] = None,
-        model: Optional[str] = None,
-        config: Optional[str] = None,
-        speed: float = 1.0,
-        volume: float = 1.0,
-        use_post: bool = False,
-        timeout: float = 10.0,
-    ) -> bytes:
-        """
-        Call the Piper HTTP service directly and return WAV bytes.
+    def set_voice(self, voice: str, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._voice_action("set", {"voice": self._require_value(voice, "voice")}, timeout=timeout)
 
-        Note: Piper HTTP in this repo accepts text/model/config. It does not play audio.
-        Parameters voice/speed/volume are included to mirror UserTestControlPanel;
-        they may be ignored by the server depending on implementation.
-        """
-        if not text or not text.strip():
-            raise ValueError("text is required")
-        payload: Dict[str, Any] = {
-            "text": text,
-            "voice": voice,
-            "model": model,
-            "config": config,
-            "speed": speed,
-            "volume": volume,
-        }
-        filtered = {k: v for k, v in payload.items() if v is not None}
-        if use_post:
-            response = self._http.post(self.piper_url, json=filtered, timeout=timeout)
-        else:
-            response = self._http.get(self.piper_url, params=filtered, timeout=timeout)
-        response.raise_for_status()
-        return response.content
+    def set_tts_model(self, model: str, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._voice_action("set_model", {"model": self._require_value(model, "model")}, timeout=timeout)
 
-    def set_tts_options(self, voice: Optional[str] = None, model: Optional[str] = None) -> None:
-        payload: Dict[str, Any] = {}
-        if voice:
-            payload["voice"] = voice
-        if model:
-            payload["model"] = model
-        if not payload:
-            raise ValueError("voice or model must be provided")
-        self._publish(self.tts_options_topic, payload)
+    def set_tts_backend(self, backend: str, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._voice_action("set_backend", {"backend": self._require_value(backend, "backend")}, timeout=timeout)
 
-    def set_dialog_style(self, style: str) -> None:
-        if not style or not style.strip():
-            raise ValueError("style is required")
-        self._publish(self.dialog_style_topic, {"style": style})
+    def set_kokoro_voice(self, voice: str, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._voice_action("set_kokoro_voice", {"voice": self._require_value(voice, "voice")}, timeout=timeout)
+
+    def kokoro_speak(self, text: str, voice: Optional[str] = None, timeout: float = 30.0) -> Dict[str, Any]:
+        self._require_text(text)
+        payload = {"text": text.strip(), "voice": voice}
+        return self._request_json("POST", "/api/kokoro/speak", payload=self._filter_none(payload), timeout=timeout)
 
     def get_llm_prompt(self, timeout: float = 10.0) -> Dict[str, Any]:
-        """Fetch the current runtime LLM system prompt from UserTestControlPanel (/api/llm/prompt)."""
-        response = self._http.get(self.panel_llm_prompt_url, timeout=timeout)
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"raw": response.text}
+        return self._request_json("GET", "/api/llm/prompt", timeout=timeout)
 
     def set_llm_prompt(self, prompt: str, timeout: float = 10.0) -> Dict[str, Any]:
-        """Set runtime LLM system prompt via UserTestControlPanel (/api/llm/prompt)."""
-        if not prompt or not prompt.strip():
-            raise ValueError("prompt is required")
-        response = self._http.post(
-            self.panel_llm_prompt_url,
-            json={"prompt": prompt},
+        return self._request_json(
+            "POST",
+            "/api/llm/prompt",
+            payload={"prompt": self._require_value(prompt, "prompt")},
             timeout=timeout,
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"raw": response.text}
 
     def reset_llm_prompt(self, timeout: float = 10.0) -> Dict[str, Any]:
-        """Reset runtime LLM system prompt to env/default via UserTestControlPanel (/api/llm/prompt)."""
-        response = self._http.post(
-            self.panel_llm_prompt_url,
-            json={"reset": True},
+        return self._request_json("POST", "/api/llm/prompt", payload={"reset": True}, timeout=timeout)
+
+    def get_runtime_config(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json("GET", "/api/runtime/config", timeout=timeout)
+
+    def set_local_model(self, model: str, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json(
+            "POST",
+            "/api/runtime/config",
+            payload={"ollama_model": self._require_value(model, "model")},
             timeout=timeout,
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"raw": response.text}
+
+    def get_asr_status(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json("GET", "/api/asr", timeout=timeout)
+
+    def set_asr_mode(self, mode: str, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json(
+            "POST",
+            "/api/asr",
+            payload={"action": "set_mode", "mode": self._require_value(mode, "mode")},
+            timeout=timeout,
+        )
+
+    def set_backend_asr_mode(self, mode: str, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json(
+            "POST",
+            "/api/asr/backend",
+            payload={"action": "set_mode", "mode": self._require_value(mode, "mode")},
+            timeout=timeout,
+        )
+
+    def start_listening(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json("POST", "/api/asr", payload={"action": "start_listening"}, timeout=timeout)
+
+    def pause_listening(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json("POST", "/api/asr", payload={"action": "pause_listening"}, timeout=timeout)
 
     def describe_current_camera(
         self,
@@ -221,140 +125,140 @@ class VoiceAgentClient:
         model: Optional[str] = None,
         timeout: float = 45.0,
     ) -> Dict[str, Any]:
-        """
-        Ask UserTestControlPanel to run a vision-capable LLM on the latest camera frame.
+        payload = {"prompt": self._require_value(prompt, "prompt"), "model": model}
+        return self._request_json("POST", "/api/vision/describe", payload=self._filter_none(payload), timeout=timeout)
 
-        Endpoint: POST /api/vision/describe
-        Payload: {prompt, model?}
-        """
-        payload: Dict[str, Any] = {"prompt": (prompt or "").strip()}
-        if model and model.strip():
-            payload["model"] = model.strip()
-        response = self._http.post(self.panel_vision_describe_url, json=payload, timeout=timeout)
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"raw": response.text}
-
-    def launch_game(self, game_name: str, source: str = "python_sdk") -> None:
-        if not game_name or not game_name.strip():
-            raise ValueError("game_name is required")
-        self._publish(
-            self.intent_topic,
-            {"type": "LAUNCH_GAME", "game_name": game_name, "source": source},
+    def launch_game(self, name: str, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json(
+            "POST",
+            "/api/game",
+            payload={"action": "launch", "name": self._require_value(name, "name")},
+            timeout=timeout,
         )
 
-    def exit_game(self, source: str = "python_sdk") -> None:
-        self._publish(self.intent_topic, {"type": "EXIT_GAME", "source": source})
+    def exit_game(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json("POST", "/api/game", payload={"action": "exit"}, timeout=timeout)
 
-    def face_preset(self, preset: str, duration: Optional[float] = None) -> None:
-        if not preset or not preset.strip():
-            raise ValueError("preset is required")
-        if preset.strip().lower() == "idle" and duration is None:
-            value = "idle"
-        else:
-            seconds = duration if duration and duration > 0 else self.default_face_seconds
-            value = f"{preset}:{seconds}"
-        self._publish(self.face_topic, {"action": "face", "value": value})
+    def face_preset(self, mode: str, seconds: float = 3.0, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json(
+            "POST",
+            "/api/face",
+            payload={"mode": self._require_value(mode, "mode"), "seconds": seconds},
+            timeout=timeout,
+        )
 
-    def face_custom(self, value: str) -> None:
-        if not value or not value.strip():
-            raise ValueError("value is required")
-        self._publish(self.face_topic, {"action": "face", "value": value})
+    def face_custom(self, value: str, seconds: float = 3.0, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json(
+            "POST",
+            "/api/face",
+            payload={"mode": "custom", "value": self._require_value(value, "value"), "seconds": seconds},
+            timeout=timeout,
+        )
 
-    def face_happy(self, duration: Optional[float] = None) -> None:
-        self.face_preset("happy", duration)
+    def face_happy(self, seconds: float = 3.0, timeout: float = 10.0) -> Dict[str, Any]:
+        return self.face_preset("happy", seconds=seconds, timeout=timeout)
 
-    def face_neutral(self, duration: Optional[float] = None) -> None:
-        self.face_preset("neutral", duration)
+    def face_neutral(self, seconds: float = 3.0, timeout: float = 10.0) -> Dict[str, Any]:
+        return self.face_preset("neutral", seconds=seconds, timeout=timeout)
 
-    def face_sad(self, duration: Optional[float] = None) -> None:
-        self.face_preset("sad", duration)
+    def face_sad(self, seconds: float = 3.0, timeout: float = 10.0) -> Dict[str, Any]:
+        return self.face_preset("sad", seconds=seconds, timeout=timeout)
 
-    def face_very_sad(self, duration: Optional[float] = None) -> None:
-        self.face_preset("verySad", duration)
+    def face_very_sad(self, seconds: float = 3.0, timeout: float = 10.0) -> Dict[str, Any]:
+        return self.face_preset("verySad", seconds=seconds, timeout=timeout)
 
-    def face_excited(self, duration: Optional[float] = None) -> None:
-        self.face_preset("excited", duration)
-
-    def face_idle(self) -> None:
-        self.face_preset("idle", None)
-
-    def servo_open(self, seconds: Optional[float] = None, speed: Optional[int] = None) -> None:
-        duration = seconds if seconds and seconds > 0 else self.default_servo_seconds
-        self._publish_servo(f"open:{duration}", speed)
-
-    def servo_close(self, seconds: Optional[float] = None, speed: Optional[int] = None) -> None:
-        duration = seconds if seconds and seconds > 0 else self.default_servo_seconds
-        self._publish_servo(f"close:{duration}", speed)
-
-    def servo_open_hold(self, speed: Optional[int] = None) -> None:
-        self._publish_servo("open:0", speed)
-
-    def servo_close_hold(self, speed: Optional[int] = None) -> None:
-        self._publish_servo("close:0", speed)
-
-    def servo_center_hold(self, speed: Optional[int] = None) -> None:
-        self._publish_servo("center:0", speed)
-
-    def servo_stop(self) -> None:
-        self._publish_servo("stop", None)
-
-    def servo_open_slow(self, speed: Optional[int] = None, seconds: Optional[float] = None) -> None:
-        duration = seconds if seconds and seconds > 0 else self.default_slow_seconds
-        self._publish_servo(f"open:{duration}", speed or self.default_speed_percent)
-
-    def servo_close_slow(self, speed: Optional[int] = None, seconds: Optional[float] = None) -> None:
-        duration = seconds if seconds and seconds > 0 else self.default_slow_seconds
-        self._publish_servo(f"close:{duration}", speed or self.default_speed_percent)
+    def face_excited(self, seconds: float = 3.0, timeout: float = 10.0) -> Dict[str, Any]:
+        return self.face_preset("excited", seconds=seconds, timeout=timeout)
 
     def led_breathe(
         self,
         color: str = "#00BFFF",
-        brightness: float = 1.0,
-        period: float = 1.5,
-        duration: Optional[float] = None,
-    ) -> None:
-        seconds = duration if duration and duration > 0 else self.default_led_breath_seconds
-        value = f"breathe:{color}:{seconds}:{max(0.0, min(brightness, 1.0))}:{period}"
-        self._publish(self.led_topic, {"action": "led", "value": value})
+        brightness: float = 0.8,
+        period: float = 2.0,
+        duration: float = 0.0,
+        timeout: float = 10.0,
+    ) -> Dict[str, Any]:
+        payload = {
+            "mode": "breathe",
+            "color": color,
+            "brightness": brightness,
+            "period": period,
+            "duration": duration,
+        }
+        return self._request_json("POST", "/api/led", payload=payload, timeout=timeout)
 
     def led_solid(
         self,
         color: str = "#FFFFFF",
-        brightness: float = 1.0,
-        duration: Optional[float] = None,
-    ) -> None:
-        seconds = duration if duration and duration > 0 else self.default_led_on_seconds
-        value = f"on:{color}:{seconds}:{max(0.0, min(brightness, 1.0))}"
-        self._publish(self.led_topic, {"action": "led", "value": value})
+        brightness: float = 0.8,
+        duration: float = 0.0,
+        timeout: float = 10.0,
+    ) -> Dict[str, Any]:
+        payload = {
+            "mode": "solid",
+            "color": color,
+            "brightness": brightness,
+            "duration": duration,
+        }
+        return self._request_json("POST", "/api/led", payload=payload, timeout=timeout)
 
-    def led_random(self, duration: Optional[float] = None) -> None:
-        seconds = duration if duration and duration > 0 else self.default_led_on_seconds
-        color = "#{:02X}{:02X}{:02X}".format(
-            random.randint(0, 255),
-            random.randint(0, 255),
-            random.randint(0, 255),
-        )
-        value = f"on:{color}:{seconds}:1.0"
-        self._publish(self.led_topic, {"action": "led", "value": value})
+    def led_random(self, duration: float = 0.0, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json("POST", "/api/led", payload={"mode": "random", "duration": duration}, timeout=timeout)
 
-    def led_off(self) -> None:
-        self._publish(self.led_topic, {"action": "led", "value": "off"})
+    def led_off(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._request_json("POST", "/api/led", payload={"mode": "off"}, timeout=timeout)
 
-    def publish_raw(self, topic: str, payload: Dict[str, Any]) -> None:
-        self._publish(topic, payload)
+    def flower_open(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._flower_action("open", timeout=timeout)
 
-    def _publish_servo(self, value: str, speed: Optional[int]) -> None:
-        payload: Dict[str, Any] = {"action": "servo", "value": value}
-        if speed is not None:
-            payload["speed"] = speed
-        self._publish(self.servo_topic, payload)
+    def flower_close(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._flower_action("close", timeout=timeout)
 
-    def _publish(self, topic: str, payload: Dict[str, Any]) -> None:
-        if self._mqtt_client is None:
-            self.connect_mqtt()
-        assert self._mqtt_client is not None
-        data = json.dumps(payload, ensure_ascii=False)
-        self._mqtt_client.publish(topic, data, qos=self._mqtt_config.qos, retain=self._mqtt_config.retain)
+    def flower_stop(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._flower_action("stop", timeout=timeout)
+
+    def flower_open_slow(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._flower_action("open_slow", timeout=timeout)
+
+    def flower_close_slow(self, timeout: float = 10.0) -> Dict[str, Any]:
+        return self._flower_action("close_slow", timeout=timeout)
+
+    def _flower_action(self, action: str, timeout: float) -> Dict[str, Any]:
+        return self._request_json("POST", "/api/flower", payload={"action": action}, timeout=timeout)
+
+    def _voice_action(self, action: str, payload: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+        body = {"action": action}
+        body.update(payload)
+        return self._request_json("POST", "/api/voice", payload=body, timeout=timeout)
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Dict[str, Any]] = None,
+        timeout: float = 10.0,
+    ) -> Dict[str, Any]:
+        url = f"{self.panel_base_url}{path}"
+        response = self._http.request(method.upper(), url, json=payload, timeout=timeout)
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except Exception:
+            data = {"raw": response.text}
+        return data if isinstance(data, dict) else {"data": data}
+
+    @staticmethod
+    def _filter_none(payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {key: value for key, value in payload.items() if value is not None}
+
+    @staticmethod
+    def _require_text(text: str) -> str:
+        if not text or not text.strip():
+            raise ValueError("text is required")
+        return text.strip()
+
+    @staticmethod
+    def _require_value(value: str, name: str) -> str:
+        if not value or not str(value).strip():
+            raise ValueError(f"{name} is required")
+        return str(value).strip()

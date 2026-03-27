@@ -18,7 +18,7 @@
         public const string PiperBaseUrl = "http://127.0.0.1:5005";
         public const string PiperSpeakUrl = PiperBaseUrl + "/speak";
         public const string PiperSpeakStreamUrl = PiperBaseUrl + "/speak_stream";
-        public const string QwenSpeakUrl = "http://127.0.0.1:5006/speak";
+        public const string KokoroSpeakUrl = "http://127.0.0.1:5007/speak";
 
         public const string OllamaBaseUrl = "http://127.0.0.1:11434";
         public const string TelemetryDashboardUrl = "http://127.0.0.1:8101/dashboard";

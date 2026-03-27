@@ -27,7 +27,6 @@ This separation is reflected in the default port map:
 | Desktop runtime and browser panel | `8787` | operator surface, runtime control, memory and game tools, camera tools, SDK visualizer |
 | Python voice service | `8000` | conversation, ASR, response generation, runtime conversation config |
 | Piper wrapper | `5005` | low-latency local TTS |
-| Qwen TTS wrapper | `5006` | alternate TTS backend |
 | Kokoro TTS wrapper | `5007` | neural TTS backend |
 | Telemetry service | `8101` | exercise and usage metrics |
 | MQTT broker | `1883` | robot, intent, dialog, and telemetry messaging |
@@ -46,10 +45,10 @@ The desktop runtime is implemented primarily in `python_voice_service/desktop_ru
 
 The browser panel assets are resolved from two locations:
 
-- maintained path: `runtime/panel/*`
-- compatibility fallback: `Assets/StreamingAssets/panel/*`
+- default user panel path: `Assets/StreamingAssets/panel/*`
+- additional runtime pages: `runtime/panel/*`
 
-When both exist, the runtime prefers `runtime/panel/*`. This precedence defines the current maintenance and documentation target.
+The desktop runtime now serves the legacy user panel from `Assets/StreamingAssets/panel/panel.html` at `/`, `/index.html`, and `/panel.html`, while still using `runtime/panel/*` for pages such as `/runtime`.
 
 #### Python Voice Service
 
@@ -65,7 +64,7 @@ The directory also contains the main speech-related support modules, including:
 - `speaker_id.py`
 - `game_grounding.py`
 - `local_docs_rag.py`
-- the Piper, Qwen, and Kokoro HTTP wrappers
+- the Piper and Kokoro HTTP wrappers
 
 Together, these modules implement the maintained speech stack from recognition through reply generation and spoken output.
 
@@ -77,7 +76,7 @@ This is an architectural distinction rather than a repository accident. The code
 
 #### Python SDK
 
-The Python SDK under `python_sdk/` mirrors parts of the runtime API surface so external clients can control speech, face, servo, LED, game intents, and runtime prompt behavior without editing Unity scenes. In practice, the SDK functions as a stable automation and integration layer over the same runtime APIs and MQTT topics used elsewhere in the repository.
+The Python SDK under `python_sdk/` mirrors the desktop runtime API surface so external clients can control speech, face, flower, LED, game intents, ASR state, and runtime prompt/model behavior without editing Unity scenes. In practice, the SDK functions as a stable automation and integration layer over the same runtime HTTP APIs surfaced by the control panel and SDK visualizer.
 
 #### Scripts and Launcher Services
 
@@ -117,7 +116,7 @@ This layout shows that the repository is best understood as a coordinated platfo
 
 ### 3.3 The Agent Page as a Repository Subsystem
 
-The browser homepage is not the repository itself, but it is still an important subsystem within the wider architecture. The homepage implementation in `runtime/panel/panel.html` is served at `/`, `/index.html`, and `/panel.html`, and it provides a top-level entry point for runtime switching, quick listening checks, transcript review, and navigation to supporting pages such as `/runtime`, `/memory`, `/games`, `/setup`, `/sdk`, and `/telemetry`.
+The browser homepage is not the repository itself, but it is still an important subsystem within the wider architecture. The homepage implementation in `Assets/StreamingAssets/panel/panel.html` is served at `/`, `/index.html`, and `/panel.html`, and it provides a top-level entry point for quick listening checks, transcript review, and navigation to supporting pages such as `/runtime`, `/memory`, `/games`, `/setup`, `/sdk`, and `/telemetry`.
 
 Within the repository-wide architecture, the agent page should be understood as the operator-facing surface of the desktop runtime rather than as an isolated product. Its role is to make the rest of the repository observable and operable without collapsing all system complexity into a single UI page.
 
@@ -177,7 +176,6 @@ The repository exposes multiple interface layers. The following interface groups
 | Desktop runtime on `:8787` | `/`, `/games`, `/runtime`, `/memory`, `/setup`, `/sdk`, `/api/speak`, `/api/llm/prompt`, `/api/game`, `/api/game/manifest`, `/api/memory`, `/api/qmd`, `/api/runtime/config`, `/api/runtime/prereq`, `/api/runtime/ollama`, `/api/asr`, `/api/logs/stream` |
 | Voice service on `:8000` | `/healthz`, `/conversation/config`, `/conversation/turn/stream`, `/transcribe`, `/transcribe/config`, `/respond`, `/respond/config`, `/respond/metrics` |
 | Piper on `:5005` | `/speak`, `/speak_stream` |
-| Qwen on `:5006` | `/speak`, `/metrics` |
 | Kokoro on `:5007` | `/healthz`, `/speak` |
 
 #### MQTT Interfaces
@@ -236,7 +234,7 @@ This path is considered successful when:
 
 ### 5.3 Python SDK Path
 
-The SDK path supports automation and non-Unity integration. A client imports `voice_agent_sdk`, connects to the runtime and broker, and invokes control methods for speech, prompt updates, vision, face, LED, servo, and game intents.
+The SDK path supports automation and non-Unity integration. A client imports `voice_agent_sdk`, connects to the desktop runtime, and invokes control methods for speech, prompt updates, runtime model changes, ASR mode changes, vision, face, LED, flower, and game intents.
 
 This path is considered successful when:
 
@@ -267,7 +265,7 @@ Second, the repository is intentionally multi-process. This improves separation 
 
 Third, the browser panel is intentionally simple. Its static-HTML and plain-JavaScript design makes it easy to ship and debug, but it also means that richer UI abstractions, shared frontend state tooling, and component-level reuse are limited compared with a larger SPA architecture.
 
-Fourth, the repository contains both maintained and compatibility paths, such as `runtime/panel/*` and `Assets/StreamingAssets/panel/*`. This is useful for mixed source and packaging scenarios, but it can create ambiguity if contributors edit the wrong asset set or assume a legacy path is canonical.
+Fourth, the repository still contains both `runtime/panel/*` and `Assets/StreamingAssets/panel/*`, but they no longer play identical roles. The legacy Assets panel is the default user-facing homepage, while `runtime/panel/*` continues to host additional runtime pages. Contributors therefore need to be explicit about which surface they are changing.
 
 Fifth, several features depend on external runtimes, local models, or environment setup, including Ollama, TTS backends, MQTT, and optional model assets. As a result, the full repository behavior is broader than what can be guaranteed from code structure alone.
 

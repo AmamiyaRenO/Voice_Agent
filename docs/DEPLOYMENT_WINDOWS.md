@@ -26,14 +26,9 @@ Output:
 - `dist/services/game_launcher.exe`
 - `dist/services/service_launcher.exe`
 
-Optional Qwen TTS build:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\packaging\build_services_exe.ps1 -IncludeQwen
-```
-
 Notes:
 - `service_launcher.exe` is built from `scripts/start_local_services.py`.
+- The packaged service set now includes `kokoro_tts_http.exe` instead of the removed legacy alternate TTS wrapper.
 - Installed one-click mode should not require system Python when the packaged services are present.
 
 ## 2) Prepare Unity Build

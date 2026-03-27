@@ -1,12 +1,11 @@
 # Python SDK for Robot Voice Agent
 
-This SDK wraps the Robot Voice Agent's HTTP TTS and MQTT control channels in a
-single Python client. It mirrors the same controls available in the Unity
-`UserTestControlPanel`, including face presets, servo/flower actions, LED
-effects, TTS options, runtime LLM prompt editing, and game launch/exit.
+This SDK is a thin HTTP client for the full control panel served on port `8787`.
+It mirrors the same non-Qwen panel surface used by:
 
-The project also provides an in-browser **SDK Visualizer** (`/sdk`) that hits
-the same panel APIs and helps you validate payloads before writing Python code.
+- `Assets/StreamingAssets/panel/panel.html`
+- `Assets/StreamingAssets/panel/sdk.html`
+- `Assets/StreamingAssets/panel/sdk-manifest.json`
 
 ## Installation
 
@@ -20,86 +19,54 @@ pip install -r python_sdk/requirements.txt
 from voice_agent_sdk import VoiceAgentClient
 
 client = VoiceAgentClient(host="10.0.0.1")
-client.speak("Hello Rachel")
-client.face_happy(duration=3)
+
+client.speak("Hello Rachel", voice="en_US", backend="piper")
+client.set_tts_backend("kokoro")
+client.set_kokoro_voice("af_heart")
+client.kokoro_speak("Hello from Kokoro")
+
+client.face_happy(seconds=3)
 client.led_breathe(color="#00BFFF", brightness=0.8, period=2.5)
-client.servo_open_hold()
+client.flower_open()
 client.launch_game("cornhole")
 
-# Runtime LLM system prompt (real-time, via UserTestControlPanel /api/llm/prompt)
-cfg = client.get_llm_prompt()
 client.set_llm_prompt("You are a concise rehab coach. Keep replies to 1-2 sentences.")
-# client.reset_llm_prompt()
-
-# Camera vision (uses current panel camera frame)
-vision = client.describe_current_camera("Describe what you see and whether the user is ready to start.")
+client.describe_current_camera("Describe what you see and whether the user is ready.")
 ```
 
-## Supported features (parity with UserTestControlPanel)
+## Surface
 
-- **Face presets**: happy/neutral/sad/verySad/excited/idle/custom
-- **Servo actions**: open/close/open_hold/close_hold/center/stop/open_slow/close_slow
-- **LED effects**: breathe/solid/random/off
-- **TTS**: speak text, set voice/model options
-- **LLM system prompt**: get/set/reset runtime `/respond` prompt through UserTestControlPanel
-- **Camera vision describe**: send current Unity camera frame + user prompt to multimodal LLM
-- **Game**: launch/exit intents
+The public `VoiceAgentClient` methods are the same methods listed in `sdk-manifest.json`:
 
-## SDK Visualizer (Unity UserTestControlPanel)
+- Logs and options: `get_logs`, `get_tts_options`, `get_kokoro_options`
+- TTS: `speak`, `set_voice`, `set_tts_model`, `set_tts_backend`, `set_kokoro_voice`, `kokoro_speak`
+- Runtime prompt/model: `get_llm_prompt`, `set_llm_prompt`, `reset_llm_prompt`, `get_runtime_config`, `set_local_model`
+- ASR: `get_asr_status`, `set_asr_mode`, `set_backend_asr_mode`, `start_listening`, `pause_listening`
+- Vision/game: `describe_current_camera`, `launch_game`, `exit_game`
+- Face: `face_preset`, `face_custom`, `face_happy`, `face_neutral`, `face_sad`, `face_very_sad`, `face_excited`
+- LED: `led_breathe`, `led_solid`, `led_random`, `led_off`
+- Flower: `flower_open`, `flower_close`, `flower_stop`, `flower_open_slow`, `flower_close_slow`
 
-When Unity is running with `UserTestControlPanel` enabled (default port `8787`),
-open:
+Removed from the public SDK surface:
+
+- Methods from the retired alternate TTS backend
+- Direct WAV synthesis helpers
+- Raw MQTT publish helpers
+- Servo-named aliases and hold/center actions outside the panel surface
+
+## SDK Visualizer
+
+Open:
 
 - `http://<host-ip>:8787/sdk`
 - `http://<host-ip>:8787/sdk.html`
 
-What the Visualizer provides:
-
-- **SDK Method Sandbox**
-  - Select a method template (for example `speak`, `set_llm_prompt`, `launch_game`).
-  - Auto-load endpoint + payload JSON.
-  - Invoke request and inspect HTTP status / response quickly.
-- **Flow Builder**
-  - Drag-and-drop API templates into a sequence.
-  - Add utility nodes: `delay(ms)`, `condition(expr)`, `wait_keyword(keyword)`.
-  - Configure each step (method, endpoint, payload, continue-on-error).
-  - Run/stop flow with per-step states and execution log.
-  - Export/import flows as JSON for repeatable testing.
-- **Condition/Keyword Debugging**
-  - Condition expressions can reference context values like
-    `ctx.lastStatus`, `ctx.lastJson`, `ctx.lastRaw`, `ctx.lastRecognized`.
-  - Keyword wait supports source filters (`user`/`coach`/`any`), timeout,
-    poll interval, case-sensitivity, and "only new text" matching.
-
-This is useful for rapid API and behavior verification before automating with
-`VoiceAgentClient`.
-
-Built-in method templates:
-
-- `speak(text,voice,model,speed,volume)` -> `/api/speak`
-- `qwen_speak(text,speaker,instruct)` -> `/api/qwen/speak`
-- `set_tts_options(voice,model)` -> `/api/voice`
-- `set_tts_model(model)` -> `/api/voice`
-- `get_llm_prompt()` -> `/api/llm/prompt` (GET)
-- `set_llm_prompt(prompt)` -> `/api/llm/prompt`
-- `reset_llm_prompt()` -> `/api/llm/prompt`
-- `describe_camera(prompt,model)` -> `/api/vision/describe`
-- `launch_game(name)` -> `/api/game`
-- `exit_game()` -> `/api/game`
-- `face_preset(mode,seconds)` -> `/api/face`
-- `flower_open()` -> `/api/flower`
-- `led_breathe(color,brightness,period,duration)` -> `/api/led`
-
-Flow node semantics:
-
-- `api`: HTTP request step with optional `continueOnError`.
-- `delay`: sleeps for `delayMs`.
-- `condition`: evaluates JavaScript expression against flow context.
-- `keyword_wait`: polls log stream until keyword match or timeout.
+The visualizer now loads its method list from `sdk-manifest.json`, so the picker,
+flow templates, and Python SDK stay in sync from one checked-in source.
 
 ## Tests
 
 ```bash
 pip install -r python_sdk/requirements-dev.txt
-python -m pytest
+python -m pytest tests/test_voice_agent_sdk.py
 ```

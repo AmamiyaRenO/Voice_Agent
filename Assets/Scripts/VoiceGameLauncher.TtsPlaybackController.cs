@@ -35,7 +35,7 @@ namespace RobotVoice
             var effectiveModelPath = string.IsNullOrWhiteSpace(modelPath)
                 ? testerPanelModelPathOverride
                 : modelPath.Trim();
-            if (IsLikelyQwenVoiceCode(effectiveVoiceCode))
+            if (IsLikelyKokoroVoiceCode(effectiveVoiceCode))
             {
                 effectiveModelPath = string.Empty;
             }
@@ -104,7 +104,7 @@ namespace RobotVoice
 
             var useTrueStreaming = enableTrueStreamingTts
                                    && !string.IsNullOrWhiteSpace(piperSpeakStreamUrl)
-                                   && !IsLikelyQwenVoiceCode(voiceCode);
+                                   && !IsLikelyKokoroVoiceCode(voiceCode);
             if (useTrueStreaming)
             {
                 activeTtsCoroutine = StartCoroutine(
@@ -145,7 +145,7 @@ namespace RobotVoice
             StartTtsCoroutine(queued.Text, queued.VoiceCode, queued.ModelPath, queued.TtsInstruct, selectedSpeakUrl);
         }
 
-        private static bool IsLikelyQwenVoiceCode(string voiceCode)
+        private static bool IsLikelyKokoroVoiceCode(string voiceCode)
         {
             var code = string.IsNullOrWhiteSpace(voiceCode) ? string.Empty : voiceCode.Trim();
             if (string.IsNullOrEmpty(code))
@@ -153,14 +153,14 @@ namespace RobotVoice
                 return false;
             }
 
-            return QwenVoices.Contains(code);
+            return Regex.IsMatch(code, "^[abefhijpzm][fm]_[a-z0-9_]+$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         }
 
         private string ResolveSpeakUrlForVoice(string voiceCode)
         {
-            if (IsLikelyQwenVoiceCode(voiceCode) && !string.IsNullOrWhiteSpace(qwenSpeakUrl))
+            if (IsLikelyKokoroVoiceCode(voiceCode) && !string.IsNullOrWhiteSpace(kokoroSpeakUrl))
             {
-                return qwenSpeakUrl.Trim();
+                return kokoroSpeakUrl.Trim();
             }
             return string.IsNullOrWhiteSpace(piperSpeakUrl) ? string.Empty : piperSpeakUrl.Trim();
         }
@@ -792,10 +792,6 @@ namespace RobotVoice
             }
 
             var speakerToUse = string.IsNullOrWhiteSpace(fixedDialogTtsSpeaker) ? null : fixedDialogTtsSpeaker.Trim();
-            if (forcePiperForDialogAnswers && IsLikelyQwenVoiceCode(speakerToUse))
-            {
-                speakerToUse = "en_US";
-            }
             var instructToUse = string.IsNullOrWhiteSpace(fixedDialogTtsInstruct) ? null : fixedDialogTtsInstruct.Trim();
             pendingTtsCorrId = string.IsNullOrWhiteSpace(corrId) ? string.Empty : corrId.Trim();
             TriggerSpeakForTester(trimmed, voiceCode: speakerToUse, modelPath: null, ttsInstruct: instructToUse);
@@ -911,7 +907,7 @@ namespace RobotVoice
             var voice = string.IsNullOrWhiteSpace(voiceCode) ? string.Empty : voiceCode.Trim();
             var model = string.IsNullOrWhiteSpace(modelPath) ? string.Empty : modelPath.Trim();
             testerPanelVoiceCodeOverride = voice;
-            testerPanelModelPathOverride = IsLikelyQwenVoiceCode(voice) ? string.Empty : model;
+            testerPanelModelPathOverride = IsLikelyKokoroVoiceCode(voice) ? string.Empty : model;
             if (publisher != null)
             {
                 var sb = new StringBuilder(128);
@@ -1362,18 +1358,8 @@ namespace RobotVoice
                 {
                     yield break;
                 }
-                var isQwenVoice = IsLikelyQwenVoiceCode(voiceCode);
-                if (isQwenVoice)
-                {
-                    segments = OptimizeQwenFirstChunkForLatency(segments);
-                    segments = OptimizeQwenSegmentSizes(segments);
-                }
-                var allowPrefetchNext = ttsStreamPrefetchNext && !isQwenVoice;
-                var requestTimeoutSeconds = isQwenVoice ? Mathf.Clamp(qwenTtsRequestTimeoutSeconds, 30, 240) : 60;
-                if (ttsStreamPrefetchNext && !allowPrefetchNext && logDebugMessages)
-                {
-                    Debug.Log($"[RobotVoice] Disable TTS prefetch for Qwen speaker '{voiceCode}'");
-                }
+                var allowPrefetchNext = ttsStreamPrefetchNext;
+                var requestTimeoutSeconds = 60;
 
                 UnityWebRequest nextRequest = null;
                 UnityWebRequestAsyncOperation nextOp = null;
@@ -1385,7 +1371,7 @@ namespace RobotVoice
                         var segText = segments[i];
                         if (string.IsNullOrWhiteSpace(segText)) continue;
 
-                        // Use GET WAV (works for Piper and Qwen wrapper; extra params are ignored by Piper).
+                        // Use GET WAV for Piper and Kokoro wrappers; extra params are ignored when unsupported.
                         UnityWebRequest request;
                         UnityWebRequestAsyncOperation op;
                         if (nextRequest != null)
@@ -1412,29 +1398,6 @@ namespace RobotVoice
                                 Debug.Log(
                                     $"[RobotVoice] TTS fetch seg={i + 1}/{segments.Count} chars={segText.Length} " +
                                     $"voice='{voiceCode}' elapsed={dt:0.00}s code={request.responseCode} err={request.error}");
-                            }
-                            if (request.result != UnityWebRequest.Result.Success &&
-                                isQwenVoice &&
-                                !string.IsNullOrWhiteSpace(request.error) &&
-                                request.error.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0)
-                            {
-                                if (logDebugMessages)
-                                {
-                                    Debug.LogWarning(
-                                        $"[RobotVoice] Qwen TTS timeout, retrying once with longer timeout. segChars={segText.Length}");
-                                }
-                                request.Dispose();
-                                request = UnityWebRequestMultimedia.GetAudioClip(fullUrl, AudioType.WAV);
-                                request.timeout = Mathf.Clamp(requestTimeoutSeconds + 60, 60, 240);
-                                t0 = Time.realtimeSinceStartup;
-                                yield return request.SendWebRequest();
-                                if (logDebugMessages)
-                                {
-                                    var dt = Time.realtimeSinceStartup - t0;
-                                    Debug.Log(
-                                        $"[RobotVoice] TTS retry seg={i + 1}/{segments.Count} chars={segText.Length} " +
-                                        $"voice='{voiceCode}' elapsed={dt:0.00}s code={request.responseCode} err={request.error}");
-                                }
                             }
                         }
 
@@ -1675,120 +1638,6 @@ namespace RobotVoice
             }
             if (sb.Length > 0) chunks.Add(sb.ToString().Trim());
             return chunks.Count > 0 ? chunks : new List<string> { trimmed };
-        }
-
-        private List<string> OptimizeQwenFirstChunkForLatency(List<string> segments)
-        {
-            if (segments == null || segments.Count == 0)
-            {
-                return segments;
-            }
-
-            var first = string.IsNullOrWhiteSpace(segments[0]) ? string.Empty : segments[0].Trim();
-            if (string.IsNullOrWhiteSpace(first))
-            {
-                return segments;
-            }
-
-            var maxChars = Mathf.Clamp(qwenFirstChunkMaxChars, 30, 220);
-            if (first.Length <= maxChars + 8)
-            {
-                return segments;
-            }
-
-            var splitIndex = FindNaturalSplitIndex(first, maxChars);
-            if (splitIndex <= 16 || splitIndex >= first.Length - 8)
-            {
-                return segments;
-            }
-
-            var head = first.Substring(0, splitIndex).Trim();
-            var tail = first.Substring(splitIndex).Trim();
-            if (string.IsNullOrWhiteSpace(head) || string.IsNullOrWhiteSpace(tail))
-            {
-                return segments;
-            }
-
-            var optimized = new List<string>(segments.Count + 1) { head, tail };
-            for (var i = 1; i < segments.Count; i++)
-            {
-                optimized.Add(segments[i]);
-            }
-
-            if (logDebugMessages)
-            {
-                Debug.Log($"[RobotVoice] Qwen first-chunk optimized: {first.Length} -> {head.Length}+{tail.Length}");
-            }
-            return optimized;
-        }
-
-        private List<string> OptimizeQwenSegmentSizes(List<string> segments)
-        {
-            if (segments == null || segments.Count == 0)
-            {
-                return segments;
-            }
-
-            var targetMax = Mathf.Clamp(qwenChunkMaxChars, 40, 220);
-            var optimized = new List<string>(segments.Count);
-            foreach (var raw in segments)
-            {
-                var part = string.IsNullOrWhiteSpace(raw) ? string.Empty : raw.Trim();
-                if (string.IsNullOrWhiteSpace(part))
-                {
-                    continue;
-                }
-
-                if (part.Length <= targetMax + 8)
-                {
-                    optimized.Add(part);
-                    continue;
-                }
-
-                var remaining = part;
-                while (remaining.Length > targetMax + 8)
-                {
-                    var split = FindNaturalSplitIndex(remaining, targetMax);
-                    if (split <= 16 || split >= remaining.Length - 8)
-                    {
-                        break;
-                    }
-                    optimized.Add(remaining.Substring(0, split).Trim());
-                    remaining = remaining.Substring(split).Trim();
-                    if (string.IsNullOrWhiteSpace(remaining))
-                    {
-                        break;
-                    }
-                }
-                if (!string.IsNullOrWhiteSpace(remaining))
-                {
-                    optimized.Add(remaining);
-                }
-            }
-            return optimized.Count > 0 ? optimized : segments;
-        }
-
-        private static int FindNaturalSplitIndex(string text, int targetMaxChars)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                return 0;
-            }
-
-            var maxChars = Mathf.Clamp(targetMaxChars, 8, text.Length - 1);
-            var start = Mathf.Max(8, maxChars - 24);
-            var punctuation = ".,!?;: ";
-
-            for (var i = maxChars; i >= start; i--)
-            {
-                var c = text[i];
-                if (char.IsWhiteSpace(c) || punctuation.IndexOf(c) >= 0)
-                {
-                    return i + 1;
-                }
-            }
-
-            return maxChars;
         }
 
         private static string BuildRemainingSegmentText(List<string> segments, int startIndex)

@@ -31,24 +31,11 @@ namespace RobotVoice
         private string defaultVoiceCode = "en_US";
         [SerializeField, Tooltip("Additional voice codes shown in the dropdown")]
         private string[] availableVoices = new[] { "en_US" };
-        [Header("Qwen TTS (Speakers)")]
-        [SerializeField, Tooltip("Default Qwen speaker name used by the tester UI")]
-        private string defaultQwenSpeaker = "Ryan";
-        [SerializeField, Tooltip("Fixed Qwen speaking style used for all Qwen speak requests.")]
-        private string fixedQwenInstruct = "friendly";
-        [SerializeField, Tooltip("Speaker names shown in the Qwen dropdown (matches qwen-tts model card speaker ids)")]
-        private string[] qwenSpeakers = new[]
-        {
-            "Ryan",
-            "Aiden",
-            "Vivian",
-            "Serena",
-            "Uncle_Fu",
-            "Dylan",
-            "Eric",
-            "Ono_Anna",
-            "Sohee",
-        };
+        [Header("Kokoro TTS")]
+        [SerializeField, Tooltip("Default Kokoro voice used by the tester UI")]
+        private string defaultKokoroVoice = "af_heart";
+        [SerializeField, Tooltip("Additional Kokoro voices shown in the dropdown")]
+        private string[] availableKokoroVoices = new[] { "af_heart" };
         [SerializeField, Tooltip("Default Piper/Coqui model identifier exposed in the tester UI")]
         private string defaultTtsModel = "piper-zh";
         [SerializeField, Tooltip("Additional model identifiers shown in the dropdown")]
@@ -116,7 +103,8 @@ namespace RobotVoice
         private Task listenLoopTask;
         private string activeVoiceCode;
         private string activeTtsModel;
-        private string activeQwenSpeaker;
+        private string activeTtsBackend;
+        private string activeKokoroVoice;
         private static readonly HttpClient SharedHttpClient = new HttpClient();
         private const float DefaultFaceSeconds = 3f;
         private SynchronizationContext mainThreadContext;
@@ -151,7 +139,8 @@ namespace RobotVoice
             ApplyModelsDirectoryEnvironmentOverride();
             activeVoiceCode = DetermineInitialVoiceCode();
             activeTtsModel = DetermineInitialTtsModel();
-            activeQwenSpeaker = DetermineInitialQwenSpeaker();
+            activeTtsBackend = "piper";
+            activeKokoroVoice = DetermineInitialKokoroVoice();
             if (voiceLauncher != null)
             {
                 voiceLauncher.SetTtsOptionsForTester(activeVoiceCode, activeTtsModel);
@@ -355,6 +344,10 @@ namespace RobotVoice
                     case "/sdk.html":
                         await RespondWithSdkHtmlAsync(context.Response).ConfigureAwait(false);
                         return;
+                    case "/sdk-manifest":
+                    case "/sdk-manifest.json":
+                        await RespondWithSdkManifestAsync(context.Response).ConfigureAwait(false);
+                        return;
                     case "/telemetry":
                     case "/telemetry.html":
                         await RespondWithTelemetryHtmlAsync(context.Response).ConfigureAwait(false);
@@ -380,8 +373,8 @@ namespace RobotVoice
                     case "/api/voice/options":
                         await HandleVoiceOptionsAsync(context).ConfigureAwait(false);
                         return;
-                    case "/api/qwen/options":
-                        await HandleQwenOptionsAsync(context).ConfigureAwait(false);
+                    case "/api/kokoro/options":
+                        await HandleKokoroOptionsAsync(context).ConfigureAwait(false);
                         return;
                     case "/api/logs":
                         await HandleLogsAsync(context).ConfigureAwait(false);
@@ -389,8 +382,8 @@ namespace RobotVoice
                     case "/api/speak":
                         await HandleSpeakAsync(context).ConfigureAwait(false);
                         return;
-                    case "/api/qwen/speak":
-                        await HandleQwenSpeakAsync(context).ConfigureAwait(false);
+                    case "/api/kokoro/speak":
+                        await HandleKokoroSpeakAsync(context).ConfigureAwait(false);
                         return;
                     case "/api/llm/prompt":
                         await HandleLlmPromptAsync(context).ConfigureAwait(false);
@@ -421,6 +414,9 @@ namespace RobotVoice
                         return;
                     case "/api/asr":
                         await HandleAsrAsync(context).ConfigureAwait(false);
+                        return;
+                    case "/api/asr/backend":
+                        await HandleAsrBackendAsync(context).ConfigureAwait(false);
                         return;
                     case "/camera.jpg":
                         await HandleCameraJpegAsync(context).ConfigureAwait(false);
@@ -610,6 +606,7 @@ namespace RobotVoice
             public string voice;
             public string value;
             public string model;
+            public string backend;
         }
 
         [Serializable]
@@ -618,19 +615,17 @@ namespace RobotVoice
             public string text;
             public string voice;
             public string model;
-            public string speaker;   // Qwen-style speaker id (alias of voice)
-            public string instruct;  // Qwen-style emotion/style instruction
+            public string backend;
             public float speed;
             public float volume;
         }
 
         [Serializable]
-        private struct QwenSpeakRequest
+        private struct KokoroSpeakRequest
         {
             public string text;
+            public string voice;
             public string speaker;
-            public string voice;   // compatibility alias of speaker
-            public string instruct;
         }
 
         [Serializable]

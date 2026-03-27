@@ -175,7 +175,6 @@ def _resolve_default_live_captions_exe() -> str:
 
 DEFAULT_ASR_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_PIPER_BASE_URL = "http://127.0.0.1:5005"
-DEFAULT_QWEN_BASE_URL = "http://127.0.0.1:5006"
 DEFAULT_KOKORO_BASE_URL = "http://127.0.0.1:5007"
 
 DEFAULT_CAPTURE_SAMPLE_RATE = 16000
@@ -293,9 +292,8 @@ CONVERSATION_PROFILE_CLOUD = "cloud"
 RESPONSE_PROVIDER_OPENAI = "openai"
 RESPONSE_PROVIDER_GEMINI = "gemini"
 TTS_BACKEND_PIPER = "piper"
-TTS_BACKEND_QWEN = "qwen"
 TTS_BACKEND_KOKORO = "kokoro"
-TTS_BACKENDS = [TTS_BACKEND_PIPER, TTS_BACKEND_QWEN, TTS_BACKEND_KOKORO]
+TTS_BACKENDS = [TTS_BACKEND_PIPER, TTS_BACKEND_KOKORO]
 
 TRANSCRIBE_MODE_WHISPER = "whisper-large-v3"
 TRANSCRIBE_MODE_MOONSHINE_SMALL = "moonshine-small"
@@ -358,8 +356,6 @@ def _normalize_cloud_response_provider(value: Optional[str]) -> str:
 
 def _normalize_tts_backend(value: Optional[str]) -> str:
     normalized = (value or "").strip().lower()
-    if normalized in {TTS_BACKEND_QWEN, "qwen_tts", "qwen-tts"}:
-        return TTS_BACKEND_QWEN
     if normalized in {TTS_BACKEND_KOKORO, "kokoro_tts", "kokoro-tts"}:
         return TTS_BACKEND_KOKORO
     return TTS_BACKEND_PIPER
@@ -1492,13 +1488,11 @@ class DesktopAudioAgent:
         log_store: ConversationLogStore,
         asr_base_url: str = DEFAULT_ASR_BASE_URL,
         piper_base_url: str = DEFAULT_PIPER_BASE_URL,
-        qwen_base_url: str = DEFAULT_QWEN_BASE_URL,
         kokoro_base_url: str = DEFAULT_KOKORO_BASE_URL,
     ) -> None:
         self.log_store = log_store
         self.asr_base_url = asr_base_url.rstrip("/")
         self.piper_base_url = piper_base_url.rstrip("/")
-        self.qwen_base_url = qwen_base_url.rstrip("/")
         self.kokoro_base_url = kokoro_base_url.rstrip("/")
 
         self.capture_sample_rate = DEFAULT_CAPTURE_SAMPLE_RATE
@@ -1521,7 +1515,6 @@ class DesktopAudioAgent:
         self.active_voice_code = _env("VOICE_AGENT_DEFAULT_VOICE", "en_US")
         self.active_tts_model = _env("VOICE_AGENT_DEFAULT_TTS_MODEL", "").strip()
         self.active_tts_backend = _normalize_tts_backend(_env("VOICE_AGENT_TTS_BACKEND", TTS_BACKEND_PIPER))
-        self.active_qwen_speaker = _env("QWEN_TTS_SPEAKER", "Ryan")
         self.active_kokoro_voice = _env("KOKORO_TTS_VOICE", "af_heart")
         self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
         self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
@@ -2019,7 +2012,6 @@ class DesktopAudioAgent:
             _env("VOICE_CLOUD_RESPONSE_PROVIDER", RESPONSE_PROVIDER_OPENAI)
         )
         self.active_tts_backend = _normalize_tts_backend(_env("VOICE_AGENT_TTS_BACKEND", self.active_tts_backend))
-        self.active_qwen_speaker = _env("QWEN_TTS_SPEAKER", self.active_qwen_speaker)
         self.active_kokoro_voice = _env("KOKORO_TTS_VOICE", self.active_kokoro_voice)
         self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
         self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
@@ -2977,7 +2969,6 @@ class DesktopAudioAgent:
         voice: Optional[str] = None,
         model: Optional[str] = None,
         backend: Optional[str] = None,
-        qwen_speaker: Optional[str] = None,
         kokoro_voice: Optional[str] = None,
     ) -> None:
         if voice is not None:
@@ -2986,8 +2977,6 @@ class DesktopAudioAgent:
             self.active_tts_model = str(model or "").strip()
         if backend is not None:
             self.active_tts_backend = _normalize_tts_backend(backend)
-        if qwen_speaker is not None:
-            self.active_qwen_speaker = str(qwen_speaker or "").strip() or self.active_qwen_speaker
         if kokoro_voice is not None:
             self.active_kokoro_voice = str(kokoro_voice or "").strip() or self.active_kokoro_voice
         try:
@@ -2997,7 +2986,6 @@ class DesktopAudioAgent:
                     "voice": self.active_voice_code,
                     "model": self.active_tts_model,
                     "backend": self.active_tts_backend,
-                    "qwen_speaker": self.active_qwen_speaker,
                     "kokoro_voice": self.active_kokoro_voice,
                 },
             )
@@ -4014,16 +4002,6 @@ class DesktopAudioAgent:
         wait_for_drain: bool = True,
     ) -> None:
         selected_backend = _normalize_tts_backend(backend or self.active_tts_backend)
-        if selected_backend == TTS_BACKEND_QWEN:
-            await self._play_qwen_text(
-                text=text,
-                speaker=voice or self.active_qwen_speaker,
-                instruct=instruct,
-                source=source,
-                log_message=log_message,
-                wait_for_drain=wait_for_drain,
-            )
-            return
         if selected_backend == TTS_BACKEND_KOKORO:
             await self._play_kokoro_text(
                 text=text,
@@ -4113,38 +4091,6 @@ class DesktopAudioAgent:
             params=params,
             timeout=DEFAULT_TURN_TIMEOUT_SECONDS,
         )
-        response.raise_for_status()
-        audio, sample_rate = _decode_wav_bytes(response.content)
-        self._player.begin_stream()
-        try:
-            self._player.enqueue_audio(audio, sample_rate)
-            if log_message:
-                self.log_store.add("coach", normalized, speaker="RACHEL", source=source)
-            if wait_for_drain:
-                await self._wait_for_playback_drain()
-        finally:
-            self._player.end_stream()
-
-    async def _play_qwen_text(
-        self,
-        *,
-        text: str,
-        speaker: Optional[str],
-        instruct: Optional[str],
-        source: str,
-        log_message: bool,
-        wait_for_drain: bool = True,
-    ) -> None:
-        normalized = self._sanitize_assistant_text(text)
-        if not normalized:
-            return
-        self._remember_assistant_text(normalized)
-        params: Dict[str, str] = {"text": normalized}
-        if speaker:
-            params["speaker"] = str(speaker)
-        if instruct:
-            params["instruct"] = str(instruct)
-        response = await self._client.get(f"{self.qwen_base_url}/speak", params=params, timeout=DEFAULT_TURN_TIMEOUT_SECONDS)
         response.raise_for_status()
         audio, sample_rate = _decode_wav_bytes(response.content)
         self._player.begin_stream()

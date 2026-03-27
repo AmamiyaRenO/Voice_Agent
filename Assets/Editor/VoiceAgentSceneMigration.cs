@@ -21,7 +21,7 @@ namespace RobotVoice.EditorTools
         private const string AsrTranscribeUrl = AsrBaseUrl + "/transcribe";
         private const string PiperSpeakUrl = "http://127.0.0.1:5005/speak";
         private const string PiperSpeakStreamUrl = "http://127.0.0.1:5005/speak_stream";
-        private const string QwenSpeakUrl = "http://127.0.0.1:5006/speak";
+        private const string KokoroSpeakUrl = "http://127.0.0.1:5007/speak";
         private const string OllamaBaseUrl = "http://127.0.0.1:11434";
         private const string TelemetryDashboardUrl = "http://127.0.0.1:8101/dashboard";
         private const string DefaultVisionModel = "qwen3.5:0.8b";
@@ -136,7 +136,7 @@ namespace RobotVoice.EditorTools
 
             pending += SetStringIfEmpty(so, "voiceTextTopic", VoiceTextTopic);
             pending += SetStringIfEmpty(so, "piperSpeakUrl", PiperSpeakUrl);
-            pending += SetStringIfEmpty(so, "qwenSpeakUrl", QwenSpeakUrl);
+            pending += SetStringIfEmpty(so, "kokoroSpeakUrl", KokoroSpeakUrl);
             pending += SetStringIfEmpty(so, "piperSpeakStreamUrl", PiperSpeakStreamUrl);
 
             return ApplyIfChanged(component, so, pending);

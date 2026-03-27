@@ -256,21 +256,6 @@ textarea { width: 100%; min-height: 4rem; padding: 0.7rem 0.85rem; margin-top: 0
 </div>
 </section>
 <section>
-<h2>Qwen TTS (Speaker + Emotion)</h2>
-<div class="controls">
-<label for="qwenSpeakerSelect">Speaker</label>
-<select id="qwenSpeakerSelect"></select>
-<label for="qwenInstruct">Emotion / Style</label>
-<input id="qwenInstruct" type="text" value="friendly" placeholder="fixed by server">
-</div>
-<div class="controls" style="flex-direction:column;align-items:stretch;">
-<textarea id="qwenSpeakText" placeholder="Text to synthesize with Qwen TTS"></textarea>
-<div class="controls" style="width:100%;">
-<button onclick="qwenSpeakNow()">Speak (Qwen)</button>
-</div>
-</div>
-</section>
-<section>
 <h2>Kokoro TTS</h2>
 <div class="controls">
 <label for="kokoroVoiceSelect">Voice</label>
@@ -299,7 +284,6 @@ const ttsVoiceLabel = document.getElementById('ttsVoiceLabel');
 const modelSelect = document.getElementById('ttsModelSelect');
 const ttsModelLabel = document.getElementById('ttsModelLabel');
 const ttsBackendSelect = document.getElementById('ttsBackendSelect');
-const qwenSpeakerSelect = document.getElementById('qwenSpeakerSelect');
 const kokoroVoiceSelect = document.getElementById('kokoroVoiceSelect');
 const asrModeSelect = document.getElementById('asrModeSelect');
 const serverAsrModeSelect = document.getElementById('serverAsrModeSelect');
@@ -638,23 +622,8 @@ function populateKokoroVoiceOptions(data, syncPrimary){
 }
 async function refreshPrimaryVoiceOptions(){
   const backend = currentTtsBackend();
-  if(ttsVoiceLabel){ ttsVoiceLabel.textContent = backend === 'qwen' ? 'Speaker' : 'Voice'; }
+  if(ttsVoiceLabel){ ttsVoiceLabel.textContent = 'Voice'; }
   setTtsModelEnabled(backend === 'piper');
-  if(backend === 'qwen'){
-    try {
-      const resp = await fetch('/api/qwen/options');
-      if(!resp.ok){ return; }
-      const data = await resp.json();
-      const speakers = Array.isArray(data.speakers) ? data.speakers : [];
-      const current = typeof data.current === 'string' ? data.current : '';
-      populateSelectOptions(voiceSelect, speakers, current);
-      if(qwenSpeakerSelect){ populateSelectOptions(qwenSpeakerSelect, speakers, current); }
-      return;
-    } catch(err) {
-      console.warn('primary qwen options failed', err);
-      return;
-    }
-  }
   if(backend === 'kokoro'){
     try {
       const resp = await fetch('/api/kokoro/options');
@@ -679,11 +648,6 @@ async function refreshPrimaryVoiceOptions(){
 async function setVoice(value){
   if(!value) return;
   const backend = currentTtsBackend();
-  if(backend === 'qwen'){
-    await send('/api/voice',{action:'set_qwen_speaker',speaker:value});
-    if(qwenSpeakerSelect){ qwenSpeakerSelect.value = value; }
-    return;
-  }
   if(backend === 'kokoro'){
     await send('/api/voice',{action:'set_kokoro_voice',voice:value});
     if(kokoroVoiceSelect){ kokoroVoiceSelect.value = value; }
@@ -717,13 +681,6 @@ function speakNow(){
   const model = modelSelect ? modelSelect.value : '';
   const backend = ttsBackendSelect ? String(ttsBackendSelect.value || '').trim() : '';
   send('/api/speak',{text:text,voice:voiceSelect.value,model:model,backend:backend,speed:speed,volume:volume});
-}
-function qwenSpeakNow(){
-  const text = document.getElementById('qwenSpeakText').value;
-  if(!text.trim()){ statusEl.textContent = 'error: enter text to speak'; return; }
-  const speaker = qwenSpeakerSelect ? qwenSpeakerSelect.value : '';
-  const instruct = (document.getElementById('qwenInstruct').value||'').trim();
-  send('/api/qwen/speak',{text:text,speaker:speaker,instruct:instruct});
 }
 function kokoroSpeakNow(){
   const text = document.getElementById('kokoroSpeakText').value;
@@ -983,7 +940,7 @@ async function loadVoiceOptions(){
         modelSelect.value = models[0];
       }
     }
-    const backends = Array.isArray(data.backends) ? data.backends : [];
+    const backends = Array.isArray(data.backends) && data.backends.length ? data.backends : ['piper', 'kokoro'];
     if(ttsBackendSelect){
       populateSelectOptions(ttsBackendSelect, backends, typeof data.backendCurrent === 'string' ? data.backendCurrent : '');
       const backendCurrent = typeof data.backendCurrent === 'string' ? data.backendCurrent : '';
@@ -997,19 +954,6 @@ async function loadVoiceOptions(){
   } catch(err) {
     console.warn('voice options failed', err);
   }
-}
-async function loadQwenOptions(){
-  if(!qwenSpeakerSelect) return;
-  try {
-    const resp = await fetch('/api/qwen/options');
-    if(!resp.ok){ return; }
-    const data = await resp.json();
-    const speakers = Array.isArray(data.speakers) ? data.speakers : [];
-    qwenSpeakerSelect.innerHTML = speakers.map(v => `<option value="${v}">${v}</option>`).join('');
-    const current = typeof data.current === 'string' ? data.current : '';
-    if(current && speakers.includes(current)){ qwenSpeakerSelect.value = current; }
-    else if(speakers.length){ qwenSpeakerSelect.value = speakers[0]; }
-  } catch(err) { console.warn('qwen options failed', err); }
 }
 async function loadKokoroOptions(){
   if(!kokoroVoiceSelect) return;
@@ -1030,7 +974,6 @@ if(logContainer){ renderLog([]); }
 refreshLog();
 connectLiveLogStream();
 loadVoiceOptions();
-loadQwenOptions();
 loadKokoroOptions();
 refreshAsrStatus();
 setInterval(refreshAsrStatus, 5000);

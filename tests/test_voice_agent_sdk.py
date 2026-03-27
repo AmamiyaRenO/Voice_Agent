@@ -1,158 +1,148 @@
+import inspect
 import json
+from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from voice_agent_sdk import VoiceAgentClient
-from voice_agent_sdk.client import MqttConfig
 
 
-def make_client(mqtt_client=None, http_session=None):
-    return VoiceAgentClient(
-        host="10.0.0.1",
-        mqtt_config=MqttConfig(host="10.0.0.1"),
-        mqtt_client=mqtt_client,
-        http_session=http_session,
-    )
+ROOT = Path(__file__).resolve().parents[1]
+SDK_MANIFEST_PATH = ROOT / "Assets" / "StreamingAssets" / "panel" / "sdk-manifest.json"
+SDK_HTML_PATH = ROOT / "Assets" / "StreamingAssets" / "panel" / "sdk.html"
+REMOVED_METHODS = {
+    "connect_mqtt",
+    "disconnect_mqtt",
+    "synthesize_wav",
+    "set_dialog_style",
+    "publish_raw",
+    "face_idle",
+    "servo_open",
+    "servo_close",
+    "servo_open_hold",
+    "servo_close_hold",
+    "servo_center_hold",
+    "servo_stop",
+    "servo_open_slow",
+    "servo_close_slow",
+}
 
 
-def test_speak_uses_get_by_default():
-    session = mock.Mock()
-    response = mock.Mock()
-    response.content = b"audio"
-    response.raise_for_status = mock.Mock()
-    session.get.return_value = response
-
-    client = make_client(http_session=session)
-    payload = client.synthesize_wav("hello", model=r"D:\piper\models\en_US-amy-medium.onnx")
-
-    assert payload == b"audio"
-    session.get.assert_called_once()
-    args, kwargs = session.get.call_args
-    assert args[0].endswith("/speak")
-    assert kwargs["params"]["text"] == "hello"
-    assert kwargs["params"]["model"] == r"D:\piper\models\en_US-amy-medium.onnx"
+def load_manifest():
+    return json.loads(SDK_MANIFEST_PATH.read_text(encoding="utf-8"))
 
 
-def test_speak_uses_post_when_enabled():
-    session = mock.Mock()
-    response = mock.Mock()
-    response.content = b"audio"
-    response.raise_for_status = mock.Mock()
-    session.post.return_value = response
-
-    client = make_client(http_session=session)
-    client.synthesize_wav("hello", use_post=True)
-
-    session.post.assert_called_once()
+def make_client(http_session=None):
+    return VoiceAgentClient(host="10.0.0.1", http_session=http_session)
 
 
-def test_speak_posts_to_user_panel_api():
-    session = mock.Mock()
-    response = mock.Mock()
-    response.raise_for_status = mock.Mock()
-    response.json.return_value = {"status": "ok", "message": "playing locally"}
-    session.post.return_value = response
-
-    client = make_client(http_session=session)
-    r = client.speak("hi", voice="en_US", model=r"D:\piper\models\en_US-amy-medium.onnx", speed=1.0, volume=1.0)
-
-    assert r["status"] == "ok"
-    session.post.assert_called_once()
-    args, kwargs = session.post.call_args
-    assert args[0].endswith("/api/speak")
-    assert kwargs["json"]["text"] == "hi"
-    assert kwargs["json"]["voice"] == "en_US"
-    assert kwargs["json"]["model"] == r"D:\piper\models\en_US-amy-medium.onnx"
-
-
-def test_face_preset_publishes_message():
-    mqtt_client = mock.Mock()
-    client = make_client(mqtt_client=mqtt_client)
-    client.face_preset("happy", duration=2.5)
-
-    mqtt_client.publish.assert_called_once()
-    topic, payload = mqtt_client.publish.call_args[0][:2]
-    data = json.loads(payload)
-    assert topic == "robot/pi/face/cmd"
-    assert data["action"] == "face"
-    assert data["value"] == "happy:2.5"
-
-
-def test_led_breathe_publishes_message():
-    mqtt_client = mock.Mock()
-    client = make_client(mqtt_client=mqtt_client)
-    client.led_breathe(color="#00BFFF", brightness=0.8, period=2.5, duration=3)
-
-    topic, payload = mqtt_client.publish.call_args[0][:2]
-    data = json.loads(payload)
-    assert topic == "robot/pi/led/cmd"
-    assert data["action"] == "led"
-    assert data["value"] == "breathe:#00BFFF:3:0.8:2.5"
-
-
-def test_set_dialog_style_publishes_message():
-    mqtt_client = mock.Mock()
-    client = make_client(mqtt_client=mqtt_client)
-    client.set_dialog_style("Supportive")
-
-    topic, payload = mqtt_client.publish.call_args[0][:2]
-    data = json.loads(payload)
-    assert topic == "robot/dialog/style"
-    assert data["style"] == "Supportive"
-
-
-def test_get_llm_prompt_calls_panel_endpoint():
-    session = mock.Mock()
-    response = mock.Mock()
-    response.raise_for_status = mock.Mock()
-    response.json.return_value = {"status": "ok", "prompt": "You are a coach"}
-    session.get.return_value = response
-
-    client = make_client(http_session=session)
-    data = client.get_llm_prompt()
-
-    assert data["status"] == "ok"
-    session.get.assert_called_once()
-    args, kwargs = session.get.call_args
-    assert args[0].endswith("/api/llm/prompt")
-    assert kwargs["timeout"] == 10.0
+def invoke_manifest_method(client: VoiceAgentClient, method_name: str, payload: dict):
+    if method_name in {"get_logs", "get_tts_options", "get_kokoro_options", "get_llm_prompt", "get_runtime_config", "get_asr_status", "start_listening", "pause_listening", "exit_game", "led_off", "flower_open", "flower_close", "flower_stop", "flower_open_slow", "flower_close_slow", "reset_llm_prompt"}:
+        return getattr(client, method_name)()
+    if method_name == "speak":
+        return client.speak(
+            payload["text"],
+            voice=payload.get("voice"),
+            model=payload.get("model"),
+            speed=payload.get("speed", 1.0),
+            volume=payload.get("volume", 1.0),
+            backend=payload.get("backend"),
+        )
+    if method_name in {"set_voice", "set_kokoro_voice"}:
+        return getattr(client, method_name)(payload["voice"])
+    if method_name == "set_tts_model":
+        return client.set_tts_model(payload["model"])
+    if method_name == "set_tts_backend":
+        return client.set_tts_backend(payload["backend"])
+    if method_name == "kokoro_speak":
+        return client.kokoro_speak(payload["text"], voice=payload.get("voice"))
+    if method_name == "set_llm_prompt":
+        return client.set_llm_prompt(payload["prompt"])
+    if method_name == "set_local_model":
+        return client.set_local_model(payload["ollama_model"])
+    if method_name in {"set_asr_mode", "set_backend_asr_mode"}:
+        return getattr(client, method_name)(payload["mode"])
+    if method_name == "describe_current_camera":
+        return client.describe_current_camera(payload["prompt"], model=payload.get("model"))
+    if method_name == "launch_game":
+        return client.launch_game(payload["name"])
+    if method_name == "face_preset":
+        return client.face_preset(payload["mode"], seconds=payload["seconds"])
+    if method_name == "face_custom":
+        return client.face_custom(payload["value"], seconds=payload["seconds"])
+    if method_name in {"face_happy", "face_neutral", "face_sad", "face_very_sad", "face_excited"}:
+        return getattr(client, method_name)(seconds=payload["seconds"])
+    if method_name == "led_breathe":
+        return client.led_breathe(
+            color=payload["color"],
+            brightness=payload["brightness"],
+            period=payload["period"],
+            duration=payload["duration"],
+        )
+    if method_name == "led_solid":
+        return client.led_solid(
+            color=payload["color"],
+            brightness=payload["brightness"],
+            duration=payload["duration"],
+        )
+    if method_name == "led_random":
+        return client.led_random(duration=payload["duration"])
+    raise AssertionError(f"Unhandled manifest method in test: {method_name}")
 
 
-def test_set_llm_prompt_posts_to_panel_endpoint():
-    session = mock.Mock()
-    response = mock.Mock()
-    response.raise_for_status = mock.Mock()
-    response.json.return_value = {"status": "ok", "message": "llm prompt updated"}
-    session.post.return_value = response
-
-    client = make_client(http_session=session)
-    data = client.set_llm_prompt("You are concise.")
-
-    assert data["status"] == "ok"
-    session.post.assert_called_once()
-    args, kwargs = session.post.call_args
-    assert args[0].endswith("/api/llm/prompt")
-    assert kwargs["json"]["prompt"] == "You are concise."
-
-
-def test_describe_current_camera_posts_to_panel_endpoint():
-    session = mock.Mock()
-    response = mock.Mock()
-    response.raise_for_status = mock.Mock()
-    response.json.return_value = {
-        "status": "ok",
-        "description": "I see a person standing in front of the camera.",
+def test_sdk_manifest_matches_client_public_methods():
+    manifest = load_manifest()
+    manifest_methods = {entry["client_method"] for entry in manifest["methods"]}
+    public_methods = {
+        name
+        for name, value in inspect.getmembers(VoiceAgentClient, predicate=callable)
+        if not name.startswith("_") and name != "__init__"
     }
-    session.post.return_value = response
+
+    assert public_methods == manifest_methods
+    assert not (REMOVED_METHODS & public_methods)
+
+
+def test_sdk_visualizer_uses_shared_manifest():
+    source = SDK_HTML_PATH.read_text(encoding="utf-8")
+    assert "/sdk-manifest.json" in source
+    assert "const sdkMap = {" not in source
+    assert "buildSdkMap(manifest)" in source
+
+
+@pytest.mark.parametrize(
+    "entry",
+    load_manifest()["methods"],
+    ids=lambda entry: entry["client_method"],
+)
+def test_every_manifest_method_calls_expected_endpoint(entry):
+    session = mock.Mock()
+    response = mock.Mock()
+    response.raise_for_status = mock.Mock()
+    response.json.return_value = {"status": "ok", "method": entry["client_method"]}
+    session.request.return_value = response
 
     client = make_client(http_session=session)
-    data = client.describe_current_camera(
-        prompt="What do you see?",
-        model="gemma3:4b",
-    )
+    result = invoke_manifest_method(client, entry["client_method"], entry.get("payload") or {})
 
-    assert data["status"] == "ok"
-    session.post.assert_called_once()
-    args, kwargs = session.post.call_args
-    assert args[0].endswith("/api/vision/describe")
-    assert kwargs["json"]["prompt"] == "What do you see?"
-    assert kwargs["json"]["model"] == "gemma3:4b"
+    assert result["status"] == "ok"
+    session.request.assert_called_once()
+    args, kwargs = session.request.call_args
+    assert args[0] == entry["http_method"]
+    assert args[1] == f"http://10.0.0.1:8787{entry['endpoint']}"
+    expected_payload = entry.get("payload") or None
+    assert kwargs.get("json") == expected_payload
+    assert kwargs["timeout"] > 0
+
+
+def test_speak_requires_text():
+    client = make_client(http_session=mock.Mock())
+    with pytest.raises(ValueError, match="text is required"):
+        client.speak("   ")
+
+
+def test_set_voice_requires_value():
+    client = make_client(http_session=mock.Mock())
+    with pytest.raises(ValueError, match="voice is required"):
+        client.set_voice("")

@@ -4,9 +4,10 @@ PIPER_MODEL_PATH:D:\piper\models\en_US-amy-medium.onnx
 VOICE_AGENT_HUB_CMD:python orchestrator.py
 VOICE_AGENT_HUB_CWD:D:\unityproject\Robot_opr\releases\current\orchestrator
 VOICE_AGENT_PIPER_HTTP_CMD:uvicorn piper_http:app --host 0.0.0.0 --port 5005
-# Switch to Qwen3-TTS (keeps Unity URL unchanged). Use a separate venv to avoid dependency conflicts:
-# VOICE_AGENT_PIPER_HTTP_CMD:D:\unityproject\Voice_Agent\python_voice_service\.venv_tts\Scripts\python.exe -m uvicorn qwen_tts_http:app --host 0.0.0.0 --port 5005
+# Optional Kokoro sidecar:
+# VOICE_AGENT_KOKORO_HTTP_CMD:D:\unityproject\Voice_Agent\python_voice_service\.venv_tts\Scripts\python.exe -m uvicorn kokoro_tts_http:app --host 0.0.0.0 --port 5007
 VOICE_AGENT_PIPER_HTTP_CWD:D:\unityproject\Voice_Agent\python_voice_service
+VOICE_AGENT_KOKORO_HTTP_CWD:D:\unityproject\Voice_Agent\python_voice_service
 VOICE_AGENT_VOICE_CMD:uvicorn main:app --host 0.0.0.0 --port 8000
 VOICE_AGENT_VOICE_CWD:D:\unityproject\Voice_Agent\python_voice_service
 WHISPER_DEVICE:cuda

@@ -1,0 +1,365 @@
+{
+  "version": 1,
+  "methods": [
+    {
+      "client_method": "get_logs",
+      "label": "get_logs()",
+      "endpoint": "/api/logs",
+      "http_method": "GET",
+      "payload": {}
+    },
+    {
+      "client_method": "get_tts_options",
+      "label": "get_tts_options()",
+      "endpoint": "/api/voice/options",
+      "http_method": "GET",
+      "payload": {}
+    },
+    {
+      "client_method": "get_kokoro_options",
+      "label": "get_kokoro_options()",
+      "endpoint": "/api/kokoro/options",
+      "http_method": "GET",
+      "payload": {}
+    },
+    {
+      "client_method": "speak",
+      "label": "speak(text, voice=None, model=None, speed=1.0, volume=1.0, backend=None)",
+      "endpoint": "/api/speak",
+      "http_method": "POST",
+      "payload": {
+        "text": "Hello from the SDK visualizer",
+        "voice": "en_US",
+        "model": "",
+        "speed": 1.0,
+        "volume": 1.0,
+        "backend": "piper"
+      }
+    },
+    {
+      "client_method": "set_voice",
+      "label": "set_voice(voice)",
+      "endpoint": "/api/voice",
+      "http_method": "POST",
+      "payload": {
+        "action": "set",
+        "voice": "en_US"
+      }
+    },
+    {
+      "client_method": "set_tts_model",
+      "label": "set_tts_model(model)",
+      "endpoint": "/api/voice",
+      "http_method": "POST",
+      "payload": {
+        "action": "set_model",
+        "model": "D:/piper/models/en_US-amy-medium.onnx"
+      }
+    },
+    {
+      "client_method": "set_tts_backend",
+      "label": "set_tts_backend(backend)",
+      "endpoint": "/api/voice",
+      "http_method": "POST",
+      "payload": {
+        "action": "set_backend",
+        "backend": "piper"
+      }
+    },
+    {
+      "client_method": "set_kokoro_voice",
+      "label": "set_kokoro_voice(voice)",
+      "endpoint": "/api/voice",
+      "http_method": "POST",
+      "payload": {
+        "action": "set_kokoro_voice",
+        "voice": "af_heart"
+      }
+    },
+    {
+      "client_method": "kokoro_speak",
+      "label": "kokoro_speak(text, voice=None)",
+      "endpoint": "/api/kokoro/speak",
+      "http_method": "POST",
+      "payload": {
+        "text": "Hello from Kokoro",
+        "voice": "af_heart"
+      }
+    },
+    {
+      "client_method": "get_llm_prompt",
+      "label": "get_llm_prompt()",
+      "endpoint": "/api/llm/prompt",
+      "http_method": "GET",
+      "payload": {}
+    },
+    {
+      "client_method": "set_llm_prompt",
+      "label": "set_llm_prompt(prompt)",
+      "endpoint": "/api/llm/prompt",
+      "http_method": "POST",
+      "payload": {
+        "prompt": "You are a concise coach. Keep replies under 2 sentences."
+      }
+    },
+    {
+      "client_method": "reset_llm_prompt",
+      "label": "reset_llm_prompt()",
+      "endpoint": "/api/llm/prompt",
+      "http_method": "POST",
+      "payload": {
+        "reset": true
+      }
+    },
+    {
+      "client_method": "get_runtime_config",
+      "label": "get_runtime_config()",
+      "endpoint": "/api/runtime/config",
+      "http_method": "GET",
+      "payload": {}
+    },
+    {
+      "client_method": "set_local_model",
+      "label": "set_local_model(model)",
+      "endpoint": "/api/runtime/config",
+      "http_method": "POST",
+      "payload": {
+        "ollama_model": "qwen3.5:0.8b"
+      }
+    },
+    {
+      "client_method": "get_asr_status",
+      "label": "get_asr_status()",
+      "endpoint": "/api/asr",
+      "http_method": "GET",
+      "payload": {}
+    },
+    {
+      "client_method": "set_asr_mode",
+      "label": "set_asr_mode(mode)",
+      "endpoint": "/api/asr",
+      "http_method": "POST",
+      "payload": {
+        "action": "set_mode",
+        "mode": "moonshine-medium"
+      }
+    },
+    {
+      "client_method": "set_backend_asr_mode",
+      "label": "set_backend_asr_mode(mode)",
+      "endpoint": "/api/asr/backend",
+      "http_method": "POST",
+      "payload": {
+        "action": "set_mode",
+        "mode": "whisper-large-v3"
+      }
+    },
+    {
+      "client_method": "start_listening",
+      "label": "start_listening()",
+      "endpoint": "/api/asr",
+      "http_method": "POST",
+      "payload": {
+        "action": "start_listening"
+      }
+    },
+    {
+      "client_method": "pause_listening",
+      "label": "pause_listening()",
+      "endpoint": "/api/asr",
+      "http_method": "POST",
+      "payload": {
+        "action": "pause_listening"
+      }
+    },
+    {
+      "client_method": "describe_current_camera",
+      "label": "describe_current_camera(prompt, model=None)",
+      "endpoint": "/api/vision/describe",
+      "http_method": "POST",
+      "payload": {
+        "prompt": "Describe what you see in the current camera frame.",
+        "model": "qwen3.5:0.8b"
+      }
+    },
+    {
+      "client_method": "launch_game",
+      "label": "launch_game(name)",
+      "endpoint": "/api/game",
+      "http_method": "POST",
+      "payload": {
+        "action": "launch",
+        "name": "cornhole"
+      }
+    },
+    {
+      "client_method": "exit_game",
+      "label": "exit_game()",
+      "endpoint": "/api/game",
+      "http_method": "POST",
+      "payload": {
+        "action": "exit"
+      }
+    },
+    {
+      "client_method": "face_preset",
+      "label": "face_preset(mode, seconds=3.0)",
+      "endpoint": "/api/face",
+      "http_method": "POST",
+      "payload": {
+        "mode": "happy",
+        "seconds": 3.0
+      }
+    },
+    {
+      "client_method": "face_custom",
+      "label": "face_custom(value, seconds=3.0)",
+      "endpoint": "/api/face",
+      "http_method": "POST",
+      "payload": {
+        "mode": "custom",
+        "value": "ANeutral",
+        "seconds": 3.0
+      }
+    },
+    {
+      "client_method": "face_happy",
+      "label": "face_happy(seconds=3.0)",
+      "endpoint": "/api/face",
+      "http_method": "POST",
+      "payload": {
+        "mode": "happy",
+        "seconds": 3.0
+      }
+    },
+    {
+      "client_method": "face_neutral",
+      "label": "face_neutral(seconds=3.0)",
+      "endpoint": "/api/face",
+      "http_method": "POST",
+      "payload": {
+        "mode": "neutral",
+        "seconds": 3.0
+      }
+    },
+    {
+      "client_method": "face_sad",
+      "label": "face_sad(seconds=3.0)",
+      "endpoint": "/api/face",
+      "http_method": "POST",
+      "payload": {
+        "mode": "sad",
+        "seconds": 3.0
+      }
+    },
+    {
+      "client_method": "face_very_sad",
+      "label": "face_very_sad(seconds=3.0)",
+      "endpoint": "/api/face",
+      "http_method": "POST",
+      "payload": {
+        "mode": "verySad",
+        "seconds": 3.0
+      }
+    },
+    {
+      "client_method": "face_excited",
+      "label": "face_excited(seconds=3.0)",
+      "endpoint": "/api/face",
+      "http_method": "POST",
+      "payload": {
+        "mode": "excited",
+        "seconds": 3.0
+      }
+    },
+    {
+      "client_method": "led_breathe",
+      "label": "led_breathe(color='#00BFFF', brightness=0.8, period=2.0, duration=0.0)",
+      "endpoint": "/api/led",
+      "http_method": "POST",
+      "payload": {
+        "mode": "breathe",
+        "color": "#00BFFF",
+        "brightness": 0.8,
+        "period": 2.0,
+        "duration": 0.0
+      }
+    },
+    {
+      "client_method": "led_solid",
+      "label": "led_solid(color='#FFFFFF', brightness=0.8, duration=0.0)",
+      "endpoint": "/api/led",
+      "http_method": "POST",
+      "payload": {
+        "mode": "solid",
+        "color": "#FFFFFF",
+        "brightness": 0.8,
+        "duration": 0.0
+      }
+    },
+    {
+      "client_method": "led_random",
+      "label": "led_random(duration=0.0)",
+      "endpoint": "/api/led",
+      "http_method": "POST",
+      "payload": {
+        "mode": "random",
+        "duration": 0.0
+      }
+    },
+    {
+      "client_method": "led_off",
+      "label": "led_off()",
+      "endpoint": "/api/led",
+      "http_method": "POST",
+      "payload": {
+        "mode": "off"
+      }
+    },
+    {
+      "client_method": "flower_open",
+      "label": "flower_open()",
+      "endpoint": "/api/flower",
+      "http_method": "POST",
+      "payload": {
+        "action": "open"
+      }
+    },
+    {
+      "client_method": "flower_close",
+      "label": "flower_close()",
+      "endpoint": "/api/flower",
+      "http_method": "POST",
+      "payload": {
+        "action": "close"
+      }
+    },
+    {
+      "client_method": "flower_stop",
+      "label": "flower_stop()",
+      "endpoint": "/api/flower",
+      "http_method": "POST",
+      "payload": {
+        "action": "stop"
+      }
+    },
+    {
+      "client_method": "flower_open_slow",
+      "label": "flower_open_slow()",
+      "endpoint": "/api/flower",
+      "http_method": "POST",
+      "payload": {
+        "action": "open_slow"
+      }
+    },
+    {
+      "client_method": "flower_close_slow",
+      "label": "flower_close_slow()",
+      "endpoint": "/api/flower",
+      "http_method": "POST",
+      "payload": {
+        "action": "close_slow"
+      }
+    }
+  ]
+}

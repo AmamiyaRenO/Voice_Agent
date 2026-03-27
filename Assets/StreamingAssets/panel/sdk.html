@@ -101,27 +101,14 @@ pre{background:#020617;border:1px solid rgba(148,163,184,.25);padding:.75rem;bor
 </div>
 </div>
 <script>
-const sdkMap = {
-  'speak(text,voice,model,speed,volume)': { endpoint:'/api/speak', payload:{ text:'Hello from SDK visualizer', voice:'en_US', model:'', speed:1.0, volume:1.0 } },
-  'qwen_speak(text,speaker,instruct)': { endpoint:'/api/qwen/speak', payload:{ text:'Hello from Qwen', speaker:'Ryan', instruct:'friendly' } },
-  'set_tts_options(voice,model)': { endpoint:'/api/voice', payload:{ action:'set', voice:'en_US' } },
-  'set_tts_model(model)': { endpoint:'/api/voice', payload:{ action:'set_model', model:'' } },
-  'get_llm_prompt()': { endpoint:'/api/llm/prompt', method:'GET', payload:{} },
-  'set_llm_prompt(prompt)': { endpoint:'/api/llm/prompt', payload:{ prompt:'You are a concise coach. Keep replies under 2 sentences.' } },
-  'reset_llm_prompt()': { endpoint:'/api/llm/prompt', payload:{ reset:true } },
-  'describe_camera(prompt,model)': { endpoint:'/api/vision/describe', payload:{ prompt:'Describe what you see in the current camera frame.', model:'qwen3.5:0.8b' } },
-  'launch_game(name)': { endpoint:'/api/game', payload:{ action:'launch', name:'cornhole' } },
-  'exit_game()': { endpoint:'/api/game', payload:{ action:'exit' } },
-  'face_preset(mode,seconds)': { endpoint:'/api/face', payload:{ mode:'happy', seconds:3 } },
-  'flower_open()': { endpoint:'/api/flower', payload:{ action:'open' } },
-  'led_breathe(color,brightness,period,duration)': { endpoint:'/api/led', payload:{ mode:'breathe', color:'#00BFFF', brightness:0.8, period:2, duration:2 } }
-};
+const SDK_MANIFEST_URL = '/sdk-manifest.json';
+let sdkMap = {};
 const methodEl = document.getElementById('sdkMethod');
 const endpointEl = document.getElementById('sdkEndpoint');
 const payloadEl = document.getElementById('sdkPayload');
 const statusEl = document.getElementById('sdkStatus');
 const respEl = document.getElementById('sdkResp');
-const methods = Object.keys(sdkMap);
+let methods = [];
 const flowTemplatesEl = document.getElementById('flowTemplates');
 const flowCanvasEl = document.getElementById('flowCanvas');
 const flowEditorEl = document.getElementById('flowEditor');
@@ -139,16 +126,47 @@ let flowRunToken = 0;
 let flowRunning = false;
 let dragTemplateKey = '';
 let dragStepId = '';
-methodEl.innerHTML = methods.map(m => `<option value="${m}">${m}</option>`).join('');
+function cloneValue(v){ return JSON.parse(JSON.stringify(v)); }
+function buildSdkMap(manifest){
+  const entries = Array.isArray(manifest && manifest.methods) ? manifest.methods : [];
+  const nextMap = {};
+  for(const entry of entries){
+    const label = String(entry && entry.label || '').trim();
+    if(!label) continue;
+    nextMap[label] = {
+      clientMethod: String(entry && entry.client_method || '').trim(),
+      endpoint: String(entry && entry.endpoint || '').trim(),
+      method: String(entry && entry.http_method || 'POST').toUpperCase(),
+      payload: cloneValue(entry && entry.payload || {})
+    };
+  }
+  return nextMap;
+}
+function applyManifest(manifest){
+  sdkMap = buildSdkMap(manifest);
+  methods = Object.keys(sdkMap);
+  methodEl.innerHTML = methods.map(m => `<option value="${m}">${m}</option>`).join('');
+  if(methods.length){
+    methodEl.value = methods[0];
+  }
+  syncMethod();
+  templateCatalog = buildTemplateCatalog();
+  renderTemplates();
+}
 function syncMethod(){
   const m = methodEl.value;
   const cfg = sdkMap[m];
+  if(!cfg){
+    endpointEl.value = '';
+    payloadEl.value = '{}';
+    respEl.textContent = '';
+    return;
+  }
   endpointEl.value = cfg.endpoint;
   payloadEl.value = JSON.stringify(cfg.payload, null, 2);
   respEl.textContent = '';
 }
 function resetPayload(){ syncMethod(); }
-function cloneValue(v){ return JSON.parse(JSON.stringify(v)); }
 function makeStepId(){ return 'step_' + Math.random().toString(36).slice(2, 10); }
 function escapeHtml(value){
   return String(value || '')
@@ -197,7 +215,27 @@ function buildTemplateCatalog(){
   apiTemplates.push({ key:'util:keyword_wait', label:'wait_keyword(keyword)', kind:'condition' });
   return apiTemplates;
 }
-const templateCatalog = buildTemplateCatalog();
+let templateCatalog = [];
+async function initSdk(){
+  statusEl.textContent = 'Loading manifest...';
+  try {
+    const resp = await fetch(SDK_MANIFEST_URL, { cache:'no-store' });
+    if(!resp.ok){
+      throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    }
+    const manifest = await resp.json();
+    applyManifest(manifest);
+    statusEl.textContent = `Loaded ${methods.length} SDK methods.`;
+    renderFlowCanvas();
+  } catch(err){
+    endpointEl.value = '';
+    payloadEl.value = '{}';
+    respEl.textContent = String(err);
+    statusEl.textContent = 'Failed to load manifest: ' + err;
+    renderTemplates();
+    renderFlowCanvas();
+  }
+}
 function createStepFromTemplate(key){
   if(!key) return null;
   if(key.startsWith('api:')){
@@ -664,9 +702,9 @@ flowClearBtn.addEventListener('click', clearFlow);
 flowExportBtn.addEventListener('click', exportFlow);
 flowImportBtn.addEventListener('click', importFlow);
 methodEl.addEventListener('change', syncMethod);
-syncMethod();
 renderTemplates();
 renderFlowCanvas();
+initSdk();
 </script>
 </body>
 </html>

@@ -19,14 +19,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Benchmark /speak TTS HTTP endpoint.")
     ap.add_argument("--url", default="http://127.0.0.1:5005/speak", help="Base /speak URL")
     ap.add_argument("--text", default="Hello! Let's get started with your plan.", help="Text to synthesize")
-    ap.add_argument("--speaker", default="", help="Optional speaker/voice")
+    ap.add_argument("--speaker", default="", help="Optional voice/speaker override")
     ap.add_argument("--instruct", default="", help="Optional instruct/style string")
     ap.add_argument("--runs", type=int, default=3, help="Number of runs")
     args = ap.parse_args()
 
     params = {"text": args.text}
     if args.speaker:
-        params["voice"] = args.speaker  # works for both piper_http (ignored) and qwen_tts_http (alias)
+        params["voice"] = args.speaker
     if args.instruct:
         params["instruct"] = args.instruct
 
@@ -49,4 +49,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
