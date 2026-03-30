@@ -1,0 +1,5 @@
+{
+  "displayName": "Inspector Starter",
+  "description": "Imports a prefab with VoiceAgentComponent already attached and prefilled for local testing.",
+  "createSeparatePackage": false
+}

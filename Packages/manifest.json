@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "com.voiceagent.unity": "file:com.voiceagent.unity",
     "com.unity.collab-proxy": "2.8.2",
     "com.unity.feature.development": "1.0.1",
     "com.unity.sentis": "2.1.3",
@@ -38,5 +39,8 @@
     "com.unity.modules.vr": "1.0.0",
     "com.unity.modules.wind": "1.0.0",
     "com.unity.modules.xr": "1.0.0"
-  }
+  },
+  "testables": [
+    "com.voiceagent.unity"
+  ]
 }

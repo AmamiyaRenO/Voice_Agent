@@ -1,0 +1,12 @@
+{
+  "name": "com.voiceagent.rachel-story-flow",
+  "displayName": "VoiceAgent Unity SDK Compatibility",
+  "version": "0.1.0",
+  "unity": "2022.3",
+  "description": "Compatibility shim for older embedded package references. The active package is com.voiceagent.unity.",
+  "keywords": [
+    "voice-agent",
+    "unity",
+    "compatibility"
+  ]
+}

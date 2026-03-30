@@ -1,0 +1,80 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &100000
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 400000}
+  - component: {fileID: 11400000}
+  m_Layer: 0
+  m_Name: VoiceAgent Sample
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &400000
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 100000}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 100000}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f2a689b7da1e3c64aa3306dc8c524b3c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  settings:
+    host: 127.0.0.1
+    panelPort: 8787
+    defaultVoice: en_US
+    defaultBackend: piper
+    defaultTtsModel: 
+    defaultKokoroVoice: af_heart
+    requestTimeoutSeconds: 15
+  speakText: Hello from the packaged VoiceAgent sample.
+  voice: en_US
+  backend: piper
+  ttsModel: 
+  speechSpeed: 1
+  speechVolume: 1
+  kokoroText: Hello from Kokoro in the packaged sample.
+  kokoroVoice: af_heart
+  llmPrompt: You are a helpful voice assistant running from the Unity package sample.
+  localModel: qwen3.5:latest
+  asrMode: manual
+  backendAsrMode: manual
+  visionPrompt: Describe the current camera view.
+  visionModel: 
+  gameName: demo
+  facePreset: 0
+  faceCustomValue: ^-^
+  faceSeconds: 3
+  ledColor: {r: 0, g: 1, b: 1, a: 1}
+  ledBrightness: 0.8
+  ledPeriod: 2
+  ledDuration: 0
+  lastSuccess: 0
+  lastStatusCode: 0
+  lastMessage: 
+  lastRawBody: 

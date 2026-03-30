@@ -1,0 +1,25 @@
+{
+  "name": "com.voiceagent.unity",
+  "displayName": "VoiceAgent Unity SDK",
+  "version": "0.1.0",
+  "unity": "2022.3",
+  "description": "Minimal Unity SDK with an inspector-driven VoiceAgent component for calling the external voice-agent runtime.",
+  "keywords": [
+    "voice-agent",
+    "unity",
+    "sdk",
+    "inspector",
+    "component"
+  ],
+  "samples": [
+    {
+      "displayName": "Inspector Starter",
+      "description": "A preconfigured prefab with VoiceAgentComponent already attached and ready to test from the Inspector.",
+      "path": "Samples~/InspectorStarter"
+    }
+  ],
+  "dependencies": {},
+  "author": {
+    "name": "OpenAI Codex"
+  }
+}
