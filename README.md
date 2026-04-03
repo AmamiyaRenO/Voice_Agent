@@ -217,6 +217,7 @@ Place `.md`, `.qmd`, and `.txt` corpora there when you want them to participate 
 - **Unity:** `2022.3.56f1c1` (see `ProjectSettings/ProjectVersion.txt`)
 - **OS:** Any OS supported by your Unity/Python deployment (Windows is common for this setup)
 - **Python:** 3.10+ (3.12 recommended for service environments)
+  - Windows source checkouts now bundle a portable `3.12.10` runtime under `native/python/windows-x64`, which `helper.bat` prefers for first-run bootstrap.
 - **MQTT broker:** typically on `1883`
 - **Audio:** microphone permission enabled
 
@@ -340,9 +341,9 @@ Useful doc-rag env vars:
 
 ### 4) Optional helper.bat
 
-`helper.bat` now starts `scripts/start_local_services.py` from the repository root using local Python (`py -3` or `python`) and no longer depends on `Robot_opr` paths.
+`helper.bat` now starts `scripts/start_local_services.py` from the repository root and no longer depends on `Robot_opr` paths.
 If `runtime/services/service_launcher.exe` exists, it uses the packaged launcher first.
-Otherwise it clears stale source/service processes, prefers `python_voice_service\.venv_asr` and `.venv_tts`, and automatically passes `--no-hub` when an MQTT broker is already listening on `1883`.
+Otherwise it clears stale source/service processes, prefers `python_voice_service\.venv_asr` and `.venv_tts`, falls back to the bundled portable Python `3.12.10` under `native/python/windows-x64`, prefers the bundled Mosquitto broker under `native/mosquitto/windows-x64`, and automatically passes `--no-hub` when an MQTT broker is already listening on `1883`.
 
 Quick run:
 

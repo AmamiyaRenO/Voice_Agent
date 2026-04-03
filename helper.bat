@@ -48,7 +48,10 @@ if exist "%CD%\runtime\services\service_launcher.exe" (
   exit /b 0
 )
 
-if exist "C:\Program Files\mosquitto\mosquitto.exe" (
+if exist "%CD%\native\mosquitto\windows-x64\mosquitto.exe" (
+  set "VOICE_AGENT_MOSQUITTO_EXE=%CD%\native\mosquitto\windows-x64\mosquitto.exe"
+)
+if not defined VOICE_AGENT_MOSQUITTO_EXE if exist "C:\Program Files\mosquitto\mosquitto.exe" (
   set "VOICE_AGENT_MOSQUITTO_EXE=C:\Program Files\mosquitto\mosquitto.exe"
 )
 
@@ -81,6 +84,36 @@ if exist "%ASR_VENV_PY%" (
 
 if exist "%ASR_VENV_PY%" (
   "%ASR_VENV_PY%" scripts\start_local_services.py %VOICE_AGENT_LAUNCH_ARGS%
+  exit /b %errorlevel%
+)
+
+if exist "%CD%\native\python\windows-x64\python.exe" (
+  set "VOICE_AGENT_BOOTSTRAP_PYTHON=%CD%\native\python\windows-x64\python.exe"
+)
+
+if defined VOICE_AGENT_BOOTSTRAP_PYTHON (
+  "%VOICE_AGENT_BOOTSTRAP_PYTHON%" scripts\start_local_services.py %VOICE_AGENT_LAUNCH_ARGS%
+  exit /b %errorlevel%
+)
+
+for %%P in (
+  "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+  "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+  "%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
+  "%ProgramFiles%\Python312\python.exe"
+  "%ProgramFiles%\Python311\python.exe"
+  "%ProgramFiles%\Python310\python.exe"
+  "%ProgramFiles(x86)%\Python312\python.exe"
+  "%ProgramFiles(x86)%\Python311\python.exe"
+  "%ProgramFiles(x86)%\Python310\python.exe"
+) do (
+  if not defined VOICE_AGENT_BOOTSTRAP_PYTHON if exist "%%~fP" (
+    set "VOICE_AGENT_BOOTSTRAP_PYTHON=%%~fP"
+  )
+)
+
+if defined VOICE_AGENT_BOOTSTRAP_PYTHON (
+  "%VOICE_AGENT_BOOTSTRAP_PYTHON%" scripts\start_local_services.py %VOICE_AGENT_LAUNCH_ARGS%
   exit /b %errorlevel%
 )
 

@@ -376,6 +376,10 @@ def _detect_mosquitto_executable() -> Optional[str]:
         if candidate.exists():
             return str(candidate)
 
+    repo_local = _resolve_repo_root() / "native" / "mosquitto" / "windows-x64" / "mosquitto.exe"
+    if repo_local.exists():
+        return str(repo_local)
+
     from_path = shutil.which("mosquitto")
     if from_path:
         return from_path
@@ -534,6 +538,60 @@ def _python_from_py_launcher(tag: str) -> str:
     return ""
 
 
+def _windows_python_candidates(tags: List[str]) -> List[str]:
+    if os.name != "nt":
+        return []
+
+    candidates: List[str] = []
+    bundled = _resolve_repo_root() / "native" / "python" / "windows-x64" / "python.exe"
+    candidates.append(str(bundled))
+    for tag in tags:
+        compact = tag.replace(".", "").strip()
+        if not compact:
+            continue
+        local_app_data = _normalize_string(os.environ.get("LOCALAPPDATA", ""))
+        if local_app_data:
+            candidates.append(
+                str(Path(local_app_data) / "Programs" / "Python" / f"Python{compact}" / "python.exe")
+            )
+        for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+            base_dir = _normalize_string(os.environ.get(env_name, ""))
+            if base_dir:
+                candidates.append(str(Path(base_dir) / f"Python{compact}" / "python.exe"))
+
+    try:
+        result = subprocess.run(
+            ["where", "python"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception:
+        result = None
+
+    if result is not None and result.returncode == 0:
+        for line in (result.stdout or "").splitlines():
+            text = line.strip()
+            if text:
+                candidates.append(text)
+
+    unique: List[str] = []
+    seen = set()
+    for raw in candidates:
+        normalized = _normalize_string(raw)
+        if not normalized:
+            continue
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        path = Path(normalized)
+        if path.exists():
+            unique.append(str(path))
+    return unique
+
+
 def _pick_bootstrap_python(default_python: str) -> str:
     override = _resolve_executable_override(
         os.environ.get("VOICE_AGENT_BOOTSTRAP_PYTHON", ""),
@@ -544,16 +602,27 @@ def _pick_bootstrap_python(default_python: str) -> str:
 
     default_version = _python_major_minor(default_python)
     if os.name == "nt" and default_version and default_version >= (3, 13):
-        for tag in ("3.12", "3.11", "3.10"):
+        preferred_tags = ("3.12", "3.11", "3.10")
+        checked: List[str] = _windows_python_candidates(list(preferred_tags))
+        for tag in preferred_tags:
             candidate = _python_from_py_launcher(tag)
-            if not candidate:
-                continue
+            if candidate:
+                checked.append(candidate)
+
+        for candidate in checked:
             candidate_version = _python_major_minor(candidate)
             if not candidate_version:
                 continue
-            print(f"[voice-agent] bootstrap: using Python {tag} for venv setup ({candidate})")
-            return candidate
-        print("[voice-agent] bootstrap: Python 3.13 detected and no 3.12/3.11/3.10 launcher found.")
+            if (3, 10) <= candidate_version < (3, 13):
+                print(
+                    "[voice-agent] bootstrap: using Python "
+                    f"{candidate_version[0]}.{candidate_version[1]} for venv setup ({candidate})"
+                )
+                return candidate
+        print(
+            "[voice-agent] bootstrap: Python 3.13 detected and no compatible "
+            "3.12/3.11/3.10 interpreter was found."
+        )
     return default_python
 
 
@@ -672,7 +741,19 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         asr_ok = _ensure_python_venv(
             venv_dir=service_dir / ".venv_asr",
             requirements_files=[service_dir / "requirements.txt"],
-            import_checks=["fastapi", "uvicorn", "numpy", "httpx", "paho.mqtt.client", "yaml", "sounddevice", "cv2"],
+            import_checks=[
+                "fastapi",
+                "uvicorn",
+                "numpy",
+                "httpx",
+                "paho.mqtt.client",
+                "yaml",
+                "sounddevice",
+                "cv2",
+                "onnxruntime",
+                "tokenizers",
+                "huggingface_hub",
+            ],
             bootstrap_python=bootstrap_python,
             cwd=service_dir,
         )
@@ -1288,6 +1369,10 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     env.setdefault("OPENAI_RESPONSE_MODEL", "gpt-4o-mini")
     env.setdefault("DOC_RAG_ENABLE", "1")
     env.setdefault("DOC_RAG_ROOT", str(defaults.repo_root / "docs" / "rag" / "bioadaptive_lab"))
+    env.setdefault(
+        "DOC_RAG_EMBEDDING_MODEL_DIR",
+        str(defaults.repo_root / "models" / "doc_rag" / "Qdrant__bge-small-en-v1.5-onnx-Q"),
+    )
     if explicit_transcribe_mode:
         env["TRANSCRIBE_MODE"] = explicit_transcribe_mode
     else:
@@ -1331,10 +1416,19 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
         or str(defaults.script_dir / "intent_service" / "manifest.json"),
     )
 
-    doc_root = Path(str(env.get("DOC_RAG_ROOT", "") or "")).expanduser()
+    doc_root_raw = _normalize_string(env.get("DOC_RAG_ROOT"))
+    doc_root = Path(doc_root_raw).expanduser() if doc_root_raw else Path()
+    if doc_root_raw and not doc_root.is_absolute():
+        doc_root = (defaults.repo_root / doc_root).resolve()
     docs_dir = _resolve_general_docs_dir(doc_root) if str(doc_root) else Path()
     if str(doc_root):
         env["DOC_RAG_ROOT"] = str(doc_root)
+    doc_model_dir_raw = _normalize_string(env.get("DOC_RAG_EMBEDDING_MODEL_DIR"))
+    if doc_model_dir_raw:
+        doc_model_dir = Path(doc_model_dir_raw).expanduser()
+        if not doc_model_dir.is_absolute():
+            doc_model_dir = (defaults.repo_root / doc_model_dir).resolve()
+        env["DOC_RAG_EMBEDDING_MODEL_DIR"] = str(doc_model_dir)
     if docs_dir and not _has_general_docs(doc_root):
         print(
             "[voice-agent] warning: DOC_RAG_ROOT is configured but no general docs were found in "
@@ -1492,35 +1586,89 @@ def _cleanup_repo_service_processes(defaults: LauncherDefaults) -> None:
 
 
 def _probe_doc_rag_embedder(defaults: LauncherDefaults, env: Dict[str, str]) -> Tuple[bool, str]:
+    probe_python = _normalize_string(defaults.asr_python) or sys.executable
     dialog_dir = defaults.script_dir / "dialog_service"
-    dialog_dir_text = str(dialog_dir)
-    if dialog_dir_text not in sys.path:
-        sys.path.insert(0, dialog_dir_text)
+    probe_script = "\n".join(
+        [
+            "import importlib",
+            "import json",
+            "import os",
+            "import sys",
+            f"dialog_dir = {json.dumps(str(dialog_dir))}",
+            "if dialog_dir not in sys.path:",
+            "    sys.path.insert(0, dialog_dir)",
+            "try:",
+            "    module = importlib.import_module('onnx_embedder')",
+            "except Exception as exc:",
+            "    print(json.dumps({'ready': False, 'error': f'failed to import onnx_embedder: {exc}'}))",
+            "    raise SystemExit(0)",
+            "embedder_cls = getattr(module, 'OnnxTextEmbedder', None)",
+            "if embedder_cls is None:",
+            "    print(json.dumps({'ready': False, 'error': 'OnnxTextEmbedder class unavailable'}))",
+            "    raise SystemExit(0)",
+            "try:",
+            "    embedder = embedder_cls(",
+            "        embedder=(os.getenv('DOC_RAG_EMBEDDER', 'bge') or 'bge').strip().lower(),",
+            "        repo_id=(os.getenv('DOC_RAG_EMBEDDING_REPO_ID', '') or '').strip(),",
+            "        model_dir=(os.getenv('DOC_RAG_EMBEDDING_MODEL_DIR', '') or '').strip(),",
+            "        model_file=(os.getenv('DOC_RAG_EMBEDDING_MODEL_FILE', '') or '').strip(),",
+            "        tokenizer_file=(os.getenv('DOC_RAG_EMBEDDING_TOKENIZER_FILE', '') or '').strip(),",
+            "        max_length=max(16, int((os.getenv('DOC_RAG_EMBEDDING_MAX_LENGTH', '256') or '256').strip() or '256')),",
+            "        auto_download=((os.getenv('DOC_RAG_EMBEDDING_AUTO_DOWNLOAD', '1') or '1').strip().lower() in {'1', 'true', 'yes', 'on'}),",
+            "        cache_dir=(os.getenv('DOC_RAG_EMBEDDING_CACHE_DIR', '') or '').strip(),",
+            "        query_prefix=(os.getenv('DOC_RAG_QUERY_PREFIX', '') or '').strip(),",
+            "        doc_prefix=(os.getenv('DOC_RAG_DOC_PREFIX', '') or '').strip(),",
+            "    )",
+            "except Exception as exc:",
+            "    print(json.dumps({'ready': False, 'error': f'failed to initialize doc_rag embedder: {exc}'}))",
+            "    raise SystemExit(0)",
+            "print(",
+            "    json.dumps(",
+            "        {",
+            "            'ready': bool(getattr(embedder, 'ready', False)),",
+            "            'error': str(getattr(embedder, 'error', '') or ''),",
+            "        }",
+            "    )",
+            ")",
+        ]
+    )
+    probe_env = os.environ.copy()
+    probe_env.update(env)
+    probe_env.setdefault("PYTHONIOENCODING", "utf-8")
     try:
-        module = importlib.import_module("onnx_embedder")
-    except Exception as exc:
-        return False, f"failed to import onnx_embedder: {exc}"
-
-    embedder_cls = getattr(module, "OnnxTextEmbedder", None)
-    if embedder_cls is None:
-        return False, "OnnxTextEmbedder class unavailable"
-
-    try:
-        embedder = embedder_cls(
-            embedder=(env.get("DOC_RAG_EMBEDDER", "bge") or "bge").strip().lower(),
-            repo_id=(env.get("DOC_RAG_EMBEDDING_REPO_ID", "") or "").strip(),
-            model_dir=(env.get("DOC_RAG_EMBEDDING_MODEL_DIR", "") or "").strip(),
-            model_file=(env.get("DOC_RAG_EMBEDDING_MODEL_FILE", "") or "").strip(),
-            tokenizer_file=(env.get("DOC_RAG_EMBEDDING_TOKENIZER_FILE", "") or "").strip(),
-            max_length=max(16, int((env.get("DOC_RAG_EMBEDDING_MAX_LENGTH", "256") or "256").strip() or "256")),
-            auto_download=((env.get("DOC_RAG_EMBEDDING_AUTO_DOWNLOAD", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}),
-            cache_dir=(env.get("DOC_RAG_EMBEDDING_CACHE_DIR", "") or "").strip(),
-            query_prefix=(env.get("DOC_RAG_QUERY_PREFIX", "") or "").strip(),
-            doc_prefix=(env.get("DOC_RAG_DOC_PREFIX", "") or "").strip(),
+        result = subprocess.run(
+            [probe_python, "-c", probe_script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=str(defaults.repo_root),
+            env=probe_env,
         )
     except Exception as exc:
-        return False, f"failed to initialize doc_rag embedder: {exc}"
-    return bool(getattr(embedder, "ready", False)), str(getattr(embedder, "error", "") or "")
+        return False, f"failed to probe doc_rag embedder with {probe_python}: {exc}"
+
+    stdout_lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    payload: Optional[Dict[str, object]] = None
+    for line in reversed(stdout_lines):
+        try:
+            candidate = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(candidate, dict) and "ready" in candidate:
+            payload = candidate
+            break
+
+    stderr_text = _normalize_string(result.stderr)
+    if payload is None:
+        details = stderr_text or _normalize_string(result.stdout) or f"probe exited with code {result.returncode}"
+        return False, f"failed to parse doc_rag probe result from {probe_python}: {details}"
+
+    ready = bool(payload.get("ready", False))
+    error = _normalize_string(payload.get("error"))
+    if ready:
+        return True, ""
+    return False, error or stderr_text or f"doc_rag embedder unavailable via {probe_python}"
 
 
 def _run_doc_rag_preflight(defaults: LauncherDefaults, env: Dict[str, str]) -> Tuple[bool, str]:

@@ -12,3 +12,5 @@ moonshine-voice==0.0.49
 sounddevice==0.5.1
 opencv-python-headless==4.11.0.86
 onnxruntime==1.24.2
+tokenizers==0.22.2
+huggingface-hub==1.4.1
