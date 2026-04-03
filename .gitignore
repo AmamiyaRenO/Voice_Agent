@@ -88,6 +88,9 @@ python_voice_service/.pytest_cache/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+!/native/python/windows-x64/**/*.pyd
+!/native/python/windows-x64/Lib/site-packages/pip/_internal/operations/build/
+!/native/python/windows-x64/Lib/site-packages/pip/_internal/operations/build/**
 
 # Local packaging/build artifacts
 /.build/
