@@ -11,6 +11,7 @@ It already has `VoiceAgentComponent` attached with practical defaults:
 - backend: `piper`
 - voice: `en_US`
 - Kokoro voice: `af_heart`
+- reply mapping example: when the detected user reply is `test`, the sample plays `I hear that.`
 
 ## Use
 

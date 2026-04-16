@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
@@ -111,6 +112,17 @@ namespace VoiceAgent.Unity
         public Task<VoiceAgentApiResult> GetAsrStatusAsync(CancellationToken cancellationToken = default) =>
             SendJsonAsync(HttpMethod.Get, "/api/asr", null, cancellationToken);
 
+        public async Task<VoiceAgentTypedResult<VoiceAgentAsrStatus>> GetAsrStatusTypedAsync(CancellationToken cancellationToken = default)
+        {
+            var result = await GetAsrStatusAsync(cancellationToken).ConfigureAwait(false);
+            TryParseJson(result != null ? result.RawBody : null, out VoiceAgentAsrStatus payload);
+            return new VoiceAgentTypedResult<VoiceAgentAsrStatus>
+            {
+                ApiResult = result,
+                Payload = payload,
+            };
+        }
+
         public Task<VoiceAgentApiResult> SetAsrModeAsync(string mode, CancellationToken cancellationToken = default) =>
             SendJsonAsync(HttpMethod.Post, "/api/asr", JsonUtility.ToJson(new AsrPayload
             {
@@ -123,6 +135,20 @@ namespace VoiceAgent.Unity
             {
                 action = "set_mode",
                 mode = mode ?? string.Empty,
+            }), cancellationToken);
+
+        public Task<VoiceAgentApiResult> SetListeningEnabledAsync(bool listeningEnabled, CancellationToken cancellationToken = default) =>
+            SendJsonAsync(HttpMethod.Post, "/api/asr", JsonUtility.ToJson(new AsrListeningPayload
+            {
+                action = "set_listening",
+                listening = listeningEnabled,
+            }), cancellationToken);
+
+        public Task<VoiceAgentApiResult> SetConversationDispatchEnabledAsync(bool enabled, CancellationToken cancellationToken = default) =>
+            SendJsonAsync(HttpMethod.Post, "/api/asr", JsonUtility.ToJson(new AsrDispatchPayload
+            {
+                action = "set_conversation_dispatch_enabled",
+                enabled = enabled,
             }), cancellationToken);
 
         public Task<VoiceAgentApiResult> StartListeningAsync(CancellationToken cancellationToken = default) =>
@@ -227,6 +253,76 @@ namespace VoiceAgent.Unity
             };
         }
 
+        public async Task StreamAsrEventsAsync(
+            Action onConnected,
+            Action<VoiceAgentAsrStatus> onEvent,
+            Action<string> onError,
+            CancellationToken cancellationToken = default)
+        {
+            using (var streamClient = new HttpClient())
+            using (var request = new HttpRequestMessage(HttpMethod.Get, BaseUrl + "/api/asr/events"))
+            {
+                streamClient.Timeout = Timeout.InfiniteTimeSpan;
+                request.Headers.Accept.ParseAdd("text/event-stream");
+                using (var response = await streamClient.SendAsync(
+                           request,
+                           HttpCompletionOption.ResponseHeadersRead,
+                           cancellationToken).ConfigureAwait(false))
+                {
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        onError?.Invoke(ExtractMessage(body, response.ReasonPhrase));
+                        return;
+                    }
+
+                    using (cancellationToken.Register(() => response.Dispose()))
+                    using (var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                    using (var reader = new StreamReader(stream))
+                    {
+                        onConnected?.Invoke();
+                        var data = new StringBuilder();
+                        while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
+                        {
+                            var line = await reader.ReadLineAsync().ConfigureAwait(false);
+                            if (line == null)
+                            {
+                                break;
+                            }
+
+                            if (line.StartsWith(":", StringComparison.Ordinal))
+                            {
+                                continue;
+                            }
+
+                            if (line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                            {
+                                data.AppendLine(line.Substring(5).TrimStart());
+                                continue;
+                            }
+
+                            if (line.Length != 0)
+                            {
+                                continue;
+                            }
+
+                            var payload = data.ToString().Trim();
+                            data.Length = 0;
+                            if (string.IsNullOrWhiteSpace(payload))
+                            {
+                                continue;
+                            }
+
+                            if (TryParseJson(payload, out VoiceAgentAsrStatus status))
+                            {
+                                onEvent?.Invoke(status);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         public void Dispose()
         {
             if (ownsHttpClient)
@@ -269,6 +365,26 @@ namespace VoiceAgent.Unity
             catch (Exception ex)
             {
                 return VoiceAgentApiResult.Fail(ex.Message);
+            }
+        }
+
+        internal static bool TryParseJson<T>(string rawBody, out T payload) where T : class
+        {
+            payload = null;
+            if (string.IsNullOrWhiteSpace(rawBody))
+            {
+                return false;
+            }
+
+            try
+            {
+                payload = JsonUtility.FromJson<T>(rawBody);
+                return payload != null;
+            }
+            catch
+            {
+                payload = null;
+                return false;
             }
         }
 
@@ -330,6 +446,8 @@ namespace VoiceAgent.Unity
         [Serializable] private struct PromptPayload { public string prompt; public bool reset; }
         [Serializable] private struct RuntimeConfigPayload { public string ollama_model; }
         [Serializable] private struct AsrPayload { public string action; public string mode; }
+        [Serializable] private struct AsrListeningPayload { public string action; public bool listening; }
+        [Serializable] private struct AsrDispatchPayload { public string action; public bool enabled; }
         [Serializable] private struct VisionPayload { public string prompt; public string model; }
         [Serializable] private struct GamePayload { public string action; public string name; }
         [Serializable] private struct FacePayload { public string mode; public float seconds; }

@@ -1547,11 +1547,14 @@ async def _build_asr_status_payload() -> Dict[str, Any]:
         "available_modes": [str(item or "") for item in list(status.streaming_available_modes or [])],
         "listening": bool(status.listening),
         "assistant_speaking": bool(status.assistant_speaking),
+        "conversation_dispatch_enabled": bool(getattr(status, "conversation_dispatch_enabled", True)),
         "supports_hotwords": bool(status.supports_hotwords),
         "hotwords_count": int(status.hotwords_count),
         "hotword_strategy": str(status.hotword_strategy or ""),
         "current_partial": str(status.current_partial or ""),
         "stable_partial": str(status.stable_partial or ""),
+        "final_transcript": str(getattr(status, "final_transcript", "") or ""),
+        "final_transcript_seq": int(getattr(status, "final_transcript_seq", 0) or 0),
         "moonshine_available": bool(status.moonshine_available),
         "input_level_dbfs": _safe_json_float(status.input_level_dbfs, -96.0),
         "input_peak_dbfs": _safe_json_float(status.input_peak_dbfs, -96.0),
@@ -1585,6 +1588,63 @@ async def _build_asr_status_payload() -> Dict[str, Any]:
     except Exception:
         pass
     return payload
+
+
+def _build_asr_event_payload(*, event_type: str) -> Dict[str, Any]:
+    status = audio_agent.status()
+    return {
+        "status": "ok",
+        "message": "streaming asr event",
+        "event_type": str(event_type or "update"),
+        "mode": str(status.asr_mode or ""),
+        "streaming_backend": str(status.streaming_backend or ""),
+        "tts_backend": str(status.tts_backend or ""),
+        "listening": bool(status.listening),
+        "assistant_speaking": bool(status.assistant_speaking),
+        "conversation_dispatch_enabled": bool(getattr(status, "conversation_dispatch_enabled", True)),
+        "current_partial": str(status.current_partial or ""),
+        "stable_partial": str(status.stable_partial or ""),
+        "final_transcript": str(getattr(status, "final_transcript", "") or ""),
+        "final_transcript_seq": int(getattr(status, "final_transcript_seq", 0) or 0),
+        "supports_hotwords": bool(status.supports_hotwords),
+        "hotwords_count": int(status.hotwords_count),
+        "hotword_strategy": str(status.hotword_strategy or ""),
+    }
+
+
+@app.get("/api/asr/events")
+async def api_asr_events(request: Request) -> StreamingResponse:
+    async def event_stream():
+        last_payload = _build_asr_event_payload(event_type="snapshot")
+        yield f"event: status\ndata: {json.dumps(last_payload, ensure_ascii=False)}\n\n"
+        last_signature = json.dumps(last_payload, ensure_ascii=False, sort_keys=True)
+        last_keepalive_at = time.time()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                payload = _build_asr_event_payload(event_type="update")
+                signature = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+                if signature != last_signature:
+                    last_signature = signature
+                    yield f"event: update\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    last_keepalive_at = time.time()
+                elif time.time() - last_keepalive_at >= 10.0:
+                    yield ": keepalive\n\n"
+                    last_keepalive_at = time.time()
+                await asyncio.sleep(0.15)
+        except asyncio.CancelledError:
+            return
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/asr/backend")
@@ -1642,6 +1702,19 @@ async def api_asr_update(request: Request) -> Dict[str, Any]:
             await audio_agent.set_listening(target)
             result = await _build_asr_status_payload()
             result["message"] = "agent listening started" if target else "agent listening paused"
+            return result
+        if action in {"set_conversation_dispatch_enabled", "set_conversation_dispatch", "conversation_dispatch"}:
+            target = payload.get("enabled")
+            if target is None:
+                target = payload.get("conversation_dispatch_enabled")
+            target = bool(target)
+            await audio_agent.set_conversation_dispatch_enabled(target)
+            result = await _build_asr_status_payload()
+            result["message"] = (
+                "automatic conversation dispatch enabled"
+                if target
+                else "automatic conversation dispatch disabled"
+            )
             return result
         raise HTTPException(status_code=400, detail="unknown asr action")
     except HTTPException:

@@ -1,5 +1,7 @@
 using System;
 using UnityEngine;
+using UnityEngine.Events;
+using UnityEngine.Serialization;
 
 namespace VoiceAgent.Unity
 {
@@ -72,5 +74,75 @@ namespace VoiceAgent.Unity
         public bool VoiceOptionsOk { get; set; }
         public bool AsrStatusOk { get; set; }
         public string Summary { get; set; }
+    }
+
+    public sealed class VoiceAgentTypedResult<T> where T : class
+    {
+        public VoiceAgentApiResult ApiResult { get; set; }
+        public T Payload { get; set; }
+    }
+
+    [Serializable]
+    public sealed class VoiceAgentBackendAsrStatus
+    {
+        public string[] available_modes;
+        public string mode;
+
+        public string[] AvailableModes => available_modes ?? Array.Empty<string>();
+        public string Mode => mode ?? string.Empty;
+    }
+
+    [Serializable]
+    public sealed class VoiceAgentAsrStatus
+    {
+        public string status;
+        public string message;
+        public string event_type;
+        public string mode;
+        public string streaming_backend;
+        public string current_partial;
+        public string stable_partial;
+        public string final_transcript;
+        public int final_transcript_seq;
+        public bool assistant_speaking;
+        public bool conversation_dispatch_enabled;
+        public bool supports_hotwords;
+        public int hotwords_count;
+        public string hotword_strategy;
+        public bool listening;
+        public VoiceAgentBackendAsrStatus server_transcribe;
+        public string[] available_modes;
+
+        public string Status => status ?? string.Empty;
+        public string Message => message ?? string.Empty;
+        public string EventType => event_type ?? string.Empty;
+        public string Mode => mode ?? string.Empty;
+        public string StreamingBackend => streaming_backend ?? string.Empty;
+        public string CurrentPartial => current_partial ?? string.Empty;
+        public string StablePartial => stable_partial ?? string.Empty;
+        public string FinalTranscript => final_transcript ?? string.Empty;
+        public int FinalTranscriptSequence => final_transcript_seq;
+        public bool AssistantSpeaking => assistant_speaking;
+        public bool ConversationDispatchEnabled => conversation_dispatch_enabled;
+        public bool SupportsHotwords => supports_hotwords;
+        public int HotwordsCount => hotwords_count;
+        public string HotwordStrategy => hotword_strategy ?? string.Empty;
+        public bool Listening => listening;
+        public VoiceAgentBackendAsrStatus Backend => server_transcribe;
+        public string[] AvailableModes => available_modes ?? Array.Empty<string>();
+    }
+
+    [Serializable]
+    public sealed class VoiceAgentReplyRule
+    {
+        [FormerlySerializedAs("keyword")]
+        public string listenFor;
+        [FormerlySerializedAs("response")]
+        public string replyWith;
+    }
+
+    [Serializable]
+    public sealed class VoiceAgentReplyMatchedEvent : UnityEvent<string>
+    {
     }
 }

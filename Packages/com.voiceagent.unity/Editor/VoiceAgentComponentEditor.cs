@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using UnityEditor;
+using UnityEditorInternal;
 using UnityEngine;
 
 namespace VoiceAgent.Unity.Editor
@@ -14,6 +15,12 @@ namespace VoiceAgent.Unity.Editor
         private bool didAttemptAutoRefresh;
         private string optionStatusMessage = "Options not loaded yet.";
         private InspectorOptions inspectorOptions = new InspectorOptions();
+        private ReorderableList replyRulesList;
+
+        private void OnEnable()
+        {
+            ConfigureReplyRulesList();
+        }
 
         public override void OnInspectorGUI()
         {
@@ -30,6 +37,7 @@ namespace VoiceAgent.Unity.Editor
             DrawTtsSection(component);
             DrawRuntimeSection(component);
             DrawAsrSection(component);
+            DrawKeywordDetectionSection(component);
             DrawVisionGameSection(component);
             DrawFaceSection(component);
             DrawLedSection(component);
@@ -57,7 +65,7 @@ namespace VoiceAgent.Unity.Editor
 
                     if (GUILayout.Button("Check Connection"))
                     {
-                        RunTask(component, () => component.CheckConnectionAsync());
+                        RunTask(component, async () => { await component.CheckConnectionAsync(); });
                     }
 
                     using (new EditorGUI.DisabledScope(isRefreshingOptions))
@@ -104,14 +112,14 @@ namespace VoiceAgent.Unity.Editor
             using (new EditorGUI.DisabledScope(isRunning))
             {
                 DrawSection(component,
-                    ("Speak", () => component.SpeakAsync()),
-                    ("Set Voice", () => component.SetVoiceAsync()),
-                    ("Set Backend", () => component.SetTtsBackendAsync()),
-                    ("Set TTS Model", () => component.SetTtsModelAsync()),
-                    ("Get TTS Options", () => component.GetTtsOptionsAsync()),
-                    ("Get Kokoro Options", () => component.GetKokoroOptionsAsync()),
-                    ("Set Kokoro Voice", () => component.SetKokoroVoiceAsync()),
-                    ("Kokoro Speak", () => component.KokoroSpeakAsync()));
+                    ("Speak", async () => { await component.SpeakAsync(); }),
+                    ("Set Voice", async () => { await component.SetVoiceAsync(); }),
+                    ("Set Backend", async () => { await component.SetTtsBackendAsync(); }),
+                    ("Set TTS Model", async () => { await component.SetTtsModelAsync(); }),
+                    ("Get TTS Options", async () => { await component.GetTtsOptionsAsync(); }),
+                    ("Get Kokoro Options", async () => { await component.GetKokoroOptionsAsync(); }),
+                    ("Set Kokoro Voice", async () => { await component.SetKokoroVoiceAsync(); }),
+                    ("Kokoro Speak", async () => { await component.KokoroSpeakAsync(); }));
             }
         }
 
@@ -125,12 +133,12 @@ namespace VoiceAgent.Unity.Editor
             using (new EditorGUI.DisabledScope(isRunning))
             {
                 DrawSection(component,
-                    ("Get Logs", () => component.GetLogsAsync()),
-                    ("Get Runtime Config", () => component.GetRuntimeConfigAsync()),
-                    ("Get LLM Prompt", () => component.GetLlmPromptAsync()),
-                    ("Set LLM Prompt", () => component.SetLlmPromptAsync()),
-                    ("Reset LLM Prompt", () => component.ResetLlmPromptAsync()),
-                    ("Set Local Model", () => component.SetLocalModelAsync()));
+                    ("Get Logs", async () => { await component.GetLogsAsync(); }),
+                    ("Get Runtime Config", async () => { await component.GetRuntimeConfigAsync(); }),
+                    ("Get LLM Prompt", async () => { await component.GetLlmPromptAsync(); }),
+                    ("Set LLM Prompt", async () => { await component.SetLlmPromptAsync(); }),
+                    ("Reset LLM Prompt", async () => { await component.ResetLlmPromptAsync(); }),
+                    ("Set Local Model", async () => { await component.SetLocalModelAsync(); }));
             }
         }
 
@@ -147,11 +155,44 @@ namespace VoiceAgent.Unity.Editor
             using (new EditorGUI.DisabledScope(isRunning))
             {
                 DrawSection(component,
-                    ("Get ASR Status", () => component.GetAsrStatusAsync()),
-                    ("Set ASR Mode", () => component.SetAsrModeAsync()),
-                    ("Set Backend ASR Mode", () => component.SetBackendAsrModeAsync()),
-                    ("Start Listening", () => component.StartListeningAsync()),
-                    ("Pause Listening", () => component.PauseListeningAsync()));
+                    ("Set ASR Mode", async () => { await component.SetAsrModeAsync(); }),
+                    ("Set Backend ASR Mode", async () => { await component.SetBackendAsrModeAsync(); }));
+            }
+
+            DrawImmediateListeningToggle(component);
+            DrawImmediateConversationDispatchToggle(component);
+            using (new EditorGUI.DisabledScope(true))
+            {
+                EditorGUILayout.Toggle("Current Listening Enabled", component.CurrentListeningEnabled);
+                EditorGUILayout.Toggle("Current Auto Conversation Enabled", component.CurrentConversationDispatchEnabled);
+                EditorGUILayout.Toggle("Transcript Stream Connected", component.TranscriptStreamConnected);
+                EditorGUILayout.TextField("Transcript Stream Error", component.TranscriptStreamError ?? string.Empty);
+            }
+
+            using (new EditorGUI.DisabledScope(isRunning))
+            {
+                DrawSection(component,
+                    ("Refresh ASR Status", async () => { await component.RefreshAsrStatusAsync(); }));
+            }
+        }
+
+        private void DrawKeywordDetectionSection(VoiceAgentComponent component)
+        {
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Reply Mapping", EditorStyles.boldLabel);
+            DrawImmediateReplyMappingToggle(component);
+            DrawReplyRulesList();
+            DrawProperty("onReplyMatched", true);
+
+            using (new EditorGUI.DisabledScope(true))
+            {
+                EditorGUILayout.TextField("Last Routing Outcome", component.LastRoutingOutcome ?? string.Empty);
+                EditorGUILayout.LabelField("Last Intercepted Transcript");
+                EditorGUILayout.TextArea(component.LastInterceptedTranscript ?? string.Empty, GUILayout.MinHeight(54f));
+                EditorGUILayout.TextField("Last Matched Listen For", component.LastMatchedListenFor ?? string.Empty);
+                EditorGUILayout.TextField("Last Matched At", component.LastMatchedAt ?? string.Empty);
+                EditorGUILayout.LabelField("Last Matched Transcript");
+                EditorGUILayout.TextArea(component.LastMatchedTranscript ?? string.Empty, GUILayout.MinHeight(54f));
             }
         }
 
@@ -169,9 +210,9 @@ namespace VoiceAgent.Unity.Editor
             using (new EditorGUI.DisabledScope(isRunning))
             {
                 DrawSection(component,
-                    ("Describe Camera", () => component.DescribeCurrentCameraAsync()),
-                    ("Launch Game", () => component.LaunchGameAsync()),
-                    ("Exit Game", () => component.ExitGameAsync()));
+                    ("Describe Camera", async () => { await component.DescribeCurrentCameraAsync(); }),
+                    ("Launch Game", async () => { await component.LaunchGameAsync(); }),
+                    ("Exit Game", async () => { await component.ExitGameAsync(); }));
             }
         }
 
@@ -189,8 +230,8 @@ namespace VoiceAgent.Unity.Editor
             using (new EditorGUI.DisabledScope(isRunning))
             {
                 DrawSection(component,
-                    ("Face Preset", () => component.FacePresetAsync()),
-                    ("Face Custom", () => component.FaceCustomAsync()));
+                    ("Face Preset", async () => { await component.FacePresetAsync(); }),
+                    ("Face Custom", async () => { await component.FaceCustomAsync(); }));
             }
         }
 
@@ -209,10 +250,10 @@ namespace VoiceAgent.Unity.Editor
             using (new EditorGUI.DisabledScope(isRunning))
             {
                 DrawSection(component,
-                    ("LED Breathe", () => component.LedBreatheAsync()),
-                    ("LED Solid", () => component.LedSolidAsync()),
-                    ("LED Random", () => component.LedRandomAsync()),
-                    ("LED Off", () => component.LedOffAsync()));
+                    ("LED Breathe", async () => { await component.LedBreatheAsync(); }),
+                    ("LED Solid", async () => { await component.LedSolidAsync(); }),
+                    ("LED Random", async () => { await component.LedRandomAsync(); }),
+                    ("LED Off", async () => { await component.LedOffAsync(); }));
             }
         }
 
@@ -224,11 +265,11 @@ namespace VoiceAgent.Unity.Editor
             using (new EditorGUI.DisabledScope(isRunning))
             {
                 DrawSection(component,
-                    ("Flower Open", () => component.FlowerOpenAsync()),
-                    ("Flower Close", () => component.FlowerCloseAsync()),
-                    ("Flower Stop", () => component.FlowerStopAsync()),
-                    ("Flower Open Slow", () => component.FlowerOpenSlowAsync()),
-                    ("Flower Close Slow", () => component.FlowerCloseSlowAsync()));
+                    ("Flower Open", async () => { await component.FlowerOpenAsync(); }),
+                    ("Flower Close", async () => { await component.FlowerCloseAsync(); }),
+                    ("Flower Stop", async () => { await component.FlowerStopAsync(); }),
+                    ("Flower Open Slow", async () => { await component.FlowerOpenSlowAsync(); }),
+                    ("Flower Close Slow", async () => { await component.FlowerCloseSlowAsync(); }));
             }
         }
 
@@ -288,7 +329,7 @@ namespace VoiceAgent.Unity.Editor
             }
         }
 
-        private void DrawSection(VoiceAgentComponent component, params (string label, Func<Task<VoiceAgentApiResult>> action)[] buttons)
+        private void DrawSection(VoiceAgentComponent component, params (string label, Func<Task> action)[] buttons)
         {
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -302,12 +343,146 @@ namespace VoiceAgent.Unity.Editor
             }
         }
 
+        private void DrawImmediateListeningToggle(VoiceAgentComponent component)
+        {
+            var property = serializedObject.FindProperty("desiredListeningEnabled");
+            if (property == null)
+            {
+                return;
+            }
+
+            using (new EditorGUI.DisabledScope(isRunning))
+            {
+                EditorGUI.BeginChangeCheck();
+                var nextValue = EditorGUILayout.Toggle("Listening Enabled", property.boolValue);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    property.boolValue = nextValue;
+                    ApplyChanges();
+                    RunTask(component, async () => { await component.SetListeningEnabledAsync(nextValue); });
+                }
+            }
+        }
+
+        private void DrawImmediateReplyMappingToggle(VoiceAgentComponent component)
+        {
+            var property = serializedObject.FindProperty("replyMappingEnabled");
+            if (property == null)
+            {
+                return;
+            }
+
+            using (new EditorGUI.DisabledScope(isRunning))
+            {
+                EditorGUI.BeginChangeCheck();
+                var nextValue = EditorGUILayout.Toggle("Reply Mapping Enabled", property.boolValue);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    property.boolValue = nextValue;
+                    ApplyChanges();
+                    RunTask(component, async () => { await component.ApplyReplyMappingStateAsync(); });
+                }
+            }
+        }
+
+        private void DrawImmediateConversationDispatchToggle(VoiceAgentComponent component)
+        {
+            var property = serializedObject.FindProperty("desiredConversationDispatchEnabled");
+            if (property == null)
+            {
+                return;
+            }
+
+            using (new EditorGUI.DisabledScope(isRunning))
+            {
+                EditorGUI.BeginChangeCheck();
+                var nextValue = EditorGUILayout.Toggle("Auto Conversation Enabled", property.boolValue);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    property.boolValue = nextValue;
+                    ApplyChanges();
+                    RunTask(component, async () => { await component.SetConversationDispatchEnabledAsync(nextValue); });
+                }
+            }
+        }
+
+        private void ConfigureReplyRulesList()
+        {
+            var property = serializedObject.FindProperty("replyRules");
+            if (property == null)
+            {
+                replyRulesList = null;
+                return;
+            }
+
+            replyRulesList = new ReorderableList(serializedObject, property, true, true, true, true);
+            replyRulesList.drawHeaderCallback = rect =>
+            {
+                var halfWidth = (rect.width - 8f) * 0.5f;
+                var leftRect = new Rect(rect.x, rect.y, halfWidth, rect.height);
+                var rightRect = new Rect(rect.x + halfWidth + 8f, rect.y, halfWidth, rect.height);
+                EditorGUI.LabelField(leftRect, "Listen For");
+                EditorGUI.LabelField(rightRect, "Reply With");
+            };
+            replyRulesList.drawElementCallback = (rect, index, isActive, isFocused) =>
+            {
+                var element = property.GetArrayElementAtIndex(index);
+                if (element == null)
+                {
+                    return;
+                }
+
+                rect.y += 2f;
+                rect.height = EditorGUIUtility.singleLineHeight;
+                var halfWidth = (rect.width - 8f) * 0.5f;
+                var leftRect = new Rect(rect.x, rect.y, halfWidth, rect.height);
+                var rightRect = new Rect(rect.x + halfWidth + 8f, rect.y, halfWidth, rect.height);
+                var listenForProperty = element.FindPropertyRelative("listenFor");
+                var replyWithProperty = element.FindPropertyRelative("replyWith");
+                if (listenForProperty != null)
+                {
+                    listenForProperty.stringValue = EditorGUI.TextField(leftRect, GUIContent.none, listenForProperty.stringValue ?? string.Empty);
+                }
+
+                if (replyWithProperty != null)
+                {
+                    replyWithProperty.stringValue = EditorGUI.TextField(rightRect, GUIContent.none, replyWithProperty.stringValue ?? string.Empty);
+                }
+            };
+            replyRulesList.elementHeight = EditorGUIUtility.singleLineHeight + 6f;
+        }
+
+        private void DrawReplyRulesList()
+        {
+            if (replyRulesList == null)
+            {
+                ConfigureReplyRulesList();
+            }
+
+            if (replyRulesList != null)
+            {
+                replyRulesList.DoLayoutList();
+                return;
+            }
+
+            DrawProperty("replyRules", true);
+        }
+
         private void DrawProperty(string propertyPath)
         {
             var property = serializedObject.FindProperty(propertyPath);
             if (property != null)
             {
                 EditorGUILayout.PropertyField(property);
+            }
+        }
+
+        private void DrawProperty(string propertyPath, bool includeChildren)
+        {
+            var property = serializedObject.FindProperty(propertyPath);
+            if (property != null)
+            {
+                EditorGUILayout.PropertyField(property, includeChildren);
             }
         }
 

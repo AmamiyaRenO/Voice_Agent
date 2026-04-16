@@ -1434,6 +1434,7 @@ class AudioAgentStatus:
     profile: str
     tts_backend: str
     assistant_speaking: bool
+    conversation_dispatch_enabled: bool
     sounddevice_available: bool
     moonshine_available: bool
     aec_available: bool
@@ -1444,6 +1445,8 @@ class AudioAgentStatus:
     hotword_strategy: str
     current_partial: str = ""
     stable_partial: str = ""
+    final_transcript: str = ""
+    final_transcript_seq: int = 0
     input_level_dbfs: float = -96.0
     input_peak_dbfs: float = -96.0
     noise_floor_dbfs: float = -72.0
@@ -1516,6 +1519,7 @@ class DesktopAudioAgent:
         self.active_tts_model = _env("VOICE_AGENT_DEFAULT_TTS_MODEL", "").strip()
         self.active_tts_backend = _normalize_tts_backend(_env("VOICE_AGENT_TTS_BACKEND", TTS_BACKEND_PIPER))
         self.active_kokoro_voice = _env("KOKORO_TTS_VOICE", "af_heart")
+        self.conversation_dispatch_enabled = True
         self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
         self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
         self.hotword_strategy = normalize_hotword_strategy(
@@ -1534,6 +1538,10 @@ class DesktopAudioAgent:
         self._last_error = ""
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
+        self._last_final_transcript = ""
+        self._last_final_transcript_seq = 0
+        self._last_reported_transcript_text = ""
+        self._last_reported_transcript_at = 0.0
         self._last_assistant_spoke_at = 0.0
         self._active_user_id = ""
         self._last_speaker_match: Dict[str, Any] = {}
@@ -2282,6 +2290,7 @@ class DesktopAudioAgent:
 
         grammar_match = self._command_grammar.canonicalize(normalized)
         final_text = str(grammar_match.canonical_text or normalized).strip()
+        self._record_user_transcript_event(final_text)
         metadata_parts: List[str] = ["asr=gemini_live:high"]
         if grammar_match.route_type and grammar_match.route_type != "QUERY":
             metadata_parts.append(f"grammar={grammar_match.route_type}:{grammar_match.confidence:.2f}")
@@ -2799,6 +2808,7 @@ class DesktopAudioAgent:
             profile=self.profile,
             tts_backend=self.active_tts_backend,
             assistant_speaking=self.is_assistant_speaking(),
+            conversation_dispatch_enabled=self.conversation_dispatch_enabled,
             sounddevice_available=sd is not None,
             moonshine_available=moonshine_streaming_available(),
             aec_available=self._aec.available,
@@ -2809,6 +2819,8 @@ class DesktopAudioAgent:
             hotword_strategy=self.hotword_strategy,
             current_partial=self._last_partial_text,
             stable_partial=self._last_stable_partial_text,
+            final_transcript=self._last_final_transcript,
+            final_transcript_seq=self._last_final_transcript_seq,
             input_level_dbfs=frontend.input_level_dbfs,
             input_peak_dbfs=frontend.input_peak_dbfs,
             noise_floor_dbfs=frontend.noise_floor_dbfs,
@@ -2910,6 +2922,26 @@ class DesktopAudioAgent:
             self._last_stable_partial_text = ""
             self._cancel_api_asr_tasks()
             self._reset_api_asr_turn(clear_preroll=True)
+
+    async def set_conversation_dispatch_enabled(self, enabled: bool) -> None:
+        self.conversation_dispatch_enabled = bool(enabled)
+        if not self.conversation_dispatch_enabled:
+            self.cancel_current_turn(reason="conversation_dispatch_disabled", capture_barge_in=False)
+
+    def _record_user_transcript_event(self, text: str) -> None:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return
+        now = time.time()
+        if (
+            normalized == self._last_reported_transcript_text
+            and (now - self._last_reported_transcript_at) <= 1.5
+        ):
+            return
+        self._last_reported_transcript_text = normalized
+        self._last_reported_transcript_at = now
+        self._last_final_transcript = normalized
+        self._last_final_transcript_seq += 1
 
     async def set_asr_mode(self, mode: str) -> None:
         restart_input = self._running
@@ -3408,6 +3440,7 @@ class DesktopAudioAgent:
         self._last_stable_partial_text = ""
         self._last_partial_text_changed_at = 0.0
         self._last_stable_partial_text_changed_at = 0.0
+        self._record_user_transcript_event(str(grammar_match.canonical_text or stable_text).strip())
         asyncio.create_task(
             self._submit_user_turn(
                 text=str(grammar_match.canonical_text or stable_text).strip(),
@@ -3450,6 +3483,7 @@ class DesktopAudioAgent:
             return
         if self._suppress_transcript_during_enrollment(source="streaming_final", text=final_text):
             return
+        self._record_user_transcript_event(final_text)
         await self._submit_user_turn(
             text=final_text,
             original_text=raw_final_text,
@@ -3494,6 +3528,7 @@ class DesktopAudioAgent:
                 source="live_captions_filter",
             )
             return
+        self._record_user_transcript_event(final_text)
         await self._submit_user_turn(
             text=final_text,
             original_text=raw_text,
@@ -3701,6 +3736,7 @@ class DesktopAudioAgent:
             self._last_stable_partial_text = ""
             self._last_partial_text_changed_at = 0.0
             self._last_stable_partial_text_changed_at = 0.0
+            self._record_user_transcript_event(final_text)
             await self._submit_user_turn(
                 text=final_text,
                 original_text=candidate,
@@ -3745,6 +3781,8 @@ class DesktopAudioAgent:
     ) -> None:
         normalized = str(text or "").strip()
         if not normalized:
+            return
+        if not self.conversation_dispatch_enabled:
             return
         now = time.time()
         if (
