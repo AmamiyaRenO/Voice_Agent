@@ -34,6 +34,9 @@ namespace VoiceAgent.Unity
         public Task<VoiceAgentApiResult> GetKokoroOptionsAsync(CancellationToken cancellationToken = default) =>
             SendJsonAsync(HttpMethod.Get, "/api/kokoro/options", null, cancellationToken);
 
+        public Task<VoiceAgentApiResult> GetFaceOptionsAsync(CancellationToken cancellationToken = default) =>
+            SendJsonAsync(HttpMethod.Get, "/api/face/options", null, cancellationToken);
+
         public Task<VoiceAgentApiResult> SpeakAsync(VoiceAgentSpeechRequest request, CancellationToken cancellationToken = default)
         {
             request = request ?? new VoiceAgentSpeechRequest();

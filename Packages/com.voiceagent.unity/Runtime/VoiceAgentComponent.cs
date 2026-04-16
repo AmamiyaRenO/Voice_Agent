@@ -63,6 +63,7 @@ namespace VoiceAgent.Unity
 
         [Header("Face")]
         [SerializeField] private VoiceAgentFacePreset facePreset = VoiceAgentFacePreset.Neutral;
+        [SerializeField] private string facePresetMode = "neutral";
         [SerializeField, TextArea(2, 4)] private string faceCustomValue = "^-^";
         [SerializeField] private float faceSeconds = 3f;
 
@@ -145,6 +146,7 @@ namespace VoiceAgent.Unity
             transcriptStreamError = transcriptStreamError ?? string.Empty;
             lastInterceptedTranscript = lastInterceptedTranscript ?? string.Empty;
             lastRoutingOutcome = lastRoutingOutcome ?? string.Empty;
+            facePresetMode = string.IsNullOrWhiteSpace(facePresetMode) ? ResolveFacePresetMode() : facePresetMode.Trim();
         }
 
         public void RecreateClient()
@@ -203,7 +205,7 @@ namespace VoiceAgent.Unity
         public Task<VoiceAgentApiResult> DescribeCurrentCameraAsync() => RunAsync(current => current.DescribeCurrentCameraAsync(visionPrompt, visionModel));
         public Task<VoiceAgentApiResult> LaunchGameAsync() => RunAsync(current => current.LaunchGameAsync(gameName));
         public Task<VoiceAgentApiResult> ExitGameAsync() => RunAsync(current => current.ExitGameAsync());
-        public Task<VoiceAgentApiResult> FacePresetAsync() => RunAsync(current => current.FacePresetAsync(facePreset, faceSeconds));
+        public Task<VoiceAgentApiResult> FacePresetAsync() => RunAsync(current => current.FacePresetAsync(ResolveFacePresetMode(), faceSeconds));
         public Task<VoiceAgentApiResult> FaceCustomAsync() => RunAsync(current => current.FaceCustomAsync(faceCustomValue, faceSeconds));
         public Task<VoiceAgentApiResult> LedBreatheAsync() => RunAsync(current => current.LedBreatheAsync(ledColor, ledBrightness, ledPeriod, ledDuration));
         public Task<VoiceAgentApiResult> LedSolidAsync() => RunAsync(current => current.LedSolidAsync(ledColor, ledBrightness, ledDuration));
@@ -686,6 +688,23 @@ namespace VoiceAgent.Unity
             }
 
             return false;
+        }
+
+        private string ResolveFacePresetMode()
+        {
+            if (!string.IsNullOrWhiteSpace(facePresetMode))
+            {
+                return facePresetMode.Trim();
+            }
+
+            switch (facePreset)
+            {
+                case VoiceAgentFacePreset.Happy: return "happy";
+                case VoiceAgentFacePreset.Sad: return "sad";
+                case VoiceAgentFacePreset.VerySad: return "verySad";
+                case VoiceAgentFacePreset.Excited: return "excited";
+                default: return "neutral";
+            }
         }
 
         private void PostToMainThread(Action action)

@@ -283,6 +283,36 @@ KOKORO_LANG_CODES = {
     "z": "Mandarin Chinese",
 }
 DEFAULT_KOKORO_VOICE = "af_heart"
+FACE_PRESET_OPTIONS = [
+    "neutral",
+    "happy",
+    "excited",
+    "sad",
+    "verySad",
+    "confused",
+    "concerned",
+    "upset",
+    "ANeutral",
+    "AHappy",
+    "AConcerned",
+    "AConfused",
+    "AUpset",
+    "BNeutral",
+    "BHappy",
+    "BConcerned",
+    "BConfused",
+    "BUpset",
+    "CNeutral",
+    "CHappy",
+    "CConcerned",
+    "CConfused",
+    "CUpset",
+    "DNeutral",
+    "DHappy",
+    "DConcerned",
+    "DConfused",
+    "DUpset",
+]
 
 
 def _env(name: str, default: str = "") -> str:
@@ -1915,6 +1945,16 @@ async def api_face(request: Request) -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"status": "ok", "message": "face command sent"}
+
+
+@app.get("/api/face/options")
+async def api_face_options() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "message": "face presets loaded",
+        "presets": list(FACE_PRESET_OPTIONS),
+        "current": "",
+    }
 
 
 @app.post("/api/led")

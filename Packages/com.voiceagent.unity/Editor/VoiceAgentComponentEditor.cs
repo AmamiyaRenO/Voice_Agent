@@ -222,7 +222,7 @@ namespace VoiceAgent.Unity.Editor
             EditorGUILayout.LabelField("Face", EditorStyles.boldLabel);
             using (new EditorGUILayout.HorizontalScope())
             {
-                DrawProperty("facePreset");
+                DrawStringChoice("facePresetMode", "Preset", inspectorOptions.FacePresets);
                 DrawProperty("faceSeconds");
             }
             DrawProperty("faceCustomValue");
@@ -575,10 +575,11 @@ namespace VoiceAgent.Unity.Editor
                 {
                     var voiceResult = await client.GetTtsOptionsAsync();
                     var kokoroResult = await client.GetKokoroOptionsAsync();
+                    var faceResult = await client.GetFaceOptionsAsync();
                     var runtimeResult = await client.GetRuntimeConfigAsync();
                     var asrResult = await client.GetAsrStatusAsync();
 
-                    inspectorOptions = BuildInspectorOptions(voiceResult, kokoroResult, runtimeResult, asrResult);
+                    inspectorOptions = BuildInspectorOptions(voiceResult, kokoroResult, faceResult, runtimeResult, asrResult);
                     var loadedCount = inspectorOptions.LoadedGroupsCount;
                     optionStatusMessage = loadedCount > 0
                         ? $"Loaded {loadedCount} option group(s) from runtime."
@@ -599,6 +600,7 @@ namespace VoiceAgent.Unity.Editor
         private static InspectorOptions BuildInspectorOptions(
             VoiceAgentApiResult voiceResult,
             VoiceAgentApiResult kokoroResult,
+            VoiceAgentApiResult faceResult,
             VoiceAgentApiResult runtimeResult,
             VoiceAgentApiResult asrResult)
         {
@@ -624,6 +626,18 @@ namespace VoiceAgent.Unity.Editor
                 {
                     var payload = JsonUtility.FromJson<KokoroOptionsPayload>(kokoroResult.RawBody);
                     options.KokoroVoices = NormalizeChoices(payload != null ? payload.voices : null, payload != null ? payload.current : null);
+                }
+                catch
+                {
+                }
+            }
+
+            if (faceResult != null && faceResult.Success && !string.IsNullOrWhiteSpace(faceResult.RawBody))
+            {
+                try
+                {
+                    var payload = JsonUtility.FromJson<FaceOptionsPayload>(faceResult.RawBody);
+                    options.FacePresets = NormalizeChoices(payload != null ? payload.presets : null, payload != null ? payload.current : null);
                 }
                 catch
                 {
@@ -776,6 +790,13 @@ namespace VoiceAgent.Unity.Editor
         }
 
         [Serializable]
+        private sealed class FaceOptionsPayload
+        {
+            public string[] presets;
+            public string current;
+        }
+
+        [Serializable]
         private sealed class AsrStatusPayload
         {
             public string[] available_modes;
@@ -796,6 +817,7 @@ namespace VoiceAgent.Unity.Editor
             public List<string> TtsModels { get; set; } = new List<string>();
             public List<string> Backends { get; set; } = new List<string>();
             public List<string> KokoroVoices { get; set; } = new List<string>();
+            public List<string> FacePresets { get; set; } = new List<string>();
             public List<string> LocalModels { get; set; } = new List<string>();
             public List<string> AsrModes { get; set; } = new List<string>();
             public List<string> BackendAsrModes { get; set; } = new List<string>();
@@ -807,6 +829,7 @@ namespace VoiceAgent.Unity.Editor
                     var count = 0;
                     if (PiperVoices.Count > 0 || TtsModels.Count > 0 || Backends.Count > 0) count++;
                     if (KokoroVoices.Count > 0) count++;
+                    if (FacePresets.Count > 0) count++;
                     if (LocalModels.Count > 0) count++;
                     if (AsrModes.Count > 0 || BackendAsrModes.Count > 0) count++;
                     return count;
