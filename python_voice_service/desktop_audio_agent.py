@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import difflib
 import importlib
 import io
@@ -87,22 +88,7 @@ logger = logging.getLogger("desktop_audio_agent")
 
 
 def _resolve_app_root() -> Path:
-    if bool(getattr(sys, "frozen", False)):
-        exe_dir = Path(sys.executable).resolve().parent
-        if exe_dir.name.lower() == "services" and exe_dir.parent.name.lower() == "runtime":
-            return exe_dir.parent.parent
-        return exe_dir
     return Path(__file__).resolve().parents[1]
-
-
-def _resolve_bundle_root(app_root: Path) -> Path:
-    raw = getattr(sys, "_MEIPASS", "")
-    if raw:
-        try:
-            return Path(str(raw)).resolve()
-        except Exception:
-            pass
-    return app_root
 
 
 def _resolve_state_dir(app_root: Path) -> Path:
@@ -112,21 +98,14 @@ def _resolve_state_dir(app_root: Path) -> Path:
             return Path(os.path.expandvars(env_state)).expanduser().resolve()
         except Exception:
             return Path(os.path.expandvars(env_state)).expanduser()
-    if bool(getattr(sys, "frozen", False)):
-        local_app_data = str(os.getenv("LOCALAPPDATA") or "").strip()
-        if local_app_data:
-            return Path(local_app_data).expanduser() / "VoiceAgent"
-        return Path.home() / "AppData" / "Local" / "VoiceAgent"
     return app_root / "runtime"
 
 
 APP_ROOT = _resolve_app_root()
-BUNDLE_ROOT = _resolve_bundle_root(APP_ROOT)
 STATE_DIR = _resolve_state_dir(APP_ROOT)
 
 for _dialog_dir in (
     APP_ROOT / "scripts" / "dialog_service",
-    BUNDLE_ROOT / "scripts" / "dialog_service",
     Path(__file__).resolve().parents[1] / "scripts" / "dialog_service",
 ):
     if str(_dialog_dir) not in sys.path and _dialog_dir.exists():
@@ -148,7 +127,6 @@ def _resolve_default_live_captions_exe() -> str:
     sibling_root = repo_root.parent
     candidates = [
         repo_root / "runtime" / "live_captions" / "EnableLcMic.exe",
-        BUNDLE_ROOT / "runtime" / "live_captions" / "EnableLcMic.exe",
         sibling_root / "LiveCaptionsListener" / "publish" / "win-x64-single" / "EnableLcMic.exe",
         sibling_root / "LiveCaptionsListener" / "temp_build" / "win-x64-single" / "EnableLcMic.exe",
         sibling_root
@@ -220,6 +198,29 @@ DEFAULT_PARTIAL_COMMIT_QUERY_MIN_WORDS = int(
 )
 DEFAULT_API_ASR_PREROLL_MS = float(os.getenv("AUDIO_AGENT_API_ASR_PREROLL_MS", "220") or "220")
 DEFAULT_API_ASR_MIN_TURN_MS = float(os.getenv("AUDIO_AGENT_API_ASR_MIN_TURN_MS", "260") or "260")
+DEFAULT_COMMAND_ASR_ENABLED = str(os.getenv("VOICE_COMMAND_ASR_ENABLED", "0") or "0").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+    "disabled",
+}
+DEFAULT_COMMAND_ASR_PROVIDER = str(os.getenv("VOICE_COMMAND_ASR_PROVIDER", "google-cloud") or "google-cloud").strip()
+DEFAULT_COMMAND_ASR_PREROLL_MS = float(os.getenv("VOICE_COMMAND_ASR_PREROLL_MS", "280") or "280")
+DEFAULT_COMMAND_ASR_MIN_TURN_MS = float(os.getenv("VOICE_COMMAND_ASR_MIN_TURN_MS", "260") or "260")
+DEFAULT_COMMAND_ASR_GOOGLE_LANGUAGE_CODE = (
+    os.getenv("VOICE_COMMAND_ASR_GOOGLE_LANGUAGE_CODE", "en-US") or "en-US"
+).strip()
+DEFAULT_COMMAND_ASR_GOOGLE_BOOST = float(os.getenv("VOICE_COMMAND_ASR_GOOGLE_BOOST", "20.0") or "20.0")
+DEFAULT_COMMAND_ASR_GOOGLE_MODEL = (
+    os.getenv("VOICE_COMMAND_ASR_GOOGLE_MODEL", "command_and_search") or "command_and_search"
+).strip()
+DEFAULT_GEMINI_LIVE_COMMAND_TOOLS_ENABLED = str(
+    os.getenv("VOICE_GEMINI_LIVE_COMMAND_TOOLS_ENABLED", "1") or "1"
+).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+DEFAULT_GEMINI_LIVE_TOOL_TRANSCRIPT_SUPPRESS_SECONDS = float(
+    os.getenv("VOICE_GEMINI_LIVE_TOOL_TRANSCRIPT_SUPPRESS_SECONDS", "8.0") or "8.0"
+)
 DEFAULT_SPEAKER_ID_PREROLL_MS = float(os.getenv("VOICE_SPEAKER_ID_PREROLL_MS", "180") or "180")
 DEFAULT_SPEAKER_ID_SEGMENT_MAX_AGE_SECONDS = float(
     os.getenv("VOICE_SPEAKER_ID_SEGMENT_MAX_AGE_SECONDS", "8.0") or "8.0"
@@ -240,6 +241,9 @@ DEFAULT_SPEAKER_ID_ENROLL_SUPPRESS_SECONDS = float(
 DEFAULT_SPEAKER_ID_LIVE_CAPTIONS_MAX_CANDIDATES = int(
     os.getenv("VOICE_SPEAKER_ID_LIVE_CAPTIONS_MAX_CANDIDATES", "4") or "4"
 )
+DEFAULT_SPEAKER_ID_ACTIVE_FALLBACK_SECONDS = float(
+    os.getenv("VOICE_SPEAKER_ID_ACTIVE_FALLBACK_SECONDS", "30.0") or "30.0"
+)
 DEFAULT_GEMINI_LIVE_MODEL = (
     os.getenv("GEMINI_LIVE_MODEL", "models/gemini-2.5-flash-native-audio-latest")
     or "models/gemini-2.5-flash-native-audio-latest"
@@ -247,6 +251,12 @@ DEFAULT_GEMINI_LIVE_MODEL = (
 DEFAULT_GEMINI_LIVE_VOICE = os.getenv("GEMINI_LIVE_VOICE", "Kore") or "Kore"
 DEFAULT_GEMINI_LIVE_OUTPUT_SAMPLE_RATE = 24000
 DEFAULT_GEMINI_LIVE_QUEUE_MAX_FRAMES = int(os.getenv("GEMINI_LIVE_QUEUE_MAX_FRAMES", "96") or "96")
+DEFAULT_GEMINI_LIVE_SUPPRESS_DURING_ASSISTANT = str(
+    os.getenv("GEMINI_LIVE_SUPPRESS_DURING_ASSISTANT", "1") or "1"
+).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+DEFAULT_GEMINI_LIVE_ASSISTANT_TAIL_SECONDS = float(
+    os.getenv("GEMINI_LIVE_ASSISTANT_TAIL_SECONDS", "1.2") or "1.2"
+)
 DEFAULT_GEMINI_LIVE_SYSTEM_PROMPT = (
     "You are Rachel, a warm voice companion in a rehabilitation and exercise game system. "
     "Sound natural and supportive. Keep spoken replies concise and clear. "
@@ -343,8 +353,35 @@ def _env(name: str, default: str = "") -> str:
     return value.strip() if value else default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    normalized = value.strip().lower()
+    if not normalized:
+        return bool(default)
+    return normalized not in {"0", "false", "no", "off", "disabled"}
+
+
 def _gemini_api_key() -> str:
     return _env("GEMINI_API_KEY", "") or _env("GEMINI_KEY", "")
+
+
+def _google_cloud_speech_api_key() -> str:
+    return (
+        _env("GOOGLE_CLOUD_SPEECH_API_KEY", "")
+        or _env("GOOGLE_SPEECH_API_KEY", "")
+        or _env("GOOGLE_API_KEY", "")
+    )
+
+
+def _normalize_command_asr_provider(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower().replace("_", "-")
+    if normalized in {"off", "none", "disabled"}:
+        return "off"
+    if normalized in {"google", "google-cloud", "google-cloud-speech", "cloud-speech", "speech-to-text", "stt"}:
+        return "google-cloud"
+    return "google-cloud"
 
 
 def _normalize_cloud_response_provider(value: Optional[str]) -> str:
@@ -542,6 +579,31 @@ def _collapse_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
 
 
+def _merge_incremental_transcript(existing: str, update: str) -> str:
+    current = _collapse_spaces(existing)
+    incoming = _collapse_spaces(update)
+    if not incoming:
+        return current
+    if not current:
+        return incoming
+    current_key = current.casefold()
+    incoming_key = incoming.casefold()
+    if incoming_key == current_key or current_key.endswith(incoming_key):
+        return current
+    if incoming_key.startswith(current_key):
+        return incoming
+
+    max_overlap = 0
+    max_len = min(len(current), len(incoming))
+    for length in range(max_len, 2, -1):
+        if current_key[-length:] == incoming_key[:length]:
+            max_overlap = length
+            break
+    if max_overlap:
+        return _collapse_spaces(current + incoming[max_overlap:])
+    return _collapse_spaces(f"{current} {incoming}")
+
+
 def _pcm16_bytes_to_float32_mono(raw: bytes) -> np.ndarray:
     if not raw:
         return np.zeros(0, dtype=np.float32)
@@ -663,6 +725,38 @@ class ConversationLogStore:
             )
             self._version += 1
             self._condition.notify_all()
+
+    def replace_recent_user(
+        self,
+        message: str,
+        *,
+        speaker: str = "User",
+        source: str = "desktop_audio",
+        metadata: str = "",
+        metadata_contains: str = "",
+        max_age_seconds: float = 3.0,
+    ) -> bool:
+        text = str(message or "").strip()
+        if not text:
+            return False
+        needle = str(metadata_contains or "").strip().casefold()
+        now = time.time()
+        with self._condition:
+            for entry in reversed(self._entries):
+                if entry.role != "user":
+                    continue
+                if (now - float(entry.timestamp or 0.0)) > max(0.1, float(max_age_seconds)):
+                    continue
+                if needle and needle not in str(entry.metadata or "").casefold():
+                    continue
+                entry.message = text
+                entry.speaker = str(speaker or "User").strip()
+                entry.source = str(source or "desktop_audio").strip()
+                entry.metadata = str(metadata or "").strip()
+                self._version += 1
+                self._condition.notify_all()
+                return True
+        return False
 
     def snapshot(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -1443,6 +1537,10 @@ class AudioAgentStatus:
     supports_hotwords: bool
     hotwords_count: int
     hotword_strategy: str
+    command_asr_enabled: bool = False
+    command_asr_provider: str = ""
+    command_asr_status: str = ""
+    gemini_live_command_tools_enabled: bool = False
     current_partial: str = ""
     stable_partial: str = ""
     final_transcript: str = ""
@@ -1522,6 +1620,16 @@ class DesktopAudioAgent:
         self.conversation_dispatch_enabled = True
         self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
         self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
+        self.gemini_live_native_response_enabled = _env_bool("VOICE_GEMINI_LIVE_NATIVE_RESPONSE", False)
+        self.gemini_live_command_tools_enabled = _env_bool(
+            "VOICE_GEMINI_LIVE_COMMAND_TOOLS_ENABLED",
+            DEFAULT_GEMINI_LIVE_COMMAND_TOOLS_ENABLED,
+        )
+        self.command_asr_enabled = _env_bool("VOICE_COMMAND_ASR_ENABLED", DEFAULT_COMMAND_ASR_ENABLED)
+        self.command_asr_provider = _normalize_command_asr_provider(
+            _env("VOICE_COMMAND_ASR_PROVIDER", DEFAULT_COMMAND_ASR_PROVIDER)
+        )
+        self._command_asr_status = ""
         self.hotword_strategy = normalize_hotword_strategy(
             _env("VOICE_ASR_HOTWORD_STRATEGY", HOTWORD_STRATEGY_COMMANDS_GAMES_MEMORY)
         )
@@ -1544,6 +1652,7 @@ class DesktopAudioAgent:
         self._last_reported_transcript_at = 0.0
         self._last_assistant_spoke_at = 0.0
         self._active_user_id = ""
+        self._active_user_last_seen_at = 0.0
         self._last_speaker_match: Dict[str, Any] = {}
         self._recent_assistant_texts: Deque[Tuple[float, str]] = deque(
             maxlen=max(32, DEFAULT_LIVE_CAPTIONS_ASSISTANT_VARIANT_LIMIT)
@@ -1565,13 +1674,19 @@ class DesktopAudioAgent:
         self._conversation_task: Optional[asyncio.Task[Any]] = None
         self._active_tts_tasks: set[asyncio.Task[Any]] = set()
         self._active_api_asr_tasks: set[asyncio.Task[Any]] = set()
+        self._active_command_asr_tasks: set[asyncio.Task[Any]] = set()
         self._gemini_live_session_task: Optional[asyncio.Task[Any]] = None
         self._gemini_live_send_queue: Optional[asyncio.Queue[Optional[bytes]]] = None
         self._gemini_live_output_open = False
         self._gemini_live_connected = False
+        self._gemini_live_input_text = ""
         self._gemini_live_output_text = ""
         self._gemini_live_logged_output_text = ""
         self._gemini_live_last_input_text = ""
+        self._last_native_command_dispatch_text = ""
+        self._last_native_command_dispatch_at = 0.0
+        self._last_gemini_tool_command_text = ""
+        self._last_gemini_tool_command_at = 0.0
 
         self._player = PcmPlayer(
             output_sample_rate=self.output_sample_rate,
@@ -1639,6 +1754,25 @@ class DesktopAudioAgent:
         self._api_asr_min_samples = max(
             1,
             int(round(max(0.0, DEFAULT_API_ASR_MIN_TURN_MS) * self.capture_sample_rate / 1000.0)),
+        )
+        self._command_asr_preroll_frames: Deque[np.ndarray] = deque(
+            maxlen=max(
+                1,
+                int(
+                    round(
+                        max(0.0, DEFAULT_COMMAND_ASR_PREROLL_MS)
+                        * self.capture_sample_rate
+                        / max(1, self.input_blocksize)
+                        / 1000.0
+                    )
+                ),
+            )
+        )
+        self._command_asr_turn_active = False
+        self._command_asr_turn_frames: List[np.ndarray] = []
+        self._command_asr_min_samples = max(
+            1,
+            int(round(max(0.0, DEFAULT_COMMAND_ASR_MIN_TURN_MS) * self.capture_sample_rate / 1000.0)),
         )
         self._speaker_segment_preroll_frames: Deque[np.ndarray] = deque(
             maxlen=max(
@@ -1754,10 +1888,28 @@ class DesktopAudioAgent:
         if extras:
             payload.update(extras)
         self._last_speaker_match = payload
-        self._active_user_id = str(result.user_id or "").strip() if result.matched else ""
+        if result.matched:
+            self._active_user_id = str(result.user_id or "").strip()
+            self._active_user_last_seen_at = float(payload.get("ts") or time.time())
+        elif str(result.reason or "") in {"stale_fallback_segment"}:
+            self._active_user_id = ""
+            self._active_user_last_seen_at = 0.0
 
     def _speaker_match_payload(self) -> Dict[str, Any]:
         return dict(self._last_speaker_match or {})
+
+    def _active_user_fallback(self, *, reference_ts: Optional[float] = None) -> Tuple[str, str]:
+        active_user = str(getattr(self, "_active_user_id", "") or "").strip()
+        if not active_user:
+            return "", "none"
+        last_seen = float(getattr(self, "_active_user_last_seen_at", 0.0) or 0.0)
+        if last_seen <= 0.0:
+            return "", "none"
+        now = float(reference_ts or time.time())
+        max_age = max(0.0, DEFAULT_SPEAKER_ID_ACTIVE_FALLBACK_SECONDS)
+        if max_age <= 0.0 or (now - last_seen) > max_age:
+            return "", "none"
+        return active_user, "active_fallback"
 
     def _sounddevice_hostapi_name(self, hostapi_index: Any) -> str:
         if sd is None:
@@ -2010,10 +2162,21 @@ class DesktopAudioAgent:
         if clear_preroll:
             self._api_asr_preroll_frames.clear()
 
+    def _reset_command_asr_turn(self, *, clear_preroll: bool = False) -> None:
+        self._command_asr_turn_active = False
+        self._command_asr_turn_frames = []
+        if clear_preroll:
+            self._command_asr_preroll_frames.clear()
+
     def _cancel_api_asr_tasks(self) -> None:
         for task in list(self._active_api_asr_tasks):
             task.cancel()
         self._active_api_asr_tasks.clear()
+
+    def _cancel_command_asr_tasks(self) -> None:
+        for task in list(self._active_command_asr_tasks):
+            task.cancel()
+        self._active_command_asr_tasks.clear()
 
     def _reload_provider_settings_from_env(self) -> None:
         self.cloud_response_provider = _normalize_cloud_response_provider(
@@ -2023,6 +2186,18 @@ class DesktopAudioAgent:
         self.active_kokoro_voice = _env("KOKORO_TTS_VOICE", self.active_kokoro_voice)
         self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
         self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
+        self.gemini_live_native_response_enabled = _env_bool(
+            "VOICE_GEMINI_LIVE_NATIVE_RESPONSE",
+            bool(self.gemini_live_native_response_enabled),
+        )
+        self.gemini_live_command_tools_enabled = _env_bool(
+            "VOICE_GEMINI_LIVE_COMMAND_TOOLS_ENABLED",
+            bool(self.gemini_live_command_tools_enabled),
+        )
+        self.command_asr_enabled = _env_bool("VOICE_COMMAND_ASR_ENABLED", bool(self.command_asr_enabled))
+        self.command_asr_provider = _normalize_command_asr_provider(
+            _env("VOICE_COMMAND_ASR_PROVIDER", self.command_asr_provider or DEFAULT_COMMAND_ASR_PROVIDER)
+        )
         self._speaker_id.reload_from_env(memory_path=_env("DIALOG_USER_MEMORY_PATH", ""))
 
     def _close_gemini_live_output(self, *, clear_player: bool) -> None:
@@ -2044,12 +2219,15 @@ class DesktopAudioAgent:
         self._gemini_live_session_task = None
         if task is not None:
             task.cancel()
+        self._cancel_command_asr_tasks()
+        self._reset_command_asr_turn(clear_preroll=True)
         self._gemini_live_connected = False
         self._close_gemini_live_output(clear_player=True)
         self._assistant_buffer_text = ""
         self._assistant_corr_id = ""
         self._gemini_live_output_text = ""
         self._gemini_live_logged_output_text = ""
+        self._gemini_live_input_text = ""
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
 
@@ -2085,6 +2263,11 @@ class DesktopAudioAgent:
         frame = np.asarray(audio, dtype=np.float32).reshape(-1)
         if frame.size <= 0 or self._loop is None:
             return
+        if DEFAULT_GEMINI_LIVE_SUPPRESS_DURING_ASSISTANT:
+            if self.is_assistant_speaking():
+                return
+            if (time.time() - float(self._last_assistant_spoke_at or 0.0)) <= max(0.0, DEFAULT_GEMINI_LIVE_ASSISTANT_TAIL_SECONDS):
+                return
         self._loop.call_soon_threadsafe(self._queue_gemini_live_audio, _float32_to_pcm16_bytes(frame))
 
     async def _run_gemini_live_supervisor(self, api_key: str) -> None:
@@ -2106,11 +2289,94 @@ class DesktopAudioAgent:
                 await asyncio.sleep(backoff_seconds)
                 backoff_seconds = min(5.0, backoff_seconds + 1.0)
 
+    def _command_game_names(self) -> List[str]:
+        names: List[str] = []
+        seen = set()
+        for item in getattr(self._command_grammar, "games", []) or []:
+            name = _collapse_spaces(getattr(item, "name", "") or "")
+            if not name:
+                continue
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+        for game_name, _phrase in getattr(self._command_grammar, "_game_phrases", []) or []:
+            name = _collapse_spaces(game_name)
+            if not name:
+                continue
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+        return names
+
+    def _gemini_live_system_instruction(self) -> str:
+        base = DEFAULT_GEMINI_LIVE_SYSTEM_PROMPT
+        if not bool(getattr(self, "gemini_live_command_tools_enabled", False)):
+            return base
+        game_names = self._command_game_names()
+        game_list = ", ".join(game_names) if game_names else "the available games"
+        return (
+            f"{base} "
+            "When the user asks to open, start, launch, begin, load, or play a game, call the launch_game tool. "
+            "Do this even if the transcript text looks wrong but the spoken meaning is clear. "
+            "If the user says cornhole, corn hole, corn home, core hole, call home, or similar, use game_name 'Bean Bag Toss'. "
+            "If the user asks to go home, back home, exit, quit, or close the current game, call the go_home tool. "
+            "After a command tool result, say exactly the spoken_ack field once, with no extra confirmation or rephrasing. "
+            f"Available canonical game names: {game_list}."
+        )
+
+    def _gemini_live_command_tools(self) -> List[Any]:
+        if not bool(getattr(self, "gemini_live_command_tools_enabled", False)):
+            return []
+        game_names = self._command_game_names()
+        game_name_schema: Dict[str, Any] = {
+            "type": "string",
+            "description": "Canonical game name to launch.",
+        }
+        if game_names:
+            game_name_schema["enum"] = game_names
+        launch_declaration = genai_types.FunctionDeclaration(
+            name="launch_game",
+            description=(
+                "Launch a rehabilitation game requested by the user. "
+                "Use this for phrases like open cornhole, play corn hole, start air hockey, or launch Bean Bag Toss."
+            ),
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "game_name": game_name_schema,
+                    "heard_text": {
+                        "type": "string",
+                        "description": "Optional best-effort text for what the user said.",
+                    },
+                },
+                "required": ["game_name"],
+            },
+        )
+        home_declaration = genai_types.FunctionDeclaration(
+            name="go_home",
+            description="Return to the home screen or close the current game when the user asks to go back/home/exit.",
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "heard_text": {
+                        "type": "string",
+                        "description": "Optional best-effort text for what the user said.",
+                    },
+                },
+            },
+        )
+        return [genai_types.Tool(function_declarations=[launch_declaration, home_declaration])]
+
     async def _run_gemini_live_session_once(self, api_key: str) -> None:
         client = genai.Client(api_key=api_key)
+        system_instruction = self._gemini_live_system_instruction()
         config = genai_types.LiveConnectConfig(
             response_modalities=[genai_types.Modality.AUDIO],
-            system_instruction=DEFAULT_GEMINI_LIVE_SYSTEM_PROMPT,
+            system_instruction=system_instruction,
             input_audio_transcription=genai_types.AudioTranscriptionConfig(),
             output_audio_transcription=genai_types.AudioTranscriptionConfig(),
             realtime_input_config=genai_types.RealtimeInputConfig(
@@ -2124,6 +2390,9 @@ class DesktopAudioAgent:
                 turn_coverage=genai_types.TurnCoverage.TURN_INCLUDES_ALL_INPUT,
             ),
         )
+        tools = self._gemini_live_command_tools()
+        if tools:
+            config.tools = tools
         voice_name = str(self.gemini_live_voice or "").strip()
         if voice_name:
             config.speech_config = genai_types.SpeechConfig(
@@ -2177,22 +2446,165 @@ class DesktopAudioAgent:
 
     async def _gemini_live_receiver(self, session: Any) -> None:
         async for message in session.receive():
+            tool_call = getattr(message, "tool_call", None)
+            if tool_call is not None:
+                await self._handle_gemini_live_tool_call(session, tool_call)
+                continue
             server_content = getattr(message, "server_content", None)
             if server_content is None:
                 continue
             await self._handle_gemini_live_server_content(server_content)
+
+    async def _handle_gemini_live_tool_call(self, session: Any, tool_call: Any) -> None:
+        responses: List[Any] = []
+        for function_call in getattr(tool_call, "function_calls", []) or []:
+            name = str(getattr(function_call, "name", "") or "").strip()
+            call_id = str(getattr(function_call, "id", "") or "").strip()
+            args = getattr(function_call, "args", None)
+            if not isinstance(args, dict):
+                args = {}
+            result = await self._execute_gemini_live_function_call(name=name, args=args)
+            if genai_types is not None:
+                responses.append(
+                    genai_types.FunctionResponse(
+                        id=call_id or None,
+                        name=name or None,
+                        response=result,
+                    )
+                )
+        if responses:
+            await session.send_tool_response(function_responses=responses)
+
+    async def _execute_gemini_live_function_call(self, *, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        normalized_name = str(name or "").strip().lower()
+        heard_text = _collapse_spaces(str(args.get("heard_text") or args.get("text") or ""))
+        if normalized_name == "launch_game":
+            game_name = _collapse_spaces(str(args.get("game_name") or args.get("game") or ""))
+            seed = f"open {game_name or heard_text}".strip()
+            grammar_match = self._command_grammar.canonicalize(seed, allow_bare_game=True)
+            final_text = str(grammar_match.canonical_text or seed).strip()
+            if grammar_match.route_type != "LAUNCH_GAME":
+                self.log_store.add(
+                    "system",
+                    f"Gemini Live tool launch_game ignored unknown game: {game_name or heard_text}",
+                    speaker="system",
+                    source="gemini_live_tool",
+                )
+                return {
+                    "status": "error",
+                    "message": f"Unknown game: {game_name or heard_text}",
+                }
+            self._last_gemini_tool_command_text = final_text
+            self._last_gemini_tool_command_at = time.time()
+            self._record_user_transcript_event(final_text)
+            metadata_parts = ["source=gemini_live_tool", f"grammar={grammar_match.route_type}:{grammar_match.confidence:.2f}"]
+            if heard_text and heard_text != final_text:
+                metadata_parts.append(f"raw={heard_text}")
+            metadata = " | ".join(metadata_parts)
+            replaced = False
+            replace_recent_user = getattr(self.log_store, "replace_recent_user", None)
+            if callable(replace_recent_user):
+                replaced = bool(
+                    replace_recent_user(
+                        final_text,
+                        speaker="User",
+                        source="desktop_audio",
+                        metadata=metadata,
+                        metadata_contains="gemini_live",
+                        max_age_seconds=DEFAULT_GEMINI_LIVE_TOOL_TRANSCRIPT_SUPPRESS_SECONDS,
+                    )
+                )
+            if not replaced:
+                self.log_store.add(
+                    "user",
+                    final_text,
+                    speaker="User",
+                    source="desktop_audio",
+                    metadata=metadata,
+                )
+            dispatched = await self._dispatch_native_command(
+                grammar_match=grammar_match,
+                final_text=final_text,
+                raw_text=heard_text or game_name,
+                source="gemini_live_tool",
+            )
+            return {
+                "status": "ok" if dispatched else "duplicate_or_not_dispatched",
+                "command": grammar_match.route_type,
+                "game_name": grammar_match.game_name,
+                "text": final_text,
+                "spoken_ack": f"Opening {grammar_match.game_name}.",
+            }
+        if normalized_name == "go_home":
+            seed = heard_text or "back home"
+            grammar_match = self._command_grammar.canonicalize(seed, allow_bare_game=False)
+            if grammar_match.route_type != "BACK_HOME":
+                grammar_match = self._command_grammar.canonicalize("back home", allow_bare_game=False)
+            final_text = str(grammar_match.canonical_text or "back home").strip()
+            self._last_gemini_tool_command_text = final_text
+            self._last_gemini_tool_command_at = time.time()
+            self._record_user_transcript_event(final_text)
+            metadata = "source=gemini_live_tool | grammar=BACK_HOME"
+            replaced = False
+            replace_recent_user = getattr(self.log_store, "replace_recent_user", None)
+            if callable(replace_recent_user):
+                replaced = bool(
+                    replace_recent_user(
+                        final_text,
+                        speaker="User",
+                        source="desktop_audio",
+                        metadata=metadata,
+                        metadata_contains="gemini_live",
+                        max_age_seconds=DEFAULT_GEMINI_LIVE_TOOL_TRANSCRIPT_SUPPRESS_SECONDS,
+                    )
+                )
+            if not replaced:
+                self.log_store.add(
+                    "user",
+                    final_text,
+                    speaker="User",
+                    source="desktop_audio",
+                    metadata=metadata,
+                )
+            dispatched = await self._dispatch_native_command(
+                grammar_match=grammar_match,
+                final_text=final_text,
+                raw_text=heard_text or final_text,
+                source="gemini_live_tool",
+            )
+            return {
+                "status": "ok" if dispatched else "duplicate_or_not_dispatched",
+                "command": "BACK_HOME",
+                "text": final_text,
+                "spoken_ack": "Going back home.",
+            }
+        self.log_store.add(
+            "system",
+            f"Gemini Live requested unknown tool: {name}",
+            speaker="system",
+            source="gemini_live_tool",
+        )
+        return {"status": "error", "message": f"Unknown tool: {name}"}
 
     async def _handle_gemini_live_server_content(self, server_content: Any) -> None:
         input_transcription = getattr(server_content, "input_transcription", None)
         if input_transcription is not None:
             await self._handle_gemini_live_input_transcription(input_transcription)
 
+        turn_complete = bool(getattr(server_content, "turn_complete", False))
+        if turn_complete and self._gemini_live_input_text:
+            final_input_text = self._gemini_live_input_text
+            self._last_partial_text = ""
+            self._last_stable_partial_text = ""
+            self._gemini_live_input_text = ""
+            await self._handle_gemini_live_user_turn(final_input_text)
+
         output_transcription = getattr(server_content, "output_transcription", None)
-        if output_transcription is not None:
+        if output_transcription is not None and self.gemini_live_native_response_enabled:
             self._handle_gemini_live_output_transcription(output_transcription)
 
         model_turn = getattr(server_content, "model_turn", None)
-        if model_turn is not None:
+        if model_turn is not None and self.gemini_live_native_response_enabled:
             for part in getattr(model_turn, "parts", []) or []:
                 inline_data = getattr(part, "inline_data", None)
                 if inline_data is None:
@@ -2213,7 +2625,7 @@ class DesktopAudioAgent:
                     _parse_pcm_sample_rate(mime_type, DEFAULT_GEMINI_LIVE_OUTPUT_SAMPLE_RATE),
                 )
 
-        if bool(getattr(server_content, "interrupted", False)):
+        if bool(getattr(server_content, "interrupted", False)) and self.gemini_live_native_response_enabled:
             interrupted_text = self._sanitize_assistant_text(
                 self._assistant_buffer_text or self._gemini_live_output_text or ""
             )
@@ -2232,7 +2644,7 @@ class DesktopAudioAgent:
             self._gemini_live_output_text = ""
             self._close_gemini_live_output(clear_player=True)
 
-        if bool(getattr(server_content, "turn_complete", False)):
+        if turn_complete and self.gemini_live_native_response_enabled:
             if self._gemini_live_output_open:
                 await self._wait_for_playback_drain()
             self._close_gemini_live_output(clear_player=False)
@@ -2248,25 +2660,29 @@ class DesktopAudioAgent:
     async def _handle_gemini_live_input_transcription(self, transcription: Any) -> None:
         text = str(getattr(transcription, "text", "") or "").strip()
         finished = bool(getattr(transcription, "finished", False))
+        merged_text = _merge_incremental_transcript(self._gemini_live_input_text, text)
         if not finished:
-            self._last_partial_text = text
-            self._last_stable_partial_text = text
+            self._gemini_live_input_text = merged_text
+            self._last_partial_text = merged_text
+            self._last_stable_partial_text = merged_text
             return
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
-        if not text:
+        self._gemini_live_input_text = ""
+        if not merged_text:
             return
-        await self._handle_gemini_live_user_turn(text)
+        await self._handle_gemini_live_user_turn(merged_text)
 
     def _handle_gemini_live_output_transcription(self, transcription: Any) -> None:
         text = str(getattr(transcription, "text", "") or "").strip()
         finished = bool(getattr(transcription, "finished", False))
         if not text:
             return
-        self._assistant_buffer_text = text
-        self._gemini_live_output_text = text
+        merged_text = _merge_incremental_transcript(self._assistant_buffer_text or self._gemini_live_output_text, text)
+        self._assistant_buffer_text = merged_text
+        self._gemini_live_output_text = merged_text
         if finished:
-            clean_text = self._sanitize_assistant_text(text)
+            clean_text = self._sanitize_assistant_text(merged_text)
             if clean_text and clean_text != self._gemini_live_logged_output_text:
                 self._assistant_buffer_text = clean_text
                 self._gemini_live_output_text = clean_text
@@ -2283,44 +2699,67 @@ class DesktopAudioAgent:
             return
         self._gemini_live_last_input_text = normalized
         self._last_final_event_at = now
-        if normalized == self._last_user_submit_text and (now - self._last_user_submit_at) <= 2.0:
-            return
-        self._last_user_submit_text = normalized
-        self._last_user_submit_at = now
 
-        grammar_match = self._command_grammar.canonicalize(normalized)
+        grammar_match = self._command_grammar.canonicalize(normalized, allow_bare_game=True)
         final_text = str(grammar_match.canonical_text or normalized).strip()
-        self._record_user_transcript_event(final_text)
-        metadata_parts: List[str] = ["asr=gemini_live:high"]
-        if grammar_match.route_type and grammar_match.route_type != "QUERY":
-            metadata_parts.append(f"grammar={grammar_match.route_type}:{grammar_match.confidence:.2f}")
-        self.log_store.add(
-            "user",
-            final_text,
-            speaker="User",
-            source="gemini_live",
-            metadata=" | ".join(metadata_parts),
-        )
-        if grammar_match.route_type not in {"LAUNCH_GAME", "BACK_HOME"} or grammar_match.confidence < 0.86:
-            return
-        payload: Dict[str, Any] = {
-            "type": grammar_match.route_type,
-            "source": "gemini_live",
-            "corr_id": uuid.uuid4().hex,
-            "ts": int(time.time() * 1000),
-            "text": final_text,
-        }
-        if grammar_match.route_type == "LAUNCH_GAME" and grammar_match.game_name:
-            payload["game_name"] = grammar_match.game_name
-        try:
-            await self._publish_mqtt("robot/intent", payload)
-        except Exception as exc:
+        if (
+            bool(getattr(self, "gemini_live_native_response_enabled", False))
+            and grammar_match.route_type == "QUERY"
+            and (now - float(getattr(self, "_last_gemini_tool_command_at", 0.0) or 0.0))
+            <= max(0.1, DEFAULT_GEMINI_LIVE_TOOL_TRANSCRIPT_SUPPRESS_SECONDS)
+        ):
             self.log_store.add(
                 "system",
-                f"Gemini Live command dispatch failed: {exc}",
+                f"ignored Gemini transcript after tool command: {normalized}",
                 speaker="system",
-                source="gemini_live",
+                source="gemini_live_transcript_filter",
             )
+            self._last_partial_text = ""
+            self._last_stable_partial_text = ""
+            return
+        self._record_user_transcript_event(final_text)
+        user_id, identity_resolution = await self._resolve_recent_speaker_user(
+            source="gemini_live",
+            observed_at=now,
+        )
+        if bool(getattr(self, "gemini_live_native_response_enabled", False)):
+            metadata_parts: List[str] = [
+                f"asr={TRANSCRIPT_SOURCE_FINAL}:{TRANSCRIPT_CONFIDENCE_HIGH}",
+                "source=desktop_audio:gemini_live",
+                "native_response=1",
+            ]
+            if grammar_match.route_type and grammar_match.route_type != "QUERY":
+                metadata_parts.append(f"grammar={grammar_match.route_type}:{grammar_match.confidence:.2f}")
+            self.log_store.add(
+                "user",
+                final_text,
+                speaker="User",
+                source="desktop_audio",
+                metadata=" | ".join(metadata_parts),
+            )
+            if grammar_match.route_type and grammar_match.route_type != "QUERY":
+                await self._dispatch_native_command(
+                    grammar_match=grammar_match,
+                    final_text=final_text,
+                    raw_text=normalized,
+                    source="gemini_live_native",
+                )
+            return
+        await self._submit_user_turn(
+            text=final_text,
+            original_text=normalized,
+            grammar_route=grammar_match.route_type,
+            grammar_game_name=grammar_match.game_name,
+            grammar_confidence=grammar_match.confidence,
+            avg_logprob=None,
+            speaker_index=None,
+            speaker_id=None,
+            user_id=user_id,
+            identity_resolution=identity_resolution,
+            transcript_source=TRANSCRIPT_SOURCE_FINAL,
+            transcript_confidence=TRANSCRIPT_CONFIDENCE_HIGH,
+            input_source="gemini_live",
+        )
 
     def _current_hotword_entries(self) -> List[HotwordEntry]:
         if self.hotword_strategy == HOTWORD_STRATEGY_OFF:
@@ -2427,6 +2866,8 @@ class DesktopAudioAgent:
         self._close_asr_backend()
         self._cancel_api_asr_tasks()
         self._reset_api_asr_turn(clear_preroll=True)
+        self._cancel_command_asr_tasks()
+        self._reset_command_asr_turn(clear_preroll=True)
         self._stop_gemini_live_session()
         self._reload_provider_settings_from_env()
         self._rebuild_hotword_pack()
@@ -2521,6 +2962,20 @@ class DesktopAudioAgent:
             diagnostic_extras["freshest_segment_age_seconds"] = round(min(candidate_ages), 4)
             diagnostic_extras["oldest_segment_age_seconds"] = round(max(candidate_ages), 4)
         if not candidates:
+            fallback_user_id, fallback_resolution = self._active_user_fallback(reference_ts=reference_ts)
+            if fallback_user_id:
+                diagnostic_extras["fallback_user_id"] = fallback_user_id
+                diagnostic_extras["identity_resolution"] = fallback_resolution
+                self._update_last_speaker_match(
+                    SpeakerMatchResult(
+                        user_id=fallback_user_id,
+                        matched=True,
+                        reason="active_user_fallback_no_recent_segment",
+                    ),
+                    source=source,
+                    extras=diagnostic_extras,
+                )
+                return fallback_user_id, fallback_resolution
             self._update_last_speaker_match(
                 SpeakerMatchResult(reason="no_recent_segment"),
                 source=source,
@@ -2539,6 +2994,20 @@ class DesktopAudioAgent:
             if freshest_fallback_age > stale_fallback_seconds:
                 diagnostic_extras["segment_used_fallback_window"] = True
                 diagnostic_extras["segment_age_seconds"] = round(float(freshest_fallback_age), 4)
+                fallback_user_id, fallback_resolution = self._active_user_fallback(reference_ts=reference_ts)
+                if fallback_user_id:
+                    diagnostic_extras["fallback_user_id"] = fallback_user_id
+                    diagnostic_extras["identity_resolution"] = fallback_resolution
+                    self._update_last_speaker_match(
+                        SpeakerMatchResult(
+                            user_id=fallback_user_id,
+                            matched=True,
+                            reason="active_user_fallback_stale_segment",
+                        ),
+                        source=source,
+                        extras=diagnostic_extras,
+                    )
+                    return fallback_user_id, fallback_resolution
                 self._update_last_speaker_match(
                     SpeakerMatchResult(reason="stale_fallback_segment"),
                     source=source,
@@ -2588,6 +3057,28 @@ class DesktopAudioAgent:
         self._update_last_speaker_match(best_result, source=source, extras=extras)
         if best_result.matched:
             return str(best_result.user_id or "").strip(), "auto"
+        fallback_user_id, fallback_resolution = self._active_user_fallback(reference_ts=reference_ts)
+        if fallback_user_id:
+            extras["fallback_user_id"] = fallback_user_id
+            extras["identity_resolution"] = fallback_resolution
+            self._update_last_speaker_match(
+                SpeakerMatchResult(
+                    user_id=fallback_user_id,
+                    matched=True,
+                    score=best_result.score,
+                    margin=best_result.margin,
+                    top1_user_id=best_result.top1_user_id,
+                    top2_user_id=best_result.top2_user_id,
+                    top1_score=best_result.top1_score,
+                    top2_score=best_result.top2_score,
+                    candidate_count=best_result.candidate_count,
+                    duration_seconds=best_result.duration_seconds,
+                    reason=f"active_user_fallback_after_{best_result.reason or 'no_match'}",
+                ),
+                source=source,
+                extras=extras,
+            )
+            return fallback_user_id, fallback_resolution
         return "", "none"
 
     async def _consume_next_enrollment_segment(self, segment: CapturedSpeechSegment) -> None:
@@ -2707,6 +3198,7 @@ class DesktopAudioAgent:
         self._speaker_segment_started_at = 0.0
         self._speaker_enrollment_suppress_until = 0.0
         self._active_user_id = ""
+        self._active_user_last_seen_at = 0.0
         self._last_speaker_match = {}
         await self._client.aclose()
         self._disconnect_mqtt()
@@ -2817,6 +3309,17 @@ class DesktopAudioAgent:
             supports_hotwords=backend.supports_hotwords() if backend is not None else False,
             hotwords_count=len(self._hotword_pack.entries),
             hotword_strategy=self.hotword_strategy,
+            command_asr_enabled=bool(
+                self.command_asr_enabled
+                and self.command_asr_provider != "off"
+                and self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE
+            ),
+            command_asr_provider=self.command_asr_provider,
+            command_asr_status=self._command_asr_status,
+            gemini_live_command_tools_enabled=bool(
+                self.gemini_live_command_tools_enabled
+                and self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE
+            ),
             current_partial=self._last_partial_text,
             stable_partial=self._last_stable_partial_text,
             final_transcript=self._last_final_transcript,
@@ -2857,9 +3360,17 @@ class DesktopAudioAgent:
     async def speaker_profiles_status(self) -> Dict[str, Any]:
         payload = await asyncio.to_thread(self._speaker_id.status_payload)
         payload["active_user_id"] = str(self._active_user_id or "")
+        payload["active_user_last_seen_ts"] = float(getattr(self, "_active_user_last_seen_at", 0.0) or 0.0)
         payload["last_speaker_match"] = self._speaker_match_payload()
         payload["live_capture_enabled"] = bool(self._input_stream is not None)
         payload["asr_mode"] = str(self.current_asr_mode or "")
+        recent_segments = list(getattr(self, "_recent_speaker_segments", []) or [])
+        payload["recent_segment_count"] = len(recent_segments)
+        payload["freshest_segment_age_seconds"] = (
+            round(time.time() - max(float(item.ended_at) for item in recent_segments), 4)
+            if recent_segments
+            else None
+        )
         return payload
 
     async def record_speaker_profile_sample(
@@ -2922,6 +3433,8 @@ class DesktopAudioAgent:
             self._last_stable_partial_text = ""
             self._cancel_api_asr_tasks()
             self._reset_api_asr_turn(clear_preroll=True)
+            self._cancel_command_asr_tasks()
+            self._reset_command_asr_turn(clear_preroll=True)
 
     async def set_conversation_dispatch_enabled(self, enabled: bool) -> None:
         self.conversation_dispatch_enabled = bool(enabled)
@@ -3128,7 +3641,10 @@ class DesktopAudioAgent:
 
     async def publish_flower(self, payload: Dict[str, Any]) -> None:
         action = str((payload or {}).get("action") or (payload or {}).get("value") or "").strip().lower()
-        value = action or "open"
+        if action in {"open_hold", "hold_open", "open-and-hold"}:
+            value = "open"
+        else:
+            value = action or "open"
         await self._publish_mqtt("robot/pi/servo/cmd", {"action": "servo", "value": value})
 
     async def _publish_mqtt(self, topic: str, payload: Dict[str, Any]) -> None:
@@ -3272,6 +3788,7 @@ class DesktopAudioAgent:
             self._update_speaker_capture(processed, speech_active=speech_active)
             if self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE:
                 try:
+                    self._handle_command_asr_frame(processed, speech_active=speech_active)
                     self._handle_gemini_live_frame(processed)
                 except Exception as exc:
                     self._last_error = f"Gemini Live capture failed: {exc}"
@@ -3462,7 +3979,16 @@ class DesktopAudioAgent:
         self._cancel_partial_commit()
         self._last_final_event_at = time.time()
         raw_final_text = str(event.text or "").strip()
-        grammar_match = self._command_grammar.canonicalize(raw_final_text)
+        grammar_match = self._command_grammar.canonicalize(
+            raw_final_text,
+            allow_bare_game=str(event.backend or self.current_asr_mode or "").strip().lower() in {
+                "api",
+                "live-captions",
+                "live_captions",
+                "gemini-live",
+                "gemini_live",
+            },
+        )
         final_text = str(grammar_match.canonical_text or raw_final_text).strip()
         transcript_source = TRANSCRIPT_SOURCE_FINAL
         transcript_confidence = _estimate_transcript_confidence(
@@ -3510,7 +4036,13 @@ class DesktopAudioAgent:
     ) -> None:
         self._cancel_partial_commit()
         self._last_final_event_at = time.time()
-        grammar_match = self._command_grammar.canonicalize(raw_text)
+        source_key = str(source or "").strip().lower()
+        grammar_match = self._command_grammar.canonicalize(
+            raw_text,
+            allow_bare_game=source_key == "live_captions"
+            or source_key.startswith("api")
+            or source_key in {"gemini_live", "gemini-live"},
+        )
         final_text = str(grammar_match.canonical_text or raw_text).strip()
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
@@ -3658,6 +4190,243 @@ class DesktopAudioAgent:
             user_id=resolved_user_id,
             identity_resolution=identity_resolution,
         )
+
+    def _command_asr_active(self) -> bool:
+        return bool(
+            self.command_asr_enabled
+            and self.command_asr_provider == "google-cloud"
+            and self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE
+        )
+
+    def _command_asr_phrase_hints(self) -> List[str]:
+        phrases: List[str] = []
+        seen = set()
+
+        def add(value: str) -> None:
+            text = _collapse_spaces(value)
+            if not text or not _should_include_hotword(text):
+                return
+            key = text.casefold()
+            if key in seen:
+                return
+            seen.add(key)
+            phrases.append(text)
+
+        launch_triggers = _coerce_string_list(_env("INTENT_LAUNCH_TRIGGERS", ""))
+        if not launch_triggers:
+            launch_triggers = ["open", "start", "launch", "play", "begin", "load"]
+        exit_keywords = _coerce_string_list(_env("INTENT_EXIT_KEYWORDS", ""))
+        if not exit_keywords:
+            exit_keywords = ["back home", "go home", "return home", "go back", "quit", "exit", "close game"]
+
+        for phrase in launch_triggers:
+            add(phrase)
+        for phrase in exit_keywords:
+            add(phrase)
+        for phrase in self._hotword_pack.canonical_phrases():
+            add(phrase)
+
+        game_phrases = []
+        for item in getattr(self._command_grammar, "_game_phrases", []) or []:
+            try:
+                _game_name, phrase = item
+            except Exception:
+                continue
+            phrase_text = _collapse_spaces(phrase)
+            if phrase_text:
+                game_phrases.append(phrase_text)
+                add(phrase_text)
+
+        for phrase in game_phrases:
+            for trigger in launch_triggers:
+                add(f"{trigger} {phrase}")
+        return phrases[:450]
+
+    def _handle_command_asr_frame(self, audio: np.ndarray, *, speech_active: bool) -> None:
+        if not self._command_asr_active():
+            return
+        if DEFAULT_GEMINI_LIVE_SUPPRESS_DURING_ASSISTANT:
+            if self.is_assistant_speaking() or (
+                time.time() - float(self._last_assistant_spoke_at or 0.0)
+            ) <= max(0.0, DEFAULT_GEMINI_LIVE_ASSISTANT_TAIL_SECONDS):
+                self._reset_command_asr_turn(clear_preroll=True)
+                return
+        frame = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if frame.size <= 0:
+            return
+        frame_copy = np.asarray(frame, dtype=np.float32).copy()
+        if speech_active:
+            if not self._command_asr_turn_active:
+                self._command_asr_turn_frames = [
+                    np.asarray(item, dtype=np.float32).copy() for item in self._command_asr_preroll_frames
+                ]
+                self._command_asr_turn_active = True
+                self._command_asr_preroll_frames.clear()
+            self._command_asr_turn_frames.append(frame_copy)
+            return
+
+        if self._command_asr_turn_active:
+            self._command_asr_turn_frames.append(frame_copy)
+            full_audio = (
+                np.concatenate(self._command_asr_turn_frames).astype(np.float32, copy=False)
+                if self._command_asr_turn_frames
+                else np.zeros(0, dtype=np.float32)
+            )
+            self._reset_command_asr_turn(clear_preroll=True)
+            if full_audio.size >= self._command_asr_min_samples and self._loop is not None:
+                self._loop.call_soon_threadsafe(
+                    self._start_command_asr_task,
+                    np.asarray(full_audio, dtype=np.float32),
+                )
+            return
+
+        self._command_asr_preroll_frames.append(frame_copy)
+
+    def _start_command_asr_task(self, audio: np.ndarray) -> None:
+        if self._speaker_enrollment_pending():
+            return
+        if not self._command_asr_active():
+            return
+        task = asyncio.create_task(self._run_command_asr_turn(np.asarray(audio, dtype=np.float32)))
+        self._active_command_asr_tasks.add(task)
+        task.add_done_callback(lambda completed: self._active_command_asr_tasks.discard(completed))
+
+    async def _run_command_asr_turn(self, audio: np.ndarray) -> None:
+        normalized_audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if normalized_audio.size <= 0 or not self._listening or not self._command_asr_active():
+            return
+        try:
+            transcript = await self._transcribe_command_with_google_cloud(normalized_audio)
+        except Exception as exc:
+            self._command_asr_status = f"google-cloud error: {exc}"
+            self._last_error = f"Google command ASR failed: {exc}"
+            self.log_store.add("system", self._last_error, speaker="system", source="google_cloud_command_asr")
+            return
+
+        transcript = _collapse_spaces(transcript)
+        if not transcript:
+            self._command_asr_status = "google-cloud heard no speech"
+            return
+        grammar_match = self._command_grammar.canonicalize(transcript, allow_bare_game=True)
+        if grammar_match.route_type == "QUERY":
+            self._command_asr_status = f"google-cloud heard non-command: {transcript}"
+            return
+        final_text = str(grammar_match.canonical_text or transcript).strip()
+        self._command_asr_status = f"google-cloud command: {transcript} -> {final_text}"
+        self._record_user_transcript_event(final_text)
+        self.log_store.add(
+            "system",
+            f"Google command ASR recognized: {transcript} -> {final_text}",
+            speaker="system",
+            source="google_cloud_command_asr",
+        )
+        await self._dispatch_native_command(
+            grammar_match=grammar_match,
+            final_text=final_text,
+            raw_text=transcript,
+            source="google_cloud_command_asr",
+        )
+
+    async def _transcribe_command_with_google_cloud(self, audio: np.ndarray) -> str:
+        api_key = _google_cloud_speech_api_key()
+        if not api_key:
+            raise RuntimeError("missing GOOGLE_CLOUD_SPEECH_API_KEY, GOOGLE_SPEECH_API_KEY, or GOOGLE_API_KEY")
+        phrases = self._command_asr_phrase_hints()
+        context: Dict[str, Any] = {"phrases": phrases}
+        if DEFAULT_COMMAND_ASR_GOOGLE_BOOST > 0:
+            context["boost"] = DEFAULT_COMMAND_ASR_GOOGLE_BOOST
+        config: Dict[str, Any] = {
+            "encoding": "LINEAR16",
+            "sampleRateHertz": int(self.capture_sample_rate),
+            "languageCode": DEFAULT_COMMAND_ASR_GOOGLE_LANGUAGE_CODE,
+            "enableAutomaticPunctuation": False,
+            "speechContexts": [context],
+        }
+        if DEFAULT_COMMAND_ASR_GOOGLE_MODEL:
+            config["model"] = DEFAULT_COMMAND_ASR_GOOGLE_MODEL
+        payload = {
+            "config": config,
+            "audio": {
+                "content": base64.b64encode(_float32_to_pcm16_bytes(audio)).decode("ascii"),
+            },
+        }
+        response = await self._client.post(
+            "https://speech.googleapis.com/v1/speech:recognize",
+            params={"key": api_key},
+            json=payload,
+            timeout=min(12.0, DEFAULT_TURN_TIMEOUT_SECONDS),
+        )
+        if response.status_code >= 400:
+            try:
+                detail = response.json()
+            except Exception:
+                detail = response.text
+            raise RuntimeError(f"HTTP {response.status_code}: {detail}")
+        data = response.json() if response.content else {}
+        best_text = ""
+        best_confidence = -1.0
+        for result in data.get("results", []) if isinstance(data, dict) else []:
+            if not isinstance(result, dict):
+                continue
+            for alt in result.get("alternatives", []) or []:
+                if not isinstance(alt, dict):
+                    continue
+                text = _collapse_spaces(str(alt.get("transcript") or ""))
+                if not text:
+                    continue
+                try:
+                    confidence = float(alt.get("confidence", 0.0) or 0.0)
+                except Exception:
+                    confidence = 0.0
+                if not best_text or confidence > best_confidence:
+                    best_text = text
+                    best_confidence = confidence
+        return best_text
+
+    async def _dispatch_native_command(
+        self,
+        *,
+        grammar_match: Any,
+        final_text: str,
+        raw_text: str,
+        source: str,
+    ) -> bool:
+        route_type = str(getattr(grammar_match, "route_type", "") or "").strip()
+        if not route_type or route_type == "QUERY":
+            return False
+        game_name = str(getattr(grammar_match, "game_name", "") or "").strip()
+        dispatch_key = f"{route_type}:{game_name or _collapse_spaces(final_text)}"
+        now = time.time()
+        if (
+            dispatch_key == self._last_native_command_dispatch_text
+            and (now - self._last_native_command_dispatch_at) <= 2.5
+        ):
+            return False
+        self._last_native_command_dispatch_text = dispatch_key
+        self._last_native_command_dispatch_at = now
+        intent_payload: Dict[str, Any] = {
+            "type": route_type,
+            "source": source,
+            "text": str(final_text or "").strip(),
+            "corr_id": uuid.uuid4().hex,
+            "ts": int(time.time() * 1000),
+        }
+        raw_value = _collapse_spaces(raw_text)
+        if raw_value and raw_value != intent_payload["text"]:
+            intent_payload["raw_text"] = raw_value
+        if game_name:
+            intent_payload["game_name"] = game_name
+        try:
+            await self._publish_mqtt("robot/intent", intent_payload)
+            return True
+        except Exception as exc:
+            self.log_store.add(
+                "system",
+                f"native command dispatch failed: {exc}",
+                speaker="system",
+                source=source,
+            )
+            return False
 
     def _cancel_partial_commit(self) -> None:
         task = self._partial_commit_task
@@ -3931,6 +4700,7 @@ class DesktopAudioAgent:
         self._active_tts_tasks.add(tts_worker)
         final_text = ""
         final_logged = False
+        final_metadata = ""
         try:
             async with self._client.stream(
                 "POST",
@@ -3953,10 +4723,24 @@ class DesktopAudioAgent:
                         continue
                     if event_type == "final":
                         final_text = self._sanitize_assistant_text(event.get("text") or "")
+                        provider = str(event.get("provider") or "").strip()
+                        route = str(event.get("route") or "").strip()
+                        metadata_parts = []
+                        if provider:
+                            metadata_parts.append(f"provider={provider}")
+                        if route:
+                            metadata_parts.append(f"route={route}")
+                        final_metadata = " | ".join(metadata_parts)
                         if final_text:
                             self._assistant_buffer_text = final_text
                             if not final_logged:
-                                self.log_store.add("coach", final_text, speaker="RACHEL", source="voice_service")
+                                self.log_store.add(
+                                    "coach",
+                                    final_text,
+                                    speaker="RACHEL",
+                                    source="voice_service",
+                                    metadata=final_metadata,
+                                )
                                 final_logged = True
                         continue
                     if event_type == "error":
@@ -3973,7 +4757,13 @@ class DesktopAudioAgent:
                 self._last_error = f"TTS worker failed: {exc}"
             self._active_tts_tasks.discard(tts_worker)
         if final_text and not final_logged:
-            self.log_store.add("coach", final_text, speaker="RACHEL", source="voice_service")
+            self.log_store.add(
+                "coach",
+                final_text,
+                speaker="RACHEL",
+                source="voice_service",
+                metadata=final_metadata,
+            )
         elif not final_logged:
             interrupted_text = self._sanitize_assistant_text(self._assistant_buffer_text or "")
             if interrupted_text:

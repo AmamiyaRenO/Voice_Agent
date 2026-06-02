@@ -1957,11 +1957,10 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   publisher: {fileID: 1489373252}
-  speechToText: {fileID: 0}
+  unitySpeechInput: {fileID: 0}
   piHub: {fileID: 143412778}
   intentConfigJson: {fileID: 4900000, guid: f886a37adc9721949b230d5dec74c8fc, type: 3}
   wakeWord: rachel
-  requireWakeWord: 0
   requireLaunchKeyword: 0
   launchKeywords:
   - open
@@ -1989,8 +1988,8 @@ MonoBehaviour:
   ttsStreamStartBufferSeconds: 0.15
   ttsStreamRingBufferSeconds: 20
   fixedDialogTtsSpeaker: Ryan
+  forcePiperForDialogAnswers: 1
   fixedDialogTtsInstruct: friendly
-  wakeAcknowledgeUserText: 
   muteMicDuringTtsWhenAecInactive: 1
   enableTtsPseudoStreaming: 1
   ttsStreamSplitMinChars: 180
@@ -1998,7 +1997,6 @@ MonoBehaviour:
   ttsStreamPrefetchNext: 1
   autoEnableMqttPublishing: 1
   voiceTextTopic: robot/voice/text
-  firstCommandListenSeconds: 3
   dropTtsEchoWhileSpeaking: 1
   suppressAsrDuringTtsWindow: 1
   allowCommandBargeInDuringTtsWindow: 0

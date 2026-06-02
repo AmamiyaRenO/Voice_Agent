@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
@@ -188,12 +188,12 @@ namespace RobotVoice
 
         public bool SetAgentListeningForTester(bool shouldListen)
         {
-            if (speechToText == null)
+            if (unitySpeechInput == null)
             {
-                speechToText = GetComponent<VoskSpeechToText>();
+                unitySpeechInput = GetComponent<UnitySpeechInputFallback>();
             }
 
-            if (speechToText == null)
+            if (unitySpeechInput == null)
             {
                 return false;
             }
@@ -202,7 +202,7 @@ namespace RobotVoice
             {
                 SetUnitySpeechInputFallbackEnabled(true);
             }
-            speechToText.SetListeningEnabled(shouldListen);
+            unitySpeechInput.SetListeningEnabled(shouldListen);
             if (!shouldListen)
             {
                 SetUnitySpeechInputFallbackEnabled(false);
@@ -212,12 +212,12 @@ namespace RobotVoice
 
         public bool IsAgentListeningForTester()
         {
-            if (speechToText == null)
+            if (unitySpeechInput == null)
             {
-                speechToText = GetComponent<VoskSpeechToText>();
+                unitySpeechInput = GetComponent<UnitySpeechInputFallback>();
             }
 
-            return IsUnitySpeechInputFallbackEnabled() && speechToText != null && speechToText.IsListening;
+            return IsUnitySpeechInputFallbackEnabled() && unitySpeechInput != null && unitySpeechInput.IsListening;
         }
 
 
@@ -864,4 +864,3 @@ namespace RobotVoice
         }
     }
 }
-

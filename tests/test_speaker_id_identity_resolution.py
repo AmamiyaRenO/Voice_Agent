@@ -385,7 +385,7 @@ def test_desktop_audio_agent_suppresses_transcript_during_enrollment_cooldown():
     agent.is_assistant_speaking = lambda: False
     agent._should_ignore_live_captions_echo = lambda _text: False
     agent._command_grammar = SimpleNamespace(
-        canonicalize=lambda text: SimpleNamespace(
+        canonicalize=lambda text, **_kwargs: SimpleNamespace(
             canonical_text=text,
             route_type="QUERY",
             game_name="",
@@ -432,6 +432,59 @@ def test_desktop_audio_agent_relaxes_short_live_captions_queries():
     ) == audio_agent_module.TRANSCRIPT_CONFIDENCE_LOW
 
 
+def test_api_asr_bare_game_name_reaches_command_grammar(tmp_path: Path):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module("desktop_audio_agent_api_bare_game_module", PYTHON_VOICE_DIR / "desktop_audio_agent.py")
+    grammar_module = _load_module("command_grammar_api_bare_game_module", PYTHON_VOICE_DIR / "command_grammar.py")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "games": [
+                    {"id": "air_hockey", "name": "Air Hockey", "synonyms": ["air hockey"]},
+                    {"id": "cornhole", "name": "Bean Bag Toss", "synonyms": ["cornhole", "corn hole"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    submitted = []
+
+    async def fake_submit_user_turn(**kwargs):
+        submitted.append(kwargs)
+
+    agent._command_grammar = grammar_module.CommandGrammarMatcher.from_sources(
+        launch_triggers=["open", "start", "play"],
+        exit_keywords=["back home"],
+        manifest_path=str(manifest_path),
+    )
+    agent._cancel_partial_commit = lambda: None
+    agent._last_final_event_at = 0.0
+    agent._last_partial_text = ""
+    agent._last_stable_partial_text = ""
+    agent._last_partial_text_changed_at = 0.0
+    agent._last_stable_partial_text_changed_at = 0.0
+    agent._listening = True
+    agent.is_assistant_speaking = lambda: False
+    agent._suppress_transcript_during_enrollment = lambda source, text=None: False
+    agent._should_ignore_live_captions_echo = lambda _text: False
+    agent._record_user_transcript_event = lambda _text: None
+    agent._submit_user_turn = fake_submit_user_turn
+    agent.log_store = SimpleNamespace(add=lambda *_args, **_kwargs: None)
+
+    asyncio.run(agent._handle_external_transcript_final("Air Hockey", source="api_openai"))
+
+    assert len(submitted) == 1
+    assert submitted[0]["text"] == "open Air Hockey"
+    assert submitted[0]["grammar_route"] == "LAUNCH_GAME"
+    assert submitted[0]["grammar_game_name"] == "Air Hockey"
+    assert submitted[0]["input_source"] == "api_openai"
+
+
 def test_sanitize_tts_text_strips_keycap_and_symbol_emoji():
     if str(DIALOG_DIR) not in sys.path:
         sys.path.insert(0, str(DIALOG_DIR))
@@ -467,13 +520,15 @@ def test_desktop_audio_agent_partial_fallback_skips_incomplete_query(monkeypatch
     agent._last_partial_text_changed_at = 10.0
     agent._last_stable_partial_text_changed_at = 10.0
     agent._command_grammar = SimpleNamespace(
-        canonicalize=lambda text: SimpleNamespace(
+        canonicalize=lambda text, **_kwargs: SimpleNamespace(
             canonical_text=text,
             route_type="QUERY",
             game_name="",
             confidence=0.0,
         )
     )
+    agent._last_reported_transcript_text = ""
+    agent._last_reported_transcript_at = 0.0
     agent.log_store = SimpleNamespace(add=lambda *_args, **_kwargs: log_lines.append((_args, _kwargs)))
     agent._submit_user_turn = fake_submit_user_turn
 
@@ -508,13 +563,17 @@ def test_desktop_audio_agent_partial_fallback_respects_later_final(monkeypatch: 
     agent._last_partial_text_changed_at = 10.0
     agent._last_stable_partial_text_changed_at = 10.0
     agent._command_grammar = SimpleNamespace(
-        canonicalize=lambda text: SimpleNamespace(
+        canonicalize=lambda text, **_kwargs: SimpleNamespace(
             canonical_text=text,
             route_type="QUERY",
             game_name="",
             confidence=0.0,
         )
     )
+    agent._last_reported_transcript_text = ""
+    agent._last_reported_transcript_at = 0.0
+    agent._last_final_transcript = ""
+    agent._last_final_transcript_seq = 0
     agent.log_store = SimpleNamespace(add=lambda *_args, **_kwargs: None)
     agent._submit_user_turn = fake_submit_user_turn
 
@@ -548,13 +607,17 @@ def test_desktop_audio_agent_partial_fallback_commits_balanced_query(monkeypatch
     agent._last_partial_text_changed_at = 10.0
     agent._last_stable_partial_text_changed_at = 10.0
     agent._command_grammar = SimpleNamespace(
-        canonicalize=lambda text: SimpleNamespace(
+        canonicalize=lambda text, **_kwargs: SimpleNamespace(
             canonical_text=text,
             route_type="QUERY",
             game_name="",
             confidence=0.0,
         )
     )
+    agent._last_reported_transcript_text = ""
+    agent._last_reported_transcript_at = 0.0
+    agent._last_final_transcript = ""
+    agent._last_final_transcript_seq = 0
     agent.log_store = SimpleNamespace(add=lambda *_args, **_kwargs: None)
     agent._submit_user_turn = fake_submit_user_turn
 
@@ -621,40 +684,6 @@ def test_desktop_audio_agent_play_piper_text_sanitizes_assistant_log():
     assert logs[0][0][1] == "Hi there"
 
 
-def test_desktop_audio_agent_frozen_live_captions_defaults_use_installed_paths(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    if str(PYTHON_VOICE_DIR) not in sys.path:
-        sys.path.insert(0, str(PYTHON_VOICE_DIR))
-
-    app_root = tmp_path / "VoiceAgent"
-    services_dir = app_root / "runtime" / "services"
-    live_captions_dir = app_root / "runtime" / "live_captions"
-    state_dir = tmp_path / "state"
-    services_dir.mkdir(parents=True)
-    live_captions_dir.mkdir(parents=True)
-    state_dir.mkdir(parents=True)
-    exe_path = services_dir / "desktop_runtime.exe"
-    helper_path = live_captions_dir / "EnableLcMic.exe"
-    exe_path.write_text("stub", encoding="utf-8")
-    helper_path.write_text("stub", encoding="utf-8")
-
-    monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", str(exe_path), raising=False)
-    monkeypatch.delenv("LIVE_CAPTIONS_LISTENER_EXE", raising=False)
-    monkeypatch.delenv("LIVE_CAPTIONS_OUTPUT_DIR", raising=False)
-    monkeypatch.setenv("VOICE_AGENT_STATE_DIR", str(state_dir))
-
-    audio_agent_module = _load_module(
-        "desktop_audio_agent_frozen_live_captions_module",
-        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
-    )
-
-    assert Path(audio_agent_module.DEFAULT_LIVE_CAPTIONS_EXE) == helper_path.resolve()
-    assert Path(audio_agent_module.DEFAULT_LIVE_CAPTIONS_OUTPUT_DIR) == (state_dir / "live_captions").resolve()
-
-
 def test_voice_service_skips_uncertain_turn_guard_for_live_captions_final():
     pytest.importorskip("fastapi")
     pytest.importorskip("httpx")
@@ -682,6 +711,78 @@ def test_voice_service_skips_uncertain_turn_guard_for_live_captions_final():
         transcript_confidence="low",
     )
     assert voice_main._should_clarify_uncertain_turn(api_payload, "QUERY") is True
+
+
+def test_gemini_live_input_transcription_accumulates_delta_chunks():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+    audio_agent_module = _load_module("desktop_audio_agent_gemini_input_module", PYTHON_VOICE_DIR / "desktop_audio_agent.py")
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._gemini_live_input_text = ""
+    agent._last_partial_text = ""
+    agent._last_stable_partial_text = ""
+    submitted = []
+
+    async def fake_user_turn(text):
+        submitted.append(text)
+
+    agent._handle_gemini_live_user_turn = fake_user_turn
+
+    asyncio.run(agent._handle_gemini_live_input_transcription(SimpleNamespace(text="I want", finished=False)))
+    asyncio.run(agent._handle_gemini_live_input_transcription(SimpleNamespace(text="to play", finished=False)))
+    asyncio.run(agent._handle_gemini_live_input_transcription(SimpleNamespace(text="air hockey", finished=True)))
+
+    assert submitted == ["I want to play air hockey"]
+    assert agent._gemini_live_input_text == ""
+    assert agent._last_partial_text == ""
+    assert agent._last_stable_partial_text == ""
+
+
+def test_gemini_live_input_transcription_keeps_cumulative_updates_clean():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_input_cumulative_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._gemini_live_input_text = ""
+    agent._last_partial_text = ""
+    agent._last_stable_partial_text = ""
+    submitted = []
+
+    async def fake_user_turn(text):
+        submitted.append(text)
+
+    agent._handle_gemini_live_user_turn = fake_user_turn
+
+    asyncio.run(agent._handle_gemini_live_input_transcription(SimpleNamespace(text="I want", finished=False)))
+    asyncio.run(
+        agent._handle_gemini_live_input_transcription(
+            SimpleNamespace(text="I want to play air hockey", finished=True)
+        )
+    )
+
+    assert submitted == ["I want to play air hockey"]
+
+
+def test_gemini_live_output_transcription_accumulates_delta_chunks():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+    audio_agent_module = _load_module("desktop_audio_agent_gemini_output_module", PYTHON_VOICE_DIR / "desktop_audio_agent.py")
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._assistant_buffer_text = ""
+    agent._gemini_live_output_text = ""
+    agent._gemini_live_logged_output_text = ""
+    agent._recent_assistant_texts = deque(maxlen=8)
+    logs = []
+    agent.log_store = SimpleNamespace(add=lambda *args, **kwargs: logs.append((args, kwargs)))
+
+    agent._handle_gemini_live_output_transcription(SimpleNamespace(text="Let's play", finished=False))
+    agent._handle_gemini_live_output_transcription(SimpleNamespace(text="air hockey", finished=True))
+
+    assert agent._gemini_live_output_text == "Let's play air hockey"
+    assert logs[-1][0][1] == "Let's play air hockey"
 
 
 def test_voice_service_session_only_memory_payload_is_session_first():
@@ -912,6 +1013,394 @@ def test_desktop_audio_agent_live_captions_blocks_stale_fallback_segment():
     assert agent._last_speaker_match["fallback_segment_candidate_count"] == 1
     assert agent._last_speaker_match["segment_age_seconds"] == pytest.approx(15.5, abs=1e-4)
     assert stale_voice.caption_uses == 0
+
+
+def test_desktop_audio_agent_uses_recent_active_user_when_segment_missing():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_active_user_fallback_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    now = 100.0
+    agent._speaker_id = SimpleNamespace(enabled=True)
+    agent._recent_speaker_segments = deque()
+    agent._last_speaker_match = {}
+    agent._active_user_id = "user_008"
+    agent._active_user_last_seen_at = now - 4.0
+
+    user_id, identity_resolution = asyncio.run(
+        agent._resolve_recent_speaker_user(source="gemini_live", observed_at=now)
+    )
+
+    assert user_id == "user_008"
+    assert identity_resolution == "active_fallback"
+    assert agent._last_speaker_match["matched"] is True
+    assert agent._last_speaker_match["reason"] == "active_user_fallback_no_recent_segment"
+    assert agent._last_speaker_match["fallback_user_id"] == "user_008"
+
+
+def test_desktop_audio_agent_gemini_live_user_turn_reaches_conversation_memory():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_memory_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    submitted = []
+
+    async def fake_resolve_recent_speaker_user(**_kwargs):
+        return "user_008", "auto"
+
+    async def fake_submit_user_turn(**kwargs):
+        submitted.append(kwargs)
+
+    agent._listening = True
+    agent._gemini_live_last_input_text = ""
+    agent._last_final_event_at = 0.0
+    agent._last_user_submit_text = ""
+    agent._last_user_submit_at = 0.0
+    agent._command_grammar = SimpleNamespace(
+        canonicalize=lambda text, allow_bare_game=False: SimpleNamespace(
+            canonical_text=text,
+            route_type="QUERY",
+            game_name="",
+            confidence=0.0,
+        )
+    )
+    agent._record_user_transcript_event = lambda _text: None
+    agent._resolve_recent_speaker_user = fake_resolve_recent_speaker_user
+    agent._submit_user_turn = fake_submit_user_turn
+
+    asyncio.run(agent._handle_gemini_live_user_turn("please remember that I like air hockey"))
+
+    assert len(submitted) == 1
+    assert submitted[0]["text"] == "please remember that I like air hockey"
+    assert submitted[0]["user_id"] == "user_008"
+    assert submitted[0]["identity_resolution"] == "auto"
+    assert submitted[0]["input_source"] == "gemini_live"
+
+
+def test_desktop_audio_agent_gemini_live_turn_complete_flushes_partial_input():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_turn_complete_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    turns = []
+
+    async def fake_handle_user_turn(text):
+        turns.append(text)
+
+    agent._gemini_live_input_text = "can you hear me"
+    agent._last_partial_text = "can you hear me"
+    agent._last_stable_partial_text = "can you hear me"
+    agent.gemini_live_native_response_enabled = False
+    agent._handle_gemini_live_user_turn = fake_handle_user_turn
+
+    asyncio.run(agent._handle_gemini_live_server_content(SimpleNamespace(turn_complete=True)))
+
+    assert turns == ["can you hear me"]
+    assert agent._gemini_live_input_text == ""
+    assert agent._last_partial_text == ""
+    assert agent._last_stable_partial_text == ""
+
+
+def test_desktop_audio_agent_gemini_live_suppresses_assistant_echo(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_echo_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    calls = []
+
+    class FakeLoop:
+        def call_soon_threadsafe(self, callback, *args):
+            calls.append((callback, args))
+
+    monkeypatch.setattr(audio_agent_module, "DEFAULT_GEMINI_LIVE_SUPPRESS_DURING_ASSISTANT", True)
+    agent._loop = FakeLoop()
+    agent._last_assistant_spoke_at = 0.0
+    agent.is_assistant_speaking = lambda: True
+
+    agent._handle_gemini_live_frame(np.ones(160, dtype=np.float32) * 0.1)
+
+    assert calls == []
+
+
+def test_desktop_audio_agent_google_command_asr_sends_phrase_hints(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_google_command_hints_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    grammar_module = _load_module("command_grammar_google_command_hints_module", PYTHON_VOICE_DIR / "command_grammar.py")
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent.capture_sample_rate = 16000
+    agent._hotword_pack = audio_agent_module.HotwordPack(
+        entries=[
+            audio_agent_module.HotwordEntry(
+                phrase="cornhole",
+                aliases=["corn hole", "Bean Bag Toss"],
+            )
+        ]
+    )
+    agent._command_grammar = grammar_module.CommandGrammarMatcher.from_sources(
+        launch_triggers=[],
+        exit_keywords=[],
+        manifest_path=str(INTENT_DIR / "manifest.json"),
+    )
+    requests = []
+
+    class FakeResponse:
+        status_code = 200
+        content = b"{}"
+
+        def json(self):
+            return {"results": [{"alternatives": [{"transcript": "open corn hole", "confidence": 0.91}]}]}
+
+    class FakeClient:
+        async def post(self, url, **kwargs):
+            requests.append((url, kwargs))
+            return FakeResponse()
+
+    agent._client = FakeClient()
+    monkeypatch.setattr(audio_agent_module, "_google_cloud_speech_api_key", lambda: "test-key")
+
+    transcript = asyncio.run(agent._transcribe_command_with_google_cloud(np.ones(1600, dtype=np.float32) * 0.1))
+
+    assert transcript == "open corn hole"
+    phrases = requests[0][1]["json"]["config"]["speechContexts"][0]["phrases"]
+    assert "cornhole" in phrases
+    assert "corn hole" in phrases
+    assert "open corn hole" in phrases
+    assert requests[0][1]["params"]["key"] == "test-key"
+
+
+def test_desktop_audio_agent_google_command_asr_dispatches_game_launch():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_google_command_dispatch_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    grammar_module = _load_module("command_grammar_google_command_dispatch_module", PYTHON_VOICE_DIR / "command_grammar.py")
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    published = []
+    logs = []
+    recorded = []
+
+    async def fake_transcribe(_audio):
+        return "open corn hole"
+
+    async def fake_publish(topic, payload):
+        published.append((topic, payload))
+
+    agent._listening = True
+    agent.command_asr_enabled = True
+    agent.command_asr_provider = "google-cloud"
+    agent.current_asr_mode = audio_agent_module.STREAMING_ASR_MODE_GEMINI_LIVE
+    agent._command_grammar = grammar_module.CommandGrammarMatcher.from_sources(
+        launch_triggers=[],
+        exit_keywords=[],
+        manifest_path=str(INTENT_DIR / "manifest.json"),
+    )
+    agent._command_asr_status = ""
+    agent._last_error = ""
+    agent._last_native_command_dispatch_text = ""
+    agent._last_native_command_dispatch_at = 0.0
+    agent.log_store = SimpleNamespace(add=lambda *args, **kwargs: logs.append((args, kwargs)))
+    agent._record_user_transcript_event = lambda text: recorded.append(text)
+    agent._transcribe_command_with_google_cloud = fake_transcribe
+    agent._publish_mqtt = fake_publish
+
+    asyncio.run(agent._run_command_asr_turn(np.ones(1600, dtype=np.float32) * 0.1))
+
+    assert recorded == ["open Bean Bag Toss"]
+    assert published[0][0] == "robot/intent"
+    assert published[0][1]["type"] == "LAUNCH_GAME"
+    assert published[0][1]["game_name"] == "Bean Bag Toss"
+    assert published[0][1]["source"] == "google_cloud_command_asr"
+    assert published[0][1]["raw_text"] == "open corn hole"
+
+
+def test_desktop_audio_agent_gemini_live_declares_command_tools():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_tool_declare_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    grammar_module = _load_module("command_grammar_gemini_tool_declare_module", PYTHON_VOICE_DIR / "command_grammar.py")
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent.gemini_live_command_tools_enabled = True
+    agent._command_grammar = grammar_module.CommandGrammarMatcher.from_sources(
+        launch_triggers=[],
+        exit_keywords=[],
+        manifest_path=str(INTENT_DIR / "manifest.json"),
+    )
+
+    tools = agent._gemini_live_command_tools()
+
+    declarations = tools[0].function_declarations
+    assert declarations[0].name == "launch_game"
+    assert declarations[0].parameters_json_schema["properties"]["game_name"]["enum"] == [
+        "Bean Bag Toss",
+        "Disc Golf",
+    ]
+    assert declarations[1].name == "go_home"
+    assert "cornhole" in agent._gemini_live_system_instruction().lower()
+
+
+def test_desktop_audio_agent_gemini_live_tool_launch_replaces_bad_transcript():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_tool_launch_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    grammar_module = _load_module("command_grammar_gemini_tool_launch_module", PYTHON_VOICE_DIR / "command_grammar.py")
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    published = []
+
+    async def fake_publish(topic, payload):
+        published.append((topic, payload))
+
+    agent._command_grammar = grammar_module.CommandGrammarMatcher.from_sources(
+        launch_triggers=[],
+        exit_keywords=[],
+        manifest_path=str(INTENT_DIR / "manifest.json"),
+    )
+    agent._last_gemini_tool_command_text = ""
+    agent._last_gemini_tool_command_at = 0.0
+    agent._last_native_command_dispatch_text = ""
+    agent._last_native_command_dispatch_at = 0.0
+    agent._last_reported_transcript_text = ""
+    agent._last_reported_transcript_at = 0.0
+    agent._last_final_transcript = ""
+    agent._last_final_transcript_seq = 0
+    agent.log_store = audio_agent_module.ConversationLogStore(limit=10)
+    agent.log_store.add(
+        "user",
+        "ก็ คง ข้อ 6",
+        speaker="User",
+        source="desktop_audio",
+        metadata="source=desktop_audio:gemini_live | native_response=1",
+    )
+    agent._publish_mqtt = fake_publish
+
+    result = asyncio.run(
+        agent._execute_gemini_live_function_call(
+            name="launch_game",
+            args={"game_name": "Bean Bag Toss", "heard_text": "open cornhole"},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["spoken_ack"] == "Opening Bean Bag Toss."
+    assert published[0][1]["type"] == "LAUNCH_GAME"
+    assert published[0][1]["game_name"] == "Bean Bag Toss"
+    assert published[0][1]["source"] == "gemini_live_tool"
+    entries = agent.log_store.snapshot()
+    assert len(entries) == 1
+    assert entries[0]["role"] == "user"
+    assert entries[0]["message"] == "open Bean Bag Toss"
+    assert "gemini_live_tool" in entries[0]["metadata"]
+
+
+def test_desktop_audio_agent_gemini_live_bad_transcript_ignored_after_tool():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_bad_transcript_filter_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    submitted = []
+    logs = []
+
+    async def fake_resolve_recent_speaker_user(**_kwargs):
+        return "", "none"
+
+    async def fake_submit_user_turn(**kwargs):
+        submitted.append(kwargs)
+
+    agent._listening = True
+    agent.gemini_live_native_response_enabled = True
+    agent._gemini_live_last_input_text = ""
+    agent._last_final_event_at = 0.0
+    agent._last_gemini_tool_command_at = time.time() - 4.0
+    agent._last_partial_text = ""
+    agent._last_stable_partial_text = ""
+    agent._command_grammar = SimpleNamespace(
+        canonicalize=lambda text, allow_bare_game=False: SimpleNamespace(
+            canonical_text=text,
+            route_type="QUERY",
+            game_name="",
+            confidence=0.0,
+        )
+    )
+    agent.log_store = SimpleNamespace(add=lambda *args, **kwargs: logs.append((args, kwargs)))
+    agent._record_user_transcript_event = lambda _text: None
+    agent._resolve_recent_speaker_user = fake_resolve_recent_speaker_user
+    agent._submit_user_turn = fake_submit_user_turn
+
+    asyncio.run(agent._handle_gemini_live_user_turn("ก็ คง ข้อ 6"))
+
+    assert submitted == []
+    assert logs[0][0][0] == "system"
+    assert "ignored Gemini transcript" in logs[0][0][1]
+
+
+def test_api_routes_gemini_cloud_provider_does_not_normalize_to_openai(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    api_routes = _load_module("api_routes_gemini_provider_module", PYTHON_VOICE_DIR / "api_routes.py")
+    monkeypatch.setenv("VOICE_CONVERSATION_PROFILE", "cloud")
+    monkeypatch.setenv("VOICE_CLOUD_RESPONSE_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(api_routes, "google_genai", object())
+    monkeypatch.setattr(api_routes, "google_genai_types", object())
+
+    assert api_routes._conversation_cloud_response_provider() == "gemini"
+    assert api_routes._conversation_effective_response_provider("cloud") == "gemini"
+
+
+def test_api_routes_cloud_provider_does_not_fallback_to_local_when_unready(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    api_routes = _load_module("api_routes_cloud_no_fallback_module", PYTHON_VOICE_DIR / "api_routes.py")
+    monkeypatch.setenv("VOICE_CONVERSATION_PROFILE", "cloud")
+    monkeypatch.setenv("VOICE_CLOUD_RESPONSE_PROVIDER", "gemini")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_KEY", raising=False)
+    monkeypatch.setattr(api_routes, "google_genai", None)
+    monkeypatch.setattr(api_routes, "google_genai_types", None)
+
+    snapshot = api_routes._conversation_config_snapshot()
+
+    assert snapshot["cloud_response_provider"] == "gemini"
+    assert snapshot["effective_response_provider"] == "gemini"
+    assert snapshot["gemini_configured"] is False
+    assert snapshot["cloud_ready"] is False
 
 
 def test_desktop_audio_agent_input_device_details_prefers_stream_device(monkeypatch: pytest.MonkeyPatch):
@@ -1246,20 +1735,6 @@ def test_local_service_templates_default_to_live_captions_streaming_modes():
     assert default_payload["env"]["VOICE_CLOUD_STREAMING_ASR_MODE"] == "live-captions"
     assert sample_payload["env"]["VOICE_LOCAL_STREAMING_ASR_MODE"] == "live-captions"
     assert sample_payload["env"]["VOICE_CLOUD_STREAMING_ASR_MODE"] == "live-captions"
-
-
-def test_packaging_bundles_live_captions_runtime_directory():
-    packaging_module = _load_module(
-        "build_services_exe_packaging_module",
-        ROOT / "scripts" / "packaging" / "build_services_exe.py",
-    )
-    specs = packaging_module._service_specs()
-    desktop_spec = specs["desktop_runtime"]
-
-    assert (
-        ROOT / "runtime" / "live_captions",
-        "runtime/live_captions",
-    ) in desktop_spec.add_data
 
 
 def test_desktop_runtime_clear_speaker_profile_for_user(tmp_path: Path):

@@ -1,11 +1,10 @@
 using UnityEngine;
 using UnityEngine.UI;
-using Mediapipe.Unity.Sample.PoseLandmarkDetection;
 
 public class HandCursorUIBootstrap : MonoBehaviour
 {
 	[Header("Optional Refs")]
-	public PoseLandmarkerRunner poseRunner;
+	public MonoBehaviour poseRunner;
 
 	[Header("Cursor Visual")]
 	public Sprite cursorSprite;
@@ -56,12 +55,25 @@ public class HandCursorUIBootstrap : MonoBehaviour
 
 		if (poseRunner == null)
 		{
-			poseRunner = FindObjectOfType<PoseLandmarkerRunner>();
+			poseRunner = FindPoseRunner();
 		}
 
 		tracker.runner = poseRunner;
 		tracker.canvas = canvas;
 		tracker.cursorRect = cursor;
+	}
+
+	static MonoBehaviour FindPoseRunner()
+	{
+		foreach (var behaviour in FindObjectsOfType<MonoBehaviour>())
+		{
+			if (behaviour == null) continue;
+			if (behaviour.GetType().Name == "PoseLandmarkerRunner")
+			{
+				return behaviour;
+			}
+		}
+		return null;
 	}
 }
 

@@ -1,23 +1,19 @@
 # Python Voice Service
 
-This folder contains a lightweight FastAPI application that wraps the
-[Faster-Whisper](https://github.com/guillaumekln/faster-whisper) model
-so Unity can offload speech recognition to Python. The REST endpoint
-returns speech JSON payloads (including legacy compatibility fields),
-allowing the existing `VoiceGameLauncher` logic to keep publishing
-intents to the message hub without any changes. A companion `/respond` endpoint can forward the
-transcribed text to a local [Ollama](https://ollama.com/) instance that
-runs Meta's Llama 3.1 model, enabling short spoken replies from the
-coach voice agent.
+This folder contains the Python services behind the maintained desktop
+runtime. The main FastAPI app provides conversation, transcription,
+response generation, and compatibility endpoints for older Unity shell
+flows. The desktop runtime on `127.0.0.1:8787` is the preferred operator
+surface; Unity can still consume the same services for avatar, subtitle,
+gameplay, or legacy microphone fallback workflows.
 
 ## Requirements
 
 * Python 3.10 or newer
-* The Faster-Whisper model weights downloaded to your machine. The
-  screenshot in the task corresponds to a folder such as
-  `D:/Data/unityproject/faster-whisper-large-v3` on Windows. Set the
-  `WHISPER_MODEL_PATH` environment variable to that directory before
-  starting the service.
+* Faster-Whisper model weights are only required when you explicitly run
+  `TRANSCRIBE_MODE=whisper-large-v3`. Model binaries are not tracked in Git.
+  Use `scripts/download_whisper_model.py` or set `WHISPER_MODEL_PATH` to an
+  external model folder.
 
 Install dependencies with:
 
@@ -99,16 +95,17 @@ pip install -r requirements.txt
    uvicorn main:app --host 0.0.0.0 --port 8000
    ```
 
-   The Unity scene expects the default URL `http://127.0.0.1:8000/transcribe`.
+   The legacy Unity microphone fallback expects the default URL `http://127.0.0.1:8000/transcribe`.
 
 3. Use the `/healthz` endpoint to confirm the service is ready.
 
-When Unity detects speech the `VoskSpeechToText` component serialises the
-PCM samples, posts them to `/transcribe` and reuses the JSON response to
-update the intent pipeline. No scene changes are required to keep
-publishing to the MQTT message hub.
+`UnitySpeechInputFallback` is available for direct Unity microphone capture, but it
+is not the primary speech path. In the maintained demo flow, the desktop
+runtime handles microphone input through Windows Captions, OpenAI API, or
+Google API mode and forwards recognized turns into the same command and
+conversation pipeline.
 
-### Runtime ASR mode switch (Whisper vs OpenAI API vs Moonshine)
+### Voice service ASR mode switch (legacy `/transcribe`)
 
 You can switch ASR mode without restarting the service:
 
@@ -142,7 +139,7 @@ curl -X POST "http://127.0.0.1:8000/transcribe/config" \
 - `OPENAI_TRANSCRIBE_PROMPT` is optional and defaults to empty.
 - This service does not auto-inject a default OpenAI prompt anymore.
 - Prompt is only a soft decoding bias; if you see prompt leakage/hallucination, clear this value first.
-- If you change prompt from launcher/runtime config, restart `service_launcher` and `voice_service` so env changes take effect.
+- If you change prompt from launcher/runtime config, restart `scripts/start_local_services.py` so env changes take effect.
 
 ### English enforcement and game-term normalization
 

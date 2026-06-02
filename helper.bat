@@ -12,20 +12,6 @@ for /f %%I in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$port='1
 )
 
 echo [voice-agent] clearing existing service processes...
-for %%P in (
-  service_launcher.exe
-  voice_service.exe
-  piper_http.exe
-  kokoro_tts_http.exe
-  desktop_runtime.exe
-  intent_service.exe
-  dialog_service.exe
-  telemetry_service.exe
-  game_launcher.exe
-) do (
-  taskkill /f /t /im "%%P" >nul 2>nul
-)
-
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$root = [System.IO.Path]::GetFullPath('%CD%').ToLowerInvariant();" ^
   "$targets = @('start_local_services.py','intent_service\main.py','dialog_service\main.py','game_launcher\main.py','telemetry_service\main.py','python_voice_service\main.py','python_voice_service\piper_http.py','python_voice_service\kokoro_tts_http.py','python_voice_service\desktop_runtime.py','uvicorn main:app','uvicorn piper_http:app','uvicorn kokoro_tts_http:app','uvicorn desktop_runtime:app');" ^
@@ -42,11 +28,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "}" >nul 2>nul
 
 timeout /t 1 /nobreak >nul
-
-if exist "%CD%\runtime\services\service_launcher.exe" (
-  start "" "%CD%\runtime\services\service_launcher.exe"
-  exit /b 0
-)
 
 if exist "%CD%\native\mosquitto\windows-x64\mosquitto.exe" (
   set "VOICE_AGENT_MOSQUITTO_EXE=%CD%\native\mosquitto\windows-x64\mosquitto.exe"

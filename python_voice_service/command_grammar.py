@@ -152,7 +152,7 @@ class CommandGrammarMatcher:
             games=games,
         )
 
-    def canonicalize(self, text: str) -> CommandGrammarMatch:
+    def canonicalize(self, text: str, *, allow_bare_game: bool = False) -> CommandGrammarMatch:
         original = _collapse_spaces(text)
         if not original:
             return CommandGrammarMatch(original_text="", canonical_text="")
@@ -165,6 +165,10 @@ class CommandGrammarMatcher:
         launch_match = self._match_launch(stripped)
         if launch_match is not None:
             return launch_match
+        if allow_bare_game:
+            bare_game_match = self._match_bare_game(stripped)
+            if bare_game_match is not None:
+                return bare_game_match
 
         return CommandGrammarMatch(original_text=original, canonical_text=original)
 
@@ -243,4 +247,30 @@ class CommandGrammarMatcher:
             route_type="LAUNCH_GAME",
             game_name=best_game,
             confidence=min(trigger_score, best_score),
+        )
+
+    def _match_bare_game(self, text: str) -> Optional[CommandGrammarMatch]:
+        candidate = _collapse_spaces(text)
+        if not candidate:
+            return None
+        tokens = _tokenize(candidate)
+        if not tokens or len(tokens) > 4:
+            return None
+        best_game = ""
+        best_score = 0.0
+        for game_name, phrase in self._game_phrases:
+            score = _sequence_ratio(candidate, phrase)
+            if _compact(candidate) and _compact(candidate) == _compact(phrase):
+                score = 1.0
+            if score > best_score:
+                best_game = game_name
+                best_score = score
+        if best_score < 0.92:
+            return None
+        return CommandGrammarMatch(
+            original_text=candidate,
+            canonical_text=f"open {best_game}",
+            route_type="LAUNCH_GAME",
+            game_name=best_game,
+            confidence=best_score,
         )

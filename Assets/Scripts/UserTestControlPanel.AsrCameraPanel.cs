@@ -1123,7 +1123,7 @@ namespace RobotVoice
 
         private static string BuildPanelHtml()
         {
-            return LoadPanelTemplateOrFallback("panel.html");
+            return LoadPanelTemplateOrFallback("index.html");
         }
 
         private static string BuildSdkPanelHtml()

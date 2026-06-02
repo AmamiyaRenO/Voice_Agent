@@ -2,7 +2,7 @@
 
 ## 1. Introduction
 
-Voice Agent is a repository for a local-first voice interaction stack aimed at rehabilitation, exercise-game, and socially assistive interaction scenarios. The codebase combines a desktop runtime, Python speech and dialog services, an optional Unity shell, a Python SDK, orchestration scripts, packaging assets, and regression tooling into a single system that can be run either from source or from packaged executables.
+Voice Agent is a repository for a local-first voice interaction stack aimed at rehabilitation, exercise-game, and socially assistive interaction scenarios. The codebase combines a desktop runtime, Python speech and dialog services, an optional Unity shell, a Python SDK, orchestration scripts, and regression tooling into a source-run system.
 
 This document adopts an academic-style section order inspired by the provided PDF, but its role is engineering documentation rather than research reporting. It describes the repository as a technical system, explains how the major modules fit together, and records the operational assumptions that govern current development. It intentionally avoids inventing user-study results, benchmark claims, or formal evaluations that are not directly supported by the repository.
 
@@ -18,7 +18,7 @@ The repository sits at the intersection of several adjacent system patterns:
 - optional real-time presentation shells, here implemented in Unity
 - SDK-based automation layers for non-Unity clients
 
-The project does not behave as a single monolithic application. Instead, it is a coordinated multi-process system in which different responsibilities are separated by interface boundaries. The desktop runtime provides the main operator surface. The Python voice service provides the maintained conversation entry point. Supporting services in `scripts/` contribute intent routing, dialog memory, telemetry, and packaging workflows. The SDK and Unity layers consume or extend these runtime capabilities from different integration paths.
+The project does not behave as a single monolithic application. Instead, it is a coordinated multi-process system in which different responsibilities are separated by interface boundaries. The desktop runtime provides the main operator surface. The Python voice service provides the maintained conversation entry point. Supporting services in `scripts/` contribute intent routing, dialog memory, telemetry, and game launching. The SDK and Unity layers consume or extend these runtime capabilities from different integration paths.
 
 This separation is reflected in the default port map:
 
@@ -43,12 +43,11 @@ The repository consists of several major subsystems that together implement the 
 
 The desktop runtime is implemented primarily in `python_voice_service/desktop_runtime.py`. It serves the browser panel, owns operator-facing routes on port `8787`, and mediates access to audio control, runtime configuration, logs, memory, game configuration, camera access, and SDK visualization. It is the maintained operator path for the project.
 
-The browser panel assets are resolved from two locations:
+The browser panel assets are resolved from one maintained location:
 
-- default user panel path: `Assets/StreamingAssets/panel/*`
-- additional runtime pages: `runtime/panel/*`
+- `Assets/StreamingAssets/panel/*`
 
-The desktop runtime now serves the legacy user panel from `Assets/StreamingAssets/panel/panel.html` at `/`, `/index.html`, and `/panel.html`, while still using `runtime/panel/*` for pages such as `/runtime`.
+The desktop runtime serves the user panel from `Assets/StreamingAssets/panel/index.html`. The canonical homepage is `/index.html`; `/` and `/panel.html` redirect there for compatibility.
 
 #### Python Voice Service
 
@@ -87,13 +86,11 @@ The `scripts/` directory provides orchestration and service support for the rest
 - `game_launcher`
 - `telemetry_service`
 - `mqtt`
-- `packaging`
+These support modules are critical to the runtime even though they are not the main browser-facing or speech-facing entry points. They handle intent resolution, structured memory persistence, telemetry collection, and launch behavior.
 
-These support modules are critical to the runtime even though they are not the main browser-facing or speech-facing entry points. They handle intent resolution, structured memory persistence, telemetry collection, launch behavior, and deployment packaging workflows.
+#### Runtime Assets, Firmware, and Tests
 
-#### Runtime Assets, Installer, Firmware, and Tests
-
-The `runtime/` directory stores runtime assets and outputs such as panel files, QMD and doc-grounding data, live captions, models, and evaluation artifacts under `runtime/evals/`. The `installer/` directory stores Windows installer entrypoints and related scripts. `Firmware/` stores hardware-side assets for robot or peripheral integration. `tests/` stores smoke tests, SDK tests, regression helpers, and transcript-oriented validation fixtures.
+The `runtime/` directory stores runtime assets and outputs such as panel files, QMD and doc-grounding data, live captions, models, and evaluation artifacts under `runtime/evals/`. `Firmware/` stores hardware-side assets for robot or peripheral integration. `tests/` stores smoke tests, SDK tests, regression helpers, and transcript-oriented validation fixtures.
 
 ### 3.2 Repository Layout
 
@@ -104,10 +101,9 @@ The top-level repository structure can be summarized as follows:
 | `Assets/` | Unity scenes, scripts, prefabs, browser assets, and optional shell integration |
 | `python_voice_service/` | FastAPI services for conversation, ASR, desktop runtime, TTS wrappers, grounding, speaker identity, and streaming audio |
 | `python_sdk/` | Python client SDK for runtime and robot control |
-| `scripts/` | launcher logic and supporting services such as intent, dialog memory, telemetry, and packaging |
-| `runtime/` | panel assets, QMD docs, captions, models, packaged payloads, and evaluation outputs |
+| `scripts/` | launcher logic and supporting services such as intent, dialog memory, telemetry, and game launching |
+| `runtime/` | panel assets, QMD docs, captions, models, and evaluation outputs |
 | `docs/` | deployment, integration, SDK, benchmark, and architecture documentation |
-| `installer/` | Windows deployment scripts and launchers |
 | `Firmware/` | hardware-facing assets |
 | `tests/` | smoke, regression, and SDK validation |
 | `native/` | native audio processing helpers |
@@ -116,7 +112,7 @@ This layout shows that the repository is best understood as a coordinated platfo
 
 ### 3.3 The Agent Page as a Repository Subsystem
 
-The browser homepage is not the repository itself, but it is still an important subsystem within the wider architecture. The homepage implementation in `Assets/StreamingAssets/panel/panel.html` is served at `/`, `/index.html`, and `/panel.html`, and it provides a top-level entry point for quick listening checks, transcript review, and navigation to supporting pages such as `/runtime`, `/memory`, `/games`, `/setup`, `/sdk`, and `/telemetry`.
+The browser homepage is not the repository itself, but it is still an important subsystem within the wider architecture. The homepage implementation in `Assets/StreamingAssets/panel/index.html` is served canonically at `/index.html`, and it provides a top-level entry point for quick listening checks, transcript review, and navigation to supporting pages such as `/runtime`, `/memory`, `/games`, `/setup`, `/sdk`, and `/telemetry`.
 
 Within the repository-wide architecture, the agent page should be understood as the operator-facing surface of the desktop runtime rather than as an isolated product. Its role is to make the rest of the repository observable and operable without collapsing all system complexity into a single UI page.
 
@@ -163,7 +159,7 @@ Important persisted locations include:
 | grounded document and QMD root | `runtime/qmd` |
 | evaluation outputs | `runtime/evals` |
 
-In packaged mode, some state is redirected to application-specific directories, but the same core runtime logic remains responsible for resolving paths and applying config.
+Runtime state is kept in repository-local configuration and runtime directories unless explicit environment overrides are provided.
 
 ### 4.4 Public Interfaces
 
@@ -265,16 +261,16 @@ Second, the repository is intentionally multi-process. This improves separation 
 
 Third, the browser panel is intentionally simple. Its static-HTML and plain-JavaScript design makes it easy to ship and debug, but it also means that richer UI abstractions, shared frontend state tooling, and component-level reuse are limited compared with a larger SPA architecture.
 
-Fourth, the repository still contains both `runtime/panel/*` and `Assets/StreamingAssets/panel/*`, but they no longer play identical roles. The legacy Assets panel is the default user-facing homepage, while `runtime/panel/*` continues to host additional runtime pages. Contributors therefore need to be explicit about which surface they are changing.
+Fourth, browser panel ownership is intentionally consolidated under `Assets/StreamingAssets/panel/*`. New panel pages should be added there so Unity shell and desktop runtime serve the same assets.
 
 Fifth, several features depend on external runtimes, local models, or environment setup, including Ollama, TTS backends, MQTT, and optional model assets. As a result, the full repository behavior is broader than what can be guaranteed from code structure alone.
 
-Finally, the project has grown to encompass runtime control, conversation logic, memory, grounding, SDK integration, Unity shell behavior, packaging, and telemetry. The benefit is a cohesive platform; the cost is that repository-level architectural understanding is necessary to make safe changes in any single subsystem.
+Finally, the project has grown to encompass runtime control, conversation logic, memory, grounding, SDK integration, Unity shell behavior, and telemetry. The benefit is a cohesive platform; the cost is that repository-level architectural understanding is necessary to make safe changes in any single subsystem.
 
 ## 7. Conclusion
 
-The Voice Agent repository is best understood as a layered local-first voice platform rather than as a single application. Its maintained center of gravity is the combination of the desktop runtime on `:8787` and the Python voice service on `:8000`, with supporting modules for memory, intent routing, telemetry, TTS, packaging, and optional Unity-based presentation.
+The Voice Agent repository is best understood as a layered local-first voice platform rather than as a single application. Its maintained center of gravity is the combination of the desktop runtime on `:8787` and the Python voice service on `:8000`, with supporting modules for memory, intent routing, telemetry, TTS, and optional Unity-based presentation.
 
 The repository layout reflects this architecture directly. Top-level directories correspond to distinct operational roles, while the exposed HTTP and MQTT interfaces tie those roles together into a coherent runtime. The browser panel and agent page remain important, but only as one subsystem within a broader platform.
 
-For contributors, the central architectural principle is straightforward: treat the desktop runtime and Python voice service as the primary execution path, treat Unity as an optional shell, and interpret the rest of the repository as supporting infrastructure that enables deployment, automation, validation, and long-term maintainability.
+For contributors, the central architectural principle is straightforward: treat the desktop runtime and Python voice service as the primary execution path, treat Unity as an optional shell, and interpret the rest of the repository as supporting infrastructure that enables automation, validation, and long-term maintainability.

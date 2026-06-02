@@ -201,6 +201,18 @@
       },
       "url": "https://packages.unity.cn"
     },
+    "com.voiceagent.rachel-story-flow": {
+      "version": "file:com.voiceagent.rachel-story-flow",
+      "depth": 0,
+      "source": "embedded",
+      "dependencies": {}
+    },
+    "com.voiceagent.unity": {
+      "version": "file:com.voiceagent.unity",
+      "depth": 0,
+      "source": "embedded",
+      "dependencies": {}
+    },
     "com.unity.modules.ai": {
       "version": "1.0.0",
       "depth": 0,

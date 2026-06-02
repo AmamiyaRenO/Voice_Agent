@@ -3,7 +3,7 @@
 The Python SDK is a thin HTTP client for the desktop runtime on port `8787`.
 It is intentionally a strict mirror of the non-Qwen control surface exposed by:
 
-- `Assets/StreamingAssets/panel/panel.html`
+- `Assets/StreamingAssets/panel/index.html`
 - `Assets/StreamingAssets/panel/sdk.html`
 - `Assets/StreamingAssets/panel/sdk-manifest.json`
 

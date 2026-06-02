@@ -20,6 +20,7 @@ import sys
 import wave
 import threading
 from collections import deque
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple
@@ -91,6 +92,13 @@ try:  # Optional dependency when using OpenAI API transcription.
 except Exception:  # pragma: no cover - openai is optional at runtime.
     AsyncOpenAI = None
 
+try:  # Optional dependency when using Gemini for cloud responses.
+    import google.genai as google_genai
+    import google.genai.types as google_genai_types
+except Exception:  # pragma: no cover - google-genai is optional at runtime.
+    google_genai = None
+    google_genai_types = None
+
 try:  # Optional dependency when using Moonshine offline transcription.
     from moonshine_voice import (
         Transcriber as MoonshineTranscriber,
@@ -144,6 +152,7 @@ DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "qwen3.5:0.8b"
 DEFAULT_OPENAI_RESPONSE_MODEL = "gpt-4o-mini"
+DEFAULT_GEMINI_RESPONSE_MODEL = "gemini-2.5-flash"
 DEFAULT_OLLAMA_THINK = False
 PIPELINE_MODE_DIRECT_UNIFIED = "direct_unified"
 PIPELINE_MODE_LEGACY_MQTT = "legacy_mqtt"
@@ -205,7 +214,7 @@ STRUCTURED_RENDER_DISALLOWED_MARKERS = (
     "i know your complete history",
     "i know your full history",
 )
-STRUCTURED_RENDER_SENTENCE_SPLIT_RE = re.compile(r"[.!?。！？]+")
+STRUCTURED_RENDER_SENTENCE_SPLIT_RE = re.compile(r"[.!?\u3002\uff01\uff1f]+")
 ANONYMOUS_SESSION_MAX_TURNS = 6
 ANONYMOUS_SESSION_MAX_AGE_SEC = 600.0
 _SYSTEM_PROMPT_LEAK_MARKERS = (
@@ -468,7 +477,16 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
 
-app = FastAPI(title=APP_TITLE)
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    await _startup_event()
+    try:
+        yield
+    finally:
+        await _shutdown_event()
+
+
+app = FastAPI(title=APP_TITLE, lifespan=_lifespan)
 
 
 def _environment(key: str, default: str) -> str:
@@ -1076,13 +1094,15 @@ def _normalize_pipeline_mode(mode: Optional[str]) -> str:
 
 def _normalize_conversation_profile(profile: Optional[str]) -> str:
     normalized = (profile or "").strip().lower()
-    if normalized in {CONVERSATION_PROFILE_CLOUD, "online", "openai"}:
+    if normalized in {CONVERSATION_PROFILE_CLOUD, "online", "openai", "gemini", "google"}:
         return CONVERSATION_PROFILE_CLOUD
     return CONVERSATION_PROFILE_LOCAL
 
 
 def _normalize_cloud_response_provider(provider: Optional[str]) -> str:
     normalized = (provider or "").strip().lower()
+    if normalized in {"gemini", "google", "google-ai", "google_ai"}:
+        return "gemini"
     if normalized in {"openai", "api", "cloud"}:
         return "openai"
     return "openai"
@@ -1119,15 +1139,41 @@ def _openai_response_model() -> str:
     return (os.getenv("OPENAI_RESPONSE_MODEL", DEFAULT_OPENAI_RESPONSE_MODEL) or DEFAULT_OPENAI_RESPONSE_MODEL).strip()
 
 
+def _gemini_response_model() -> str:
+    return (os.getenv("GEMINI_RESPONSE_MODEL", DEFAULT_GEMINI_RESPONSE_MODEL) or DEFAULT_GEMINI_RESPONSE_MODEL).strip()
+
+
+def _gemini_api_key() -> str:
+    return (os.getenv("GEMINI_API_KEY", "") or os.getenv("GEMINI_KEY", "") or "").strip()
+
+
+def _gemini_configured() -> bool:
+    return bool(_gemini_api_key()) and google_genai is not None and google_genai_types is not None
+
+
 def _conversation_local_response_model() -> str:
     return _ollama_model()
 
 
 def _conversation_effective_response_provider(profile: Optional[str] = None) -> str:
     effective_profile = _normalize_conversation_profile(profile or _conversation_profile())
-    if effective_profile == CONVERSATION_PROFILE_CLOUD and _openai_configured():
+    if effective_profile == CONVERSATION_PROFILE_CLOUD:
         return _conversation_cloud_response_provider()
     return "ollama"
+
+
+def _selected_cloud_provider_ready(provider: Optional[str] = None) -> bool:
+    normalized = _normalize_cloud_response_provider(provider or _conversation_cloud_response_provider())
+    if normalized == "gemini":
+        return _gemini_configured()
+    if normalized == "openai":
+        return _openai_configured()
+    return False
+
+
+def _cloud_bypasses_local_doc_rag() -> bool:
+    provider = _conversation_effective_response_provider(_conversation_profile())
+    return provider in {"gemini", "openai"} and _environment_bool("VOICE_CLOUD_BYPASS_LOCAL_DOC_RAG", True)
 
 
 _CONVERSATION_ENV_DEFAULTS: Dict[str, Optional[str]] = {
@@ -1137,6 +1183,7 @@ _CONVERSATION_ENV_DEFAULTS: Dict[str, Optional[str]] = {
     "VOICE_CLOUD_ASR_MODE": os.getenv("VOICE_CLOUD_ASR_MODE"),
     "VOICE_CLOUD_RESPONSE_PROVIDER": os.getenv("VOICE_CLOUD_RESPONSE_PROVIDER"),
     "OPENAI_RESPONSE_MODEL": os.getenv("OPENAI_RESPONSE_MODEL"),
+    "GEMINI_RESPONSE_MODEL": os.getenv("GEMINI_RESPONSE_MODEL"),
     "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL"),
 }
 
@@ -1152,17 +1199,20 @@ def _restore_conversation_env_defaults() -> None:
 def _conversation_config_snapshot() -> Dict[str, Any]:
     profile = _conversation_profile()
     effective_provider = _conversation_effective_response_provider(profile)
+    selected_cloud_provider = _conversation_cloud_response_provider()
     return {
         "pipeline_mode": _conversation_pipeline_mode(),
         "profile": profile,
         "local_asr_mode": _conversation_local_asr_mode(),
         "cloud_asr_mode": _conversation_cloud_asr_mode(),
         "preferred_asr_mode": _conversation_preferred_asr_mode(profile),
-        "cloud_response_provider": _conversation_cloud_response_provider(),
+        "cloud_response_provider": selected_cloud_provider,
         "openai_response_model": _openai_response_model(),
+        "gemini_response_model": _gemini_response_model(),
         "local_response_model": _conversation_local_response_model(),
         "openai_configured": _openai_configured(),
-        "cloud_ready": _openai_configured(),
+        "gemini_configured": _gemini_configured(),
+        "cloud_ready": _selected_cloud_provider_ready(selected_cloud_provider),
         "effective_response_provider": effective_provider,
     }
 
@@ -1576,6 +1626,51 @@ async def _generate_local_doc_summary(user_text: str, payload: Dict[str, Any]) -
     return summary
 
 
+async def _generate_cloud_doc_summary(user_text: str, payload: Dict[str, Any], provider: str) -> Tuple[str, str]:
+    system_prompt, prompt = _build_doc_summary_prompt(user_text, payload)
+    if provider == "gemini":
+        summary = await _generate_gemini_text(
+            system_prompt=system_prompt,
+            prompt=prompt,
+            model_override=_gemini_response_model(),
+            temperature=0.1,
+            top_p=0.7,
+            max_output_tokens=96,
+        )
+        summary = _normalize_final_reply_text(summary)
+        if not summary:
+            raise RuntimeError("Gemini doc summary response was empty")
+        return summary, f"gemini:{_gemini_response_model()}"
+
+    if provider == "openai":
+        client = _AsyncOpenAIClient.get()
+        model = _openai_response_model()
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                top_p=0.7,
+                max_tokens=96,
+                stream=False,
+            )
+        except Exception as exc:
+            raise OpenAIResponseError(f"OpenAI doc summary request failed: {exc}") from exc
+        try:
+            content = response.choices[0].message.content if response.choices else ""
+        except Exception:
+            content = ""
+        summary = _normalize_final_reply_text(str(content or ""))
+        if not summary:
+            raise OpenAIResponseError("OpenAI doc summary response was empty")
+        return summary, f"openai:{model}"
+
+    raise RuntimeError(f"unsupported cloud doc summary provider: {provider}")
+
+
 async def _prepare_structured_payload_for_render(user_text: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     effective_payload = dict(payload)
     reply_type = str(effective_payload.get("type") or "").strip().lower()
@@ -1597,6 +1692,17 @@ async def _prepare_structured_payload_for_render(user_text: str, payload: Dict[s
             effective_payload["summary_used"] = True
             effective_payload["summary_model"] = "deterministic"
             effective_payload["summary_fallback_reason"] = "disabled"
+        return effective_payload
+    provider = _conversation_effective_response_provider(_conversation_profile())
+    if provider in {"gemini", "openai"}:
+        summary_text, summary_model = await _generate_cloud_doc_summary(user_text, effective_payload, provider)
+        valid, reason = _validate_structured_reply(summary_text, effective_payload)
+        if not valid:
+            raise RuntimeError(f"{provider} doc summary failed validation: {reason or 'summary_invalid'}")
+        effective_payload["summary_text"] = summary_text
+        effective_payload["summary_used"] = True
+        effective_payload["summary_model"] = summary_model
+        effective_payload["summary_fallback_reason"] = ""
         return effective_payload
     try:
         summary_text = await _generate_local_doc_summary(user_text, effective_payload)
@@ -2471,6 +2577,15 @@ class _UnifiedConversationRuntime:
                     stream=False,
                 )
                 raw = response.choices[0].message.content if response.choices else ""
+            elif provider == "gemini":
+                raw = await _generate_gemini_text(
+                    system_prompt=system_prompt,
+                    prompt=prompt,
+                    model_override=_gemini_response_model(),
+                    temperature=0.0,
+                    top_p=0.1,
+                    max_output_tokens=16,
+                )
             else:
                 client = _AsyncHttpClient.get()
                 response = await client.post(
@@ -2543,7 +2658,7 @@ class _UnifiedConversationRuntime:
         effective_session_state = raw_session_state if recent_general_turns <= 0 or explicit_reference else None
         probe_telemetry: Optional[Dict[str, Any]] = None
         probe_fallback_reason = ""
-        local_docs_rag = getattr(self, "local_docs_rag", None)
+        local_docs_rag = None if _cloud_bypasses_local_doc_rag() else getattr(self, "local_docs_rag", None)
 
         confirmed_followup_text = self._confirmed_doc_followup_text(text=text, focus_state=focus_state)
         if confirmed_followup_text and local_docs_rag is not None and getattr(local_docs_rag, "ready", False):
@@ -2960,7 +3075,7 @@ def _finalize_static_tts_reply(dialog_helper: Any, reply_text: str) -> str:
             text = compress_reply_by_words(text, getattr(dialog_helper, "reply_max_words", 0))
         if trim_trailing_connectors is not None:
             text = trim_trailing_connectors(text)
-        if text and text[-1] not in ".!?。！？":
+        if text and text[-1] not in ".!?\u3002\uff01\uff1f:":
             text = f"{text}."
     return text.strip()
 
@@ -3046,8 +3161,8 @@ def _find_reply_boundary(text: str, *, final: bool) -> int:
     if not current:
         return 0
 
-    hard_boundaries = ".!?銆傦紒锛焅n"
-    soft_boundaries = ",锛?锛?锛?"
+    hard_boundaries = ".!?閵嗗偊绱掗敍鐒卬"
+    soft_boundaries = ",閿?閿?閿?"
     minimum_chunk_chars = 18
     for idx in range(len(current) - 1, minimum_chunk_chars - 1, -1):
         if current[idx] in hard_boundaries:
@@ -3136,7 +3251,7 @@ def _compose_dialog_system_prompt(
             "single sentence",
             "in one short sentence",
             "briefly in one sentence",
-            "一句话",
+            "\u4e00\u53e5\u8bdd",
         )
         return any(marker in lowered_user_text for marker in markers)
 
@@ -3149,11 +3264,10 @@ def _compose_dialog_system_prompt(
             "short answer",
             "keep it short",
             "concise",
-            "简短",
-            "简洁",
+            "\u7b80\u77ed",
+            "\u7b80\u6d01",
         )
         return any(marker in lowered_user_text for marker in markers)
-
     instructions: List[str] = [
         "Conversation protocol:",
         "- Treat each turn as part of an ongoing dialogue, not a single-turn Q&A.",
@@ -3396,6 +3510,131 @@ async def _stream_openai_reply(
             yield content
 
 
+def _format_gemini_error(exc: Exception, *, model: str) -> str:
+    text = str(exc)
+    compact = " ".join(text.split())
+    status_code = str(getattr(exc, "code", "") or getattr(exc, "status_code", "") or "")
+    if "RESOURCE_EXHAUSTED" in text or "429" in text:
+        retry_match = re.search(r"retryDelay[\"']?\s*:\s*[\"']?(\d+)s", text)
+        retry_seconds = retry_match.group(1) if retry_match else ""
+        quota_match = re.search(r"Quota exceeded for metric:\s*([^,\\n]+)", text)
+        quota_metric = quota_match.group(1).strip() if quota_match else ""
+        free_tier = "free_tier" in text.lower()
+        parts = [
+            f"Gemini quota exceeded for {model}.",
+            "This key/project is still being limited as free tier." if free_tier else "The current quota for this model is exhausted.",
+        ]
+        if quota_metric:
+            parts.append(f"Quota metric: {quota_metric}.")
+        if retry_seconds:
+            parts.append(f"Retry after about {retry_seconds}s.")
+        parts.append("Check Google AI Studio billing/project quota at https://ai.dev/rate-limit.")
+        return " ".join(parts)
+    if "UNAVAILABLE" in text or "503" in text:
+        return (
+            f"Gemini service unavailable for {model}. "
+            "Google reports temporary capacity/service unavailability; retry shortly or switch to another Gemini model."
+        )
+    if "NOT_FOUND" in text or "404" in text:
+        return (
+            f"Gemini model {model} is not available for generateContent. "
+            "Use a text model such as gemini-2.5-flash or gemini-2.5-flash-lite."
+        )
+    suffix = f" HTTP {status_code}" if status_code else ""
+    return f"Gemini response request failed{suffix} for {model}: {compact}"
+
+
+async def _stream_gemini_reply(
+    user_text: str,
+    *,
+    system_override: Optional[str] = None,
+    memory_context: Optional[str] = None,
+    user_id: Optional[str] = None,
+    dialog_context: Optional[str] = None,
+    barge_in: bool = False,
+    interrupted_tts_text: Optional[str] = None,
+    model_override: Optional[str] = None,
+) -> AsyncIterator[str]:
+    if google_genai is None or google_genai_types is None:
+        raise RuntimeError("google-genai is not installed")
+    api_key = _gemini_api_key()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set")
+
+    merged_system, prompt = await _build_coach_prompt_package(
+        user_text,
+        system_override=system_override,
+        memory_context=memory_context,
+        user_id=user_id,
+        dialog_context=dialog_context,
+        barge_in=barge_in,
+        interrupted_tts_text=interrupted_tts_text,
+    )
+    model = (model_override or _gemini_response_model()).strip() or _gemini_response_model()
+    client = google_genai.Client(api_key=api_key)
+    try:
+        config = google_genai_types.GenerateContentConfig(
+            system_instruction=merged_system,
+            temperature=_environment_float("GEMINI_RESPONSE_TEMPERATURE", 0.6),
+            top_p=_environment_float("GEMINI_RESPONSE_TOP_P", 0.9),
+            max_output_tokens=_environment_int("GEMINI_RESPONSE_MAX_TOKENS", 180),
+        )
+        stream = await client.aio.models.generate_content_stream(
+            model=model,
+            contents=prompt,
+            config=config,
+        )
+        async for chunk in stream:
+            text = str(getattr(chunk, "text", "") or "")
+            if text:
+                yield text
+    except Exception as exc:
+        raise RuntimeError(_format_gemini_error(exc, model=model)) from exc
+    finally:
+        try:
+            await client.aio.aclose()
+        except Exception:
+            pass
+
+
+async def _generate_gemini_text(
+    *,
+    system_prompt: str,
+    prompt: str,
+    model_override: Optional[str] = None,
+    temperature: float = 0.6,
+    top_p: float = 0.9,
+    max_output_tokens: int = 180,
+) -> str:
+    if google_genai is None or google_genai_types is None:
+        raise RuntimeError("google-genai is not installed")
+    api_key = _gemini_api_key()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set")
+    model = (model_override or _gemini_response_model()).strip() or _gemini_response_model()
+    client = google_genai.Client(api_key=api_key)
+    try:
+        config = google_genai_types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens,
+        )
+        response = await client.aio.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=config,
+        )
+        return str(getattr(response, "text", "") or "").strip()
+    except Exception as exc:
+        raise RuntimeError(_format_gemini_error(exc, model=model)) from exc
+    finally:
+        try:
+            await client.aio.aclose()
+        except Exception:
+            pass
+
+
 async def _generate_coach_reply(
     user_text: str,
     system_override: Optional[str] = None,
@@ -3405,6 +3644,43 @@ async def _generate_coach_reply(
     barge_in: bool = False,
     interrupted_tts_text: Optional[str] = None,
 ) -> str:
+    provider = _conversation_effective_response_provider(_conversation_profile())
+    if provider == "openai":
+        parts: List[str] = []
+        async for delta in _stream_openai_reply(
+            user_text,
+            system_override=system_override,
+            memory_context=memory_context,
+            user_id=user_id,
+            dialog_context=dialog_context,
+            barge_in=barge_in,
+            interrupted_tts_text=interrupted_tts_text,
+            model_override=_openai_response_model(),
+        ):
+            parts.append(delta)
+        reply_text = _normalize_final_reply_text("".join(parts))
+        if not reply_text:
+            raise OpenAIResponseError("OpenAI response was empty")
+        return reply_text
+
+    if provider == "gemini":
+        parts = []
+        async for delta in _stream_gemini_reply(
+            user_text,
+            system_override=system_override,
+            memory_context=memory_context,
+            user_id=user_id,
+            dialog_context=dialog_context,
+            barge_in=barge_in,
+            interrupted_tts_text=interrupted_tts_text,
+            model_override=_gemini_response_model(),
+        ):
+            parts.append(delta)
+        reply_text = _normalize_final_reply_text("".join(parts))
+        if not reply_text:
+            raise RuntimeError("Gemini response was empty")
+        return reply_text
+
     payload = await _build_ollama_generate_payload(
         user_text,
         system_override=system_override,
@@ -3513,6 +3789,20 @@ async def _generate_structured_spoken_reply(user_text: str, payload: Dict[str, A
             raise OpenAIResponseError("OpenAI structured render response was empty")
         return reply
 
+    if provider == "gemini":
+        reply = await _generate_gemini_text(
+            system_prompt=system_prompt,
+            prompt=prompt,
+            model_override=_gemini_response_model(),
+            temperature=0.28,
+            top_p=0.85,
+            max_output_tokens=96,
+        )
+        reply = _normalize_final_reply_text(reply)
+        if not reply:
+            raise RuntimeError("Gemini structured render response was empty")
+        return reply
+
     payload_json: Dict[str, Any] = {
         "model": _conversation_local_response_model(),
         "think": False,
@@ -3556,6 +3846,10 @@ async def _spoken_reply_from_payload(
         doc_snippets = [str(item).strip() for item in payload.get("doc_snippets", []) or [] if str(item).strip()]
         if not doc_snippets:
             return "I could not find that in the local documents."
+        summary_model = str(payload.get("summary_model") or "").strip().lower()
+        summary_text = _normalize_final_reply_text(str(payload.get("summary_text") or ""))
+        if summary_text and (summary_model.startswith("gemini:") or summary_model.startswith("openai:")):
+            return summary_text
     fallback_text = _normalize_final_reply_text(_structured_template_reply(payload, user_text) or str(payload.get("text") or ""))
     if fallback_text:
         payload = dict(payload)
@@ -3565,6 +3859,8 @@ async def _spoken_reply_from_payload(
         try:
             rendered = await _generate_structured_spoken_reply(user_text, attempt_payload)
         except (OllamaError, OpenAIResponseError, RuntimeError) as exc:
+            if _conversation_effective_response_provider(_conversation_profile()) in {"gemini", "openai"}:
+                raise
             logger.info("structured render fallback: %s", exc)
             return fallback_text
         valid, reason = _validate_structured_reply(rendered, attempt_payload, all_game_names=all_game_names)
@@ -3608,7 +3904,6 @@ async def _spoken_reply_from_payload(
     return fallback_text
 
 
-@app.on_event("startup")
 async def _startup_event() -> None:
     # Trigger model loading during startup so the first ASR request does not pay the cost.
     if TRANSCRIBE_MODE_DEFAULT == TRANSCRIBE_MODE_WHISPER_LARGE_V3:
@@ -3626,7 +3921,6 @@ async def _startup_event() -> None:
             logger.warning("Unified conversation runtime warmup failed: %s", exc)
 
 
-@app.on_event("shutdown")
 async def _shutdown_event() -> None:
     global _UNIFIED_CONVERSATION_RUNTIME
     if _UNIFIED_CONVERSATION_RUNTIME is not None:
@@ -3990,7 +4284,7 @@ def _collapse_repetitive_output(text: str, words: List[dict]) -> tuple[str, List
 def _limit_repeated_sequence_indices(tokens: List[str]) -> List[int]:
     """Return indices that keep only the first occurrence of repeated sequences.
 
-    Whisper can occasionally emit the same 1閳? token sequence multiple times in
+    Whisper can occasionally emit the same 1闁? token sequence multiple times in
     a row.  When that happens we keep the first instance of the repeated block
     and discard the subsequent duplicates so the Unity client does not surface
     "echoed" words to the player.
@@ -5019,7 +5313,7 @@ async def respond(payload: RespondRequest) -> RespondResponse:
             barge_in=bool(payload.barge_in),
             interrupted_tts_text=(payload.interrupted_tts_text or None),
         )
-    except OllamaError as exc:
+    except (OllamaError, OpenAIResponseError, RuntimeError) as exc:
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         await _record_respond_metric(
             user_chars=len(user_text),
@@ -5152,6 +5446,18 @@ async def set_conversation_config(payload: ConversationConfigRequest) -> Convers
         os.environ["VOICE_CLOUD_ASR_MODE"] = normalized
     if payload.cloud_response_provider is not None:
         os.environ["VOICE_CLOUD_RESPONSE_PROVIDER"] = _normalize_cloud_response_provider(payload.cloud_response_provider)
+    if payload.gemini_api_key is not None:
+        candidate = (payload.gemini_api_key or "").strip()
+        if candidate:
+            os.environ["GEMINI_API_KEY"] = candidate
+        else:
+            os.environ.pop("GEMINI_API_KEY", None)
+    if payload.gemini_response_model is not None:
+        candidate = (payload.gemini_response_model or "").strip()
+        if candidate:
+            os.environ["GEMINI_RESPONSE_MODEL"] = candidate
+        else:
+            os.environ.pop("GEMINI_RESPONSE_MODEL", None)
     if payload.openai_api_key is not None:
         candidate = (payload.openai_api_key or "").strip()
         if candidate:
@@ -5579,7 +5885,20 @@ async def _stream_unified_conversation_events(
         related_entities = payload_data.get("related_entities", {}) or {}
         doc_reply = ""
         if payload_data:
-            doc_reply = await runtime._render_structured_reply(user_text=routed_query_text, payload=payload_data)
+            try:
+                doc_reply = await runtime._render_structured_reply(user_text=routed_query_text, payload=payload_data)
+            except (OllamaError, OpenAIResponseError, RuntimeError) as exc:
+                provider = _conversation_effective_response_provider(_conversation_profile())
+                yield _json_line(
+                    {
+                        "type": "error",
+                        "corr_id": corr_id,
+                        "route": route_type,
+                        "provider": provider,
+                        "message": str(exc),
+                    }
+                )
+                return
         if not doc_reply:
             doc_reply = str(payload_data.get("text") or capability_decision.clarification_text or "").strip()
         if not doc_reply:
@@ -5590,6 +5909,12 @@ async def _stream_unified_conversation_events(
             decision_final_meta["summary_model"] = str(payload_data.get("summary_model") or "").strip()
         if str(payload_data.get("summary_fallback_reason") or "").strip():
             decision_final_meta["summary_fallback_reason"] = str(payload_data.get("summary_fallback_reason") or "").strip()
+        doc_response_provider = "doc_rag"
+        summary_model = str(payload_data.get("summary_model") or "").strip().lower()
+        if summary_model.startswith("gemini:"):
+            doc_response_provider = "gemini"
+        elif summary_model.startswith("openai:"):
+            doc_response_provider = "openai"
         if general_focus:
             decision_final_meta["focus_domain"] = domain
             decision_final_meta["focus_general_focus"] = general_focus
@@ -5630,14 +5955,14 @@ async def _stream_unified_conversation_events(
                 answer_text=doc_reply,
                 dialog_request_ctx=dialog_request_ctx,
             )
-            yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": doc_reply, "provider": "doc_rag"})
+            yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": doc_reply, "provider": doc_response_provider})
             yield _json_line(
                 {
                     "type": "final",
                     "corr_id": corr_id,
                     "route": route_type,
                     "text": doc_reply,
-                    "provider": "doc_rag",
+                    "provider": doc_response_provider,
                     "user_id": user_id or "",
                     **decision_final_meta,
                 }
@@ -5703,14 +6028,14 @@ async def _stream_unified_conversation_events(
                 answer_text=doc_reply,
                 dialog_request_ctx=dialog_request_ctx,
             )
-            yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": doc_reply, "provider": "doc_rag"})
+            yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": doc_reply, "provider": doc_response_provider})
             yield _json_line(
                 {
                     "type": "final",
                     "corr_id": corr_id,
                     "route": route_type,
                     "text": doc_reply,
-                    "provider": "doc_rag",
+                    "provider": doc_response_provider,
                     "user_id": user_id or "",
                     **decision_final_meta,
                 }
@@ -5728,14 +6053,14 @@ async def _stream_unified_conversation_events(
             answer_text=doc_reply,
             dialog_request_ctx=dialog_request_ctx,
         )
-        yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": doc_reply, "provider": "doc_rag"})
+        yield _json_line({"type": "chunk", "corr_id": corr_id, "route": route_type, "text": doc_reply, "provider": doc_response_provider})
         yield _json_line(
             {
                 "type": "final",
                 "corr_id": corr_id,
                 "route": route_type,
                 "text": doc_reply,
-                "provider": "doc_rag",
+                "provider": doc_response_provider,
                 "user_id": user_id or "",
                 **decision_final_meta,
             }
@@ -5801,6 +6126,16 @@ async def _stream_unified_conversation_events(
                 barge_in=bool(payload.barge_in),
                 interrupted_tts_text=payload.interrupted_tts_text,
                 model_override=_openai_response_model(),
+            )
+        elif stream_provider == "gemini":
+            stream_iter = _stream_gemini_reply(
+                routed_query_text,
+                memory_context=memory_context or None,
+                user_id=user_id,
+                dialog_context=general_session_context or None,
+                barge_in=bool(payload.barge_in),
+                interrupted_tts_text=payload.interrupted_tts_text,
+                model_override=_gemini_response_model(),
             )
         else:
             stream_iter = _stream_ollama_reply(

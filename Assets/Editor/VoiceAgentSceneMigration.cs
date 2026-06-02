@@ -99,9 +99,9 @@ namespace RobotVoice.EditorTools
                 updates += MigrateVoiceGameLauncher(launcher);
             }
 
-            foreach (var speech in root.GetComponentsInChildren<VoskSpeechToText>(true))
+            foreach (var speech in root.GetComponentsInChildren<UnitySpeechInputFallback>(true))
             {
-                updates += MigrateSpeechToText(speech);
+                updates += MigrateUnitySpeechInput(speech);
             }
 
             foreach (var publisher in root.GetComponentsInChildren<MqttIntentPublisher>(true))
@@ -142,7 +142,7 @@ namespace RobotVoice.EditorTools
             return ApplyIfChanged(component, so, pending);
         }
 
-        private static int MigrateSpeechToText(VoskSpeechToText component)
+        private static int MigrateUnitySpeechInput(UnitySpeechInputFallback component)
         {
             if (component == null) return 0;
 

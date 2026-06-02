@@ -97,7 +97,15 @@ class ConversationConfigRequest(BaseModel):
     )
     cloud_response_provider: Optional[str] = Field(
         default=None,
-        description="Cloud response provider. Currently only openai is supported.",
+        description="Cloud response provider: openai or gemini.",
+    )
+    gemini_api_key: Optional[str] = Field(
+        default=None,
+        description="Google Gemini API key used for cloud response and Gemini Live ASR.",
+    )
+    gemini_response_model: Optional[str] = Field(
+        default=None,
+        description="Gemini model used when profile=cloud and cloud_response_provider=gemini.",
     )
     openai_api_key: Optional[str] = Field(
         default=None,
@@ -135,8 +143,10 @@ class ConversationConfigResponse(BaseModel):
     preferred_asr_mode: str
     cloud_response_provider: str
     openai_response_model: str
+    gemini_response_model: str
     local_response_model: str
     openai_configured: bool
+    gemini_configured: bool
     cloud_ready: bool
     effective_response_provider: str
 

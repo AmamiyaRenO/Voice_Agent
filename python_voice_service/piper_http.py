@@ -9,6 +9,7 @@ import os
 import subprocess
 import tempfile
 import wave
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -16,8 +17,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Piper TTS Wrapper")
 logger = logging.getLogger("piper_http")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    try:
+        yield
+    finally:
+        await _shutdown_persistent_workers()
+
+
+app = FastAPI(title="Piper TTS Wrapper", lifespan=_lifespan)
 
 
 class TtsRequest(BaseModel):
@@ -368,7 +379,6 @@ async def _persistent_worker_for(
         return worker
 
 
-@app.on_event("shutdown")
 async def _shutdown_persistent_workers() -> None:
     async with _PERSISTENT_WORKERS_LOCK:
         workers = list(_PERSISTENT_WORKERS.values())

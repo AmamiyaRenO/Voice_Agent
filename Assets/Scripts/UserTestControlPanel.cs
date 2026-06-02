@@ -321,8 +321,15 @@ namespace RobotVoice
                 switch (path)
                 {
                     case "/":
+                        context.Response.Redirect("/index.html");
+                        context.Response.Close();
+                        return;
                     case "/index.html":
                         await RespondWithHtmlAsync(context.Response).ConfigureAwait(false);
+                        return;
+                    case "/panel.html":
+                        context.Response.Redirect("/index.html");
+                        context.Response.Close();
                         return;
                     case "/games":
                     case "/games.html":

@@ -5,14 +5,14 @@ namespace RobotVoice
     public class VoiceGameWiring : MonoBehaviour
     {
         [Header("References")]
-        [SerializeField] private VoskSpeechToText speech;
+        [SerializeField] private UnitySpeechInputFallback speech;
         [SerializeField] private VoiceGameLauncher launcher;
 
         private void Awake()
         {
             if (speech == null)
             {
-                speech = GetComponent<VoskSpeechToText>();
+                speech = GetComponent<UnitySpeechInputFallback>();
             }
             if (launcher == null)
             {
@@ -45,5 +45,3 @@ namespace RobotVoice
         }
     }
 }
-
-

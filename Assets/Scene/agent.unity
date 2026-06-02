@@ -481,10 +481,9 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   publisher: {fileID: 1307454270}
-  speechToText: {fileID: 0}
+  unitySpeechInput: {fileID: 0}
   intentConfigJson: {fileID: 4900000, guid: f886a37adc9721949b230d5dec74c8fc, type: 3}
   wakeWord: rachel
-  requireWakeWord: 0
   requireLaunchKeyword: 0
   launchKeywords:
   - open
@@ -510,8 +509,7 @@ MonoBehaviour:
   coachResponseText: {fileID: 0}
   coachResponseDisplaySeconds: 6
   piperSpeakUrl: http://127.0.0.1:5005/speak
-  wakeAcknowledgeUserText: What can I help you with
-  firstCommandListenSeconds: 3
+  forcePiperForDialogAnswers: 1
 --- !u!114 &1307454270
 MonoBehaviour:
   m_ObjectHideFlags: 0

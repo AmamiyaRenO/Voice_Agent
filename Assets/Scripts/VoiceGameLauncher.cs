@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Text;
@@ -14,7 +14,7 @@ namespace RobotVoice
     {
         [Header("Dependencies")]
         [SerializeField] private MqttIntentPublisher publisher;
-        [SerializeField] private VoskSpeechToText speechToText;
+        [SerializeField] private UnitySpeechInputFallback unitySpeechInput;
 		[SerializeField] private PiMessageHub piHub;
         [Header("Unity Speech Fallback")]
         [SerializeField, Tooltip("If false, Unity-side microphone/ASR fallback stays disabled and the standalone desktop runtime should handle speech input.")]
@@ -23,7 +23,6 @@ namespace RobotVoice
         [Header("Configuration")]
         [SerializeField] private TextAsset intentConfigJson;
         [SerializeField] private string wakeWord = "hi rachel";
-        [SerializeField] private bool requireWakeWord = true;
         [SerializeField] private bool requireLaunchKeyword = false;
         [SerializeField] private string[] launchKeywords = { "open", "play" };
         [SerializeField] private string[] exitKeywords = { "quit", "back to lobby" };
@@ -75,10 +74,10 @@ namespace RobotVoice
         private int ttsStreamRingBufferSeconds = 20;
         [SerializeField, Tooltip("Force a fixed speaker for dialog answer playback (ignores dialog_service tts_speaker).")]
         private string fixedDialogTtsSpeaker = "en_US";
+        [SerializeField, Tooltip("If true, use the Piper default speaker when dialog answers return a model-style voice code.")]
+        private bool forcePiperForDialogAnswers = true;
         [SerializeField, Tooltip("Force a fixed style for dialog answer playback (ignores dialog_service tts_instruct). Leave empty to disable instruct.")]
         private string fixedDialogTtsInstruct = string.Empty;
-        [SerializeField, Tooltip("Prompt text sent to LLM when wake word is detected. Keep it short.")]
-        private string wakeAcknowledgeUserText = "Wake word detected. Reply briefly that you are listening.";
         [SerializeField, Tooltip("Fallback: mute mic capture while TTS is playing (prevents echo if AEC is not active).")]
         private bool muteMicDuringTtsWhenAecInactive = true;
         [Header("TTS Pseudo-Streaming (CPU-friendly)")]
@@ -99,8 +98,6 @@ namespace RobotVoice
         private string voiceTextTopic = VoiceAgentDefaults.VoiceTextTopic;
         [SerializeField, Tooltip("If true, always publish transcript to robot/voice/text and let intent_service handle intent classification (recommended).")]
         private bool preferBackendIntentService = true;
-        [Header("Wake/First Command")]
-        [SerializeField, Min(0.5f)] private float firstCommandListenSeconds = 4.5f;
         private float lastIntentTime = -999f;
         private VoiceIntentConfig runtimeConfig;
         private readonly List<KeywordPhrase> keywordPhrases = new List<KeywordPhrase>();
@@ -401,9 +398,9 @@ namespace RobotVoice
 
         private void Awake()
         {
-            if (speechToText == null)
+            if (unitySpeechInput == null)
             {
-                speechToText = GetComponent<VoskSpeechToText>();
+                unitySpeechInput = GetComponent<UnitySpeechInputFallback>();
             }
             if (piHub == null)
             {
@@ -431,15 +428,15 @@ namespace RobotVoice
         private void ApplyUnitySpeechInputFallbackRuntime()
         {
             unitySpeechInputFallbackRuntimeEnabled = enableUnitySpeechInputFallback;
-            if (speechToText == null)
+            if (unitySpeechInput == null)
             {
                 return;
             }
 
-            speechToText.AutoStart = unitySpeechInputFallbackRuntimeEnabled;
+            unitySpeechInput.AutoStart = unitySpeechInputFallbackRuntimeEnabled;
             if (!unitySpeechInputFallbackRuntimeEnabled)
             {
-                speechToText.SetListeningEnabled(false);
+                unitySpeechInput.SetListeningEnabled(false);
             }
         }
 
@@ -451,19 +448,19 @@ namespace RobotVoice
         private void SetUnitySpeechInputFallbackEnabled(bool enabled)
         {
             unitySpeechInputFallbackRuntimeEnabled = enabled;
-            if (speechToText == null)
+            if (unitySpeechInput == null)
             {
-                speechToText = GetComponent<VoskSpeechToText>();
+                unitySpeechInput = GetComponent<UnitySpeechInputFallback>();
             }
-            if (speechToText == null)
+            if (unitySpeechInput == null)
             {
                 return;
             }
 
-            speechToText.AutoStart = enabled;
+            unitySpeechInput.AutoStart = enabled;
             if (!enabled)
             {
-                speechToText.SetListeningEnabled(false);
+                unitySpeechInput.SetListeningEnabled(false);
             }
         }
 
@@ -640,4 +637,3 @@ namespace RobotVoice
         }
     }
 }
-

@@ -1,4 +1,4 @@
-﻿{
+{
   "python": {
     "asr": "",
     "tts": ""
@@ -41,10 +41,27 @@
     "VOICE_CLOUD_ASR_MODE": "api",
     "VOICE_LOCAL_STREAMING_ASR_MODE": "live-captions",
     "VOICE_CLOUD_STREAMING_ASR_MODE": "live-captions",
+    "VOICE_ASR_HOTWORD_STRATEGY": "commands_games_memory",
+    "VOICE_ASR_STABLE_PARTIAL_REPEATS": "2",
+    "VOICE_GEMINI_LIVE_NATIVE_RESPONSE": "1",
+    "VOICE_SPEAKER_ID_ACTIVE_FALLBACK_SECONDS": "30",
     "VOICE_CLOUD_RESPONSE_PROVIDER": "openai",
     "VOICE_AGENT_TTS_BACKEND": "piper",
     "KOKORO_TTS_VOICE": "af_heart",
     "KOKORO_TTS_LANG_CODE": "a",
+    "GEMINI_RESPONSE_MODEL": "gemini-2.5-flash",
+    "GEMINI_LIVE_SUPPRESS_DURING_ASSISTANT": "1",
+    "GEMINI_LIVE_ASSISTANT_TAIL_SECONDS": "1.2",
+    "DOC_RAG_ENABLE": "1",
+    "VOICE_CLOUD_BYPASS_LOCAL_DOC_RAG": "1",
+    "DOC_RAG_ROOT": "docs/rag/bioadaptive_lab",
+    "DOC_RAG_EMBEDDER": "bge",
+    "DOC_RAG_EMBEDDING_REPO_ID": "Qdrant/bge-small-en-v1.5-onnx-Q",
+    "DOC_RAG_EMBEDDING_CACHE_DIR": "models/doc_rag",
+    "DOC_RAG_EMBEDDING_MODEL_DIR": "",
+    "DOC_RAG_EMBEDDING_MODEL_FILE": "model_optimized.onnx",
+    "DOC_RAG_EMBEDDING_TOKENIZER_FILE": "tokenizer.json",
+    "DOC_RAG_EMBEDDING_AUTO_DOWNLOAD": "1",
     "OPENAI_RESPONSE_MODEL": "gpt-4o-mini",
     "OLLAMA_MODEL": "qwen3.5:0.8b",
     "OLLAMA_THINK": "0",

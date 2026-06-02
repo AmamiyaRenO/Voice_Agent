@@ -16,7 +16,6 @@ The repository also includes:
 | Control the agent from Python without opening Unity | [`python_sdk/README.md`](python_sdk/README.md) | SDK access to speech, face, LED, flower, game intents, and prompt/model control |
 | Keep Unity in the loop for avatar/gameplay/camera UI | Start services first, then open the Unity project | Unity acts as an optional shell around the desktop runtime and MQTT actions |
 | Work on Raspberry Pi display / LED / servo control | [`Firmware/README.md`](Firmware/README.md) | Live Pi-synced scripts, MQTT topics, and current hardware runtime notes |
-| Package the stack for Windows deployment | [`scripts/packaging/`](scripts/packaging/) and [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WINDOWS.md) | Service executables, installer assets, and a near one-click runtime |
 
 ### Default runtime ports
 
@@ -65,7 +64,6 @@ It also includes a browser-based SDK Visualizer at `http://<host>:8787/sdk` for 
 - [Quick Start Paths](#quick-start-paths)
 - [Environment Requirements](#environment-requirements)
 - [Detailed Setup](#detailed-setup)
-- [Windows Packaging](#windows-packaging)
 - [Service Endpoints and MQTT Topics](#service-endpoints-and-mqtt-topics)
 - [Raspberry Pi Hardware Runtime](#raspberry-pi-hardware-runtime)
 - [Python SDK](#python-sdk)
@@ -134,10 +132,9 @@ sequenceDiagram
 | `Assets/` | Unity scenes, scripts, prefabs, browser panel assets, and optional shell integration |
 | `python_voice_service/` | FastAPI services for conversation, ASR, desktop runtime, Piper/Kokoro wrappers, grounding, speaker ID, and streaming audio tools |
 | `python_sdk/` | Python client SDK for robot controls and runtime APIs |
-| `scripts/` | Local launcher plus helper services (`intent_service`, `dialog_service`, `telemetry_service`, `game_launcher`, packaging) |
-| `runtime/` | Runtime outputs and assets such as eval results, captions, local models, and packaged-service payloads |
+| `scripts/` | Local launcher plus helper services (`intent_service`, `dialog_service`, `telemetry_service`, `game_launcher`) |
+| `runtime/` | Runtime outputs and assets such as eval results, captions, local models, and panel support files |
 | `docs/` | Deployment, integration, live captions, and benchmark planning notes |
-| `installer/` | Windows installer scripts and launcher entrypoints |
 | `Firmware/` | Live Pi-synced hardware scripts, face assets, and deployment notes for face / servo / LED control |
 | `tests/` | Smoke tests, route checks, and regression helpers |
 | `native/` | Native audio processing helpers |
@@ -165,7 +162,7 @@ sequenceDiagram
 - Python SDK parity with Unity panel actions.
 - SDK Visualizer (`/sdk`) with step-by-step flow building, execution, and JSON import/export.
 - Local multi-process launcher (`scripts/start_local_services.py`).
-- Launcher can run source services during development or packaged executables when deployed.
+- Launcher runs the source services used by the maintained desktop runtime workflow.
 - Repeatable conversation and memory regression entrypoints (`scripts/conversation_eval.py`, `scripts/memory_eval_scenarios.sample.json`).
 - External dialogue benchmark shortlist and rollout plan (`docs/DIALOGUE_BENCHMARK_DATASETS.md`).
 
@@ -190,7 +187,7 @@ flowchart LR
 4. Use `/runtime` to switch `local` / `cloud`, ASR mode, and model/runtime settings.
 5. Use `/setup`, `/memory`, `/games`, and `/sdk` for first-run checks, memory inspection, manifest editing, and API testing.
 
-`helper.bat` delegates to `scripts/start_local_services.py`, which can launch source services in development or bundled executables when running from a packaged deployment.
+`helper.bat` delegates to `scripts/start_local_services.py`, which launches the source services used by the maintained desktop runtime workflow.
 
 For local document grounding, the maintained default doc root is:
 
@@ -222,7 +219,8 @@ Place `.md`, `.qmd`, and `.txt` corpora there when you want them to participate 
 - **Audio:** microphone permission enabled
 
 Optional dependencies:
-- Faster-Whisper model files (for Python ASR route)
+- Faster-Whisper model files only if you explicitly use `whisper-large-v3` mode. Model binaries are not tracked in Git; use `scripts/download_whisper_model.py` or set `WHISPER_MODEL_PATH` to an external model folder.
+- Doc-RAG embedding model files are downloaded into `models/doc_rag` on demand and are not tracked in Git.
 - Ollama runtime (for `/respond` endpoint)
 - Piper executable + ONNX model (for Piper TTS wrapper)
 - Kokoro TTS Python environment (`python_voice_service/.venv_tts`, auto-bootstrapped when possible)
@@ -240,12 +238,13 @@ Open `Voice_Agent` via Unity Hub.
 
 ### 2) Unity Configuration Notes
 
+- The maintained speech entry point is the desktop runtime at `http://127.0.0.1:8787`.
 - Confirm scene references for:
-  - `VoskSpeechToText`
   - `VoiceGameLauncher`
   - `VoiceGameWiring`
   - `PiMessageHub` (if used in your scene)
   - `UserTestControlPanel` (optional but strongly recommended for remote testing)
+- `UnitySpeechInputFallback` is an optional direct Unity microphone fallback. Keep `enableUnitySpeechInputFallback` disabled for normal demos; the desktop runtime should own speech input.
 - Enable scripting define `ROBOTVOICE_USE_MQTT` if your build relies on MQTT intent publishing.
 - If using wake prompt audio, assign clip references in launcher components.
 
@@ -342,73 +341,13 @@ Useful doc-rag env vars:
 ### 4) Optional helper.bat
 
 `helper.bat` now starts `scripts/start_local_services.py` from the repository root and no longer depends on `Robot_opr` paths.
-If `runtime/services/service_launcher.exe` exists, it uses the packaged launcher first.
-Otherwise it clears stale source/service processes, prefers `python_voice_service\.venv_asr` and `.venv_tts`, falls back to the bundled portable Python `3.12.10` under `native/python/windows-x64`, prefers the bundled Mosquitto broker under `native/mosquitto/windows-x64`, and automatically passes `--no-hub` when an MQTT broker is already listening on `1883`.
+It clears stale source/service processes, prefers `python_voice_service\.venv_asr` and `.venv_tts`, falls back to the bundled portable Python `3.12.10` under `native/python/windows-x64`, prefers the bundled Mosquitto broker under `native/mosquitto/windows-x64`, and automatically passes `--no-hub` when an MQTT broker is already listening on `1883`.
 
 Quick run:
 
 ```powershell
 .\helper.bat
 ```
-
-## Windows Packaging
-
-If you want a near one-click deployment for non-programmers:
-
-1. Build Python services into `dist/services/*.exe`:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\packaging\build_services_exe.ps1
-```
-
-The default packaged service set now includes:
-- `voice_service.exe`
-- `piper_http.exe`
-- `desktop_runtime.exe`
-- `intent_service.exe`
-- `dialog_service.exe`
-- `telemetry_service.exe`
-- `game_launcher.exe`
-- `service_launcher.exe`
-
-The Windows packaging path is currently centered on Piper for turnkey installs.
-Qwen can be bundled as an optional extra executable at build time, while Kokoro is primarily documented as a source/developer backend for now.
-
-2. Put your Unity Windows build output into `dist/unity`.
-3. Build the installer (Inno Setup 6 required):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\packaging\build_installer.ps1
-```
-
-Optional (bundle Piper runtime + voice model into installer):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\packaging\build_installer.ps1 `
-  -PiperRuntimeDir "D:\runtime\piper"
-```
-
-`PiperRuntimeDir` should contain at least:
-- `piper.exe`
-- `models\*.onnx` (for example `models\en_US-lessac-medium.onnx`)
-- matching model config file (`.onnx.json` or `.json`)
-
-4. Install and run `start_voice_agent.bat`, then open:
-- `http://127.0.0.1:8787/setup.html` (first-run wizard)
-- `http://127.0.0.1:8787/games.html` (game executable path + keywords)
-
-One-command release build (services + installer, optionally bundling Piper runtime):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\packaging\build_release_oneclick.ps1 `
-  -UnityBuildDir "D:\builds\voice_agent_unity" `
-  -PiperRuntimeDir "D:\runtime\piper"
-```
-
-Installed one-click launcher behavior:
-- double-click desktop icon -> starts packaged services + packaged desktop runtime + optional Unity shell + health-check wait + auto-open panel page.
-
-See full deployment notes in [`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WINDOWS.md).
 
 ## Service Endpoints and MQTT Topics
 
@@ -933,7 +872,6 @@ python scripts/start_local_services.py `
 ```
 
 If you use Kokoro TTS alongside Faster-Whisper, keeping a separate `.venv_tts` remains the simplest source setup.
-For Windows packaging, Piper remains the default turnkey option.
 
 ## Troubleshooting
 
@@ -950,7 +888,7 @@ For Windows packaging, Piper remains the default turnkey option.
   - Prompt text is a soft bias, not a hard constraint; over-specific prompts can cause leakage/hallucination.
   - Confirm API mode is active (`/transcribe/config`).
   - If you need forced English in API mode, explicitly set `ASR_API_FORCE_LANGUAGE=1` and `ASR_API_LANGUAGE=en`.
-  - Restart `service_launcher` and `voice_service` after changing runtime config, because env-backed options are loaded at process start.
+  - Restart `scripts/start_local_services.py` after changing runtime config, because env-backed options are loaded at process start.
 - Helper/start script raises WinError 2 (file not found):
   - Validate Python executable paths in `scripts/local_services.user.json` (`python.asr`, `python.tts`).
   - If paths include spaces, keep them as plain JSON strings; the launcher handles process argument splitting.
@@ -963,7 +901,7 @@ For Windows packaging, Piper remains the default turnkey option.
   - Ensure the desktop runtime is listening on `8787`.
   - If `VOICE_AGENT_TTS_BACKEND=kokoro`, confirm `http://127.0.0.1:5007/healthz` responds and the TTS venv has the `kokoro` dependency installed.
 - `/transcribe` fails:
-  - Check `WHISPER_MODEL_PATH` and model availability.
+  - If you selected `whisper-large-v3`, check `WHISPER_MODEL_PATH` and model availability.
   - Check Python service logs for load/runtime errors.
 - `/respond` is slow or failing:
   - Confirm Ollama is reachable and model exists.

@@ -11,12 +11,13 @@ import sys
 import threading
 import time
 import webbrowser
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 
 try:
     import cv2
@@ -53,22 +54,7 @@ except Exception:
     )
 
 def _resolve_app_root() -> Path:
-    if bool(getattr(sys, "frozen", False)):
-        exe_dir = Path(sys.executable).resolve().parent
-        if exe_dir.name.lower() == "services" and exe_dir.parent.name.lower() == "runtime":
-            return exe_dir.parent.parent
-        return exe_dir
     return Path(__file__).resolve().parents[1]
-
-
-def _resolve_bundle_root(app_root: Path) -> Path:
-    raw = getattr(sys, "_MEIPASS", "")
-    if raw:
-        try:
-            return Path(str(raw)).resolve()
-        except Exception:
-            return Path(str(raw))
-    return app_root
 
 
 def _resolve_state_dir(app_root: Path) -> Path:
@@ -79,8 +65,6 @@ def _resolve_state_dir(app_root: Path) -> Path:
         if path.is_absolute():
             return path
         return (app_root / path).resolve()
-    if bool(getattr(sys, "frozen", False)):
-        return Path.home() / "AppData" / "Local" / "VoiceAgent"
     return app_root / "runtime"
 
 
@@ -151,46 +135,27 @@ def _choose_existing_path(preferred: Path, *fallbacks: Path) -> Path:
 
 
 APP_ROOT = _resolve_app_root()
-BUNDLE_ROOT = _resolve_bundle_root(APP_ROOT)
 STATE_DIR = _resolve_state_dir(APP_ROOT)
 REPO_ROOT = APP_ROOT
 SCRIPTS_DIR = APP_ROOT / "scripts"
 PANEL_DIR_CANDIDATES = [
-    APP_ROOT / "runtime" / "panel",
     APP_ROOT / "Assets" / "StreamingAssets" / "panel",
-    BUNDLE_ROOT / "runtime" / "panel",
-    BUNDLE_ROOT / "Assets" / "StreamingAssets" / "panel",
 ]
-PANEL_LEGACY_DIR_CANDIDATES = [
-    APP_ROOT / "Assets" / "StreamingAssets" / "panel",
-    BUNDLE_ROOT / "Assets" / "StreamingAssets" / "panel",
-]
-DEFAULT_LAUNCHER_CONFIG = (
-    STATE_DIR / "local_services.user.json"
-    if bool(getattr(sys, "frozen", False))
-    else SCRIPTS_DIR / "local_services.user.json"
-)
+DEFAULT_LAUNCHER_CONFIG = SCRIPTS_DIR / "local_services.user.json"
 DEFAULT_LAUNCHER_DEFAULT_CONFIG = _choose_existing_path(
     SCRIPTS_DIR / "local_services.default.json",
-    BUNDLE_ROOT / "scripts" / "local_services.default.json",
 )
 DEFAULT_GAME_MANIFEST = _choose_existing_path(
-    STATE_DIR / "manifest.json" if bool(getattr(sys, "frozen", False)) else SCRIPTS_DIR / "intent_service" / "manifest.json",
     SCRIPTS_DIR / "intent_service" / "manifest.json",
-    BUNDLE_ROOT / "scripts" / "intent_service" / "manifest.json",
 )
 DEFAULT_DIALOG_MEMORY = _choose_existing_path(
-    STATE_DIR / "user_memory.json" if bool(getattr(sys, "frozen", False)) else SCRIPTS_DIR / "dialog_service" / "user_memory.json",
     SCRIPTS_DIR / "dialog_service" / "user_memory.json",
 )
-DEFAULT_QMD_ROOT = (
-    STATE_DIR / "qmd"
-    if bool(getattr(sys, "frozen", False))
-    else APP_ROOT / "runtime" / "qmd"
-)
+DEFAULT_QMD_ROOT = APP_ROOT / "runtime" / "qmd"
 DEFAULT_PANEL_PORT = int(os.getenv("PANEL_PORT", "8787") or "8787")
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_OPENAI_RESPONSE_MODEL = "gpt-4o-mini"
+DEFAULT_GEMINI_RESPONSE_MODEL = "gemini-2.5-flash"
 DEFAULT_GEMINI_LIVE_MODEL = "models/gemini-2.5-flash-native-audio-latest"
 DEFAULT_GEMINI_LIVE_VOICE = "Kore"
 DEFAULT_OLLAMA_MODEL = "qwen3.5:0.8b"
@@ -203,6 +168,7 @@ OLLAMA_MODEL_OPTIONS = [
 DEFAULT_LAUNCH_TRIGGERS = ["open", "start", "launch", "play", "begin", "load"]
 CORE_EXIT_KEYWORDS = ["back home", "go home", "return home", "go back"]
 DEFAULT_EXIT_KEYWORDS = [*CORE_EXIT_KEYWORDS, "quit", "exit", "stop", "cancel", "close", "close game"]
+OPERATOR_ASR_MODES = ["live-captions", "api", "gemini-live"]
 DEFAULT_CAMERA_WIDTH = int(os.getenv("VOICE_AGENT_CAMERA_WIDTH", "640") or "640")
 DEFAULT_CAMERA_HEIGHT = int(os.getenv("VOICE_AGENT_CAMERA_HEIGHT", "480") or "480")
 DEFAULT_CAMERA_FPS = int(os.getenv("VOICE_AGENT_CAMERA_FPS", "15") or "15")
@@ -456,6 +422,16 @@ def _normalize_tts_backend(value: Optional[str]) -> str:
     return "piper"
 
 
+def _normalize_operator_asr_mode(value: Optional[str]) -> str:
+    normalized = normalize_streaming_asr_mode(value)
+    if normalized not in OPERATOR_ASR_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail="supported ASR providers are: Windows Captions, OpenAI API, Google API",
+        )
+    return normalized
+
+
 def _coerce_cloud_pipeline_for_provider(
     *,
     profile: str,
@@ -552,10 +528,14 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
     gemini_api_key = str(gemini_obj.get("api_key") or _gemini_api_key_from_env()).strip()
     gemini_live_model = str(
         env_obj.get("GEMINI_LIVE_MODEL")
-        or env_obj.get("GEMINI_RESPONSE_MODEL")
         or DEFAULT_GEMINI_LIVE_MODEL
     ).strip() or DEFAULT_GEMINI_LIVE_MODEL
+    gemini_response_model = str(
+        env_obj.get("GEMINI_RESPONSE_MODEL")
+        or DEFAULT_GEMINI_RESPONSE_MODEL
+    ).strip() or DEFAULT_GEMINI_RESPONSE_MODEL
     gemini_live_voice = str(env_obj.get("GEMINI_LIVE_VOICE") or DEFAULT_GEMINI_LIVE_VOICE).strip() or DEFAULT_GEMINI_LIVE_VOICE
+    gemini_live_native_response = _read_bool(env_obj, "VOICE_GEMINI_LIVE_NATIVE_RESPONSE", False)
     tts_backend = _normalize_tts_backend(env_obj.get("VOICE_AGENT_TTS_BACKEND"))
     kokoro_voice = str(env_obj.get("KOKORO_TTS_VOICE") or DEFAULT_KOKORO_VOICE).strip() or DEFAULT_KOKORO_VOICE
     kokoro_lang_code = str(env_obj.get("KOKORO_TTS_LANG_CODE") or "a").strip().lower() or "a"
@@ -584,7 +564,9 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
         "gemini_api_key": gemini_api_key,
         "gemini_api_key_set": bool(gemini_api_key),
         "gemini_live_model": gemini_live_model,
+        "gemini_response_model": gemini_response_model,
         "gemini_live_voice": gemini_live_voice,
+        "gemini_live_native_response": gemini_live_native_response,
         "cloud_response_provider": cloud_response_provider,
         "tts_backend": tts_backend,
         "kokoro_voice": kokoro_voice,
@@ -1089,10 +1071,8 @@ audio_agent = DesktopAudioAgent(log_store=log_store, asr_base_url=DEFAULT_ASR_BA
 camera_service = DesktopCameraService()
 ollama_pull_requests: set[str] = set()
 panel_http = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
-app = FastAPI(title="Voice Agent Desktop Runtime")
 
 
-@app.on_event("startup")
 async def _on_startup() -> None:
     await audio_agent.start()
     try:
@@ -1107,11 +1087,22 @@ async def _on_startup() -> None:
         log_store.add("system", f"ollama autostart failed: {exc}", source="desktop_runtime")
 
 
-@app.on_event("shutdown")
 async def _on_shutdown() -> None:
     await panel_http.aclose()
     camera_service.close()
     await audio_agent.stop()
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    await _on_startup()
+    try:
+        yield
+    finally:
+        await _on_shutdown()
+
+
+app = FastAPI(title="Voice Agent Desktop Runtime", lifespan=_lifespan)
 
 
 def _panel_file_response_from_candidates(name: str, panel_dirs: List[Path]) -> FileResponse:
@@ -1124,10 +1115,6 @@ def _panel_file_response_from_candidates(name: str, panel_dirs: List[Path]) -> F
 
 def _panel_file_response(name: str) -> FileResponse:
     return _panel_file_response_from_candidates(name, PANEL_DIR_CANDIDATES)
-
-
-def _panel_legacy_file_response(name: str) -> FileResponse:
-    return _panel_file_response_from_candidates(name, PANEL_LEGACY_DIR_CANDIDATES)
 
 
 async def _probe_ollama(model: str) -> Dict[str, Any]:
@@ -1284,13 +1271,17 @@ async def _apply_runtime_live(merged: Dict[str, Any]) -> str:
     else:
         os.environ.pop("GEMINI_API_KEY", None)
     os.environ["GEMINI_LIVE_MODEL"] = runtime["gemini_live_model"]
+    os.environ["GEMINI_RESPONSE_MODEL"] = runtime["gemini_response_model"]
     os.environ["GEMINI_LIVE_VOICE"] = runtime["gemini_live_voice"]
+    os.environ["VOICE_GEMINI_LIVE_NATIVE_RESPONSE"] = "1" if runtime["gemini_live_native_response"] else "0"
     request_payload = {
         "pipeline_mode": runtime["conversation_pipeline_mode"],
         "profile": runtime["conversation_profile"],
         "local_asr_mode": runtime["local_asr_mode"],
         "cloud_asr_mode": runtime["cloud_asr_mode"],
         "cloud_response_provider": runtime["cloud_response_provider"],
+        "gemini_api_key": runtime["gemini_api_key"],
+        "gemini_response_model": runtime["gemini_response_model"],
         "openai_api_key": runtime["openai_api_key"],
         "openai_base_url": runtime["openai_base_url"],
         "openai_transcribe_model": runtime["openai_transcribe_model"],
@@ -1299,16 +1290,12 @@ async def _apply_runtime_live(merged: Dict[str, Any]) -> str:
         "local_response_model": runtime["ollama_model"],
     }
     notes: List[str] = []
-    if not (
-        runtime["conversation_profile"] == "cloud"
-        and runtime["cloud_response_provider"] == "gemini"
-    ):
-        try:
-            response = await panel_http.post(f"{DEFAULT_ASR_BASE_URL}/conversation/config", json=request_payload)
-            if not response.is_success:
-                notes.append(response.text.strip() or f"conversation config HTTP {response.status_code}")
-        except Exception as exc:
-            notes.append(f"conversation config failed: {exc}")
+    try:
+        response = await panel_http.post(f"{DEFAULT_ASR_BASE_URL}/conversation/config", json=request_payload)
+        if not response.is_success:
+            notes.append(response.text.strip() or f"conversation config HTTP {response.status_code}")
+    except Exception as exc:
+        notes.append(f"conversation config failed: {exc}")
 
     try:
         await audio_agent.apply_runtime_config(
@@ -1357,17 +1344,15 @@ async def _pick_file_dialog(title: str, filter_text: str, initial_dir: str, init
     return await asyncio.to_thread(_worker)
 
 
-@app.get("/")
 @app.get("/index.html")
-@app.get("/panel.html")
 async def panel_index() -> FileResponse:
-    return _panel_legacy_file_response("panel.html")
+    return _panel_file_response("index.html")
 
 
-@app.get("/panel-legacy")
-@app.get("/panel-legacy.html")
-async def panel_legacy() -> FileResponse:
-    return _panel_legacy_file_response("panel.html")
+@app.get("/")
+@app.get("/panel.html")
+async def panel_home_redirect() -> RedirectResponse:
+    return RedirectResponse(url="/index.html", status_code=307)
 
 
 @app.get("/games")
@@ -1574,13 +1559,17 @@ async def _build_asr_status_payload() -> Dict[str, Any]:
         "mode": str(status.asr_mode or ""),
         "streaming_backend": str(status.streaming_backend or ""),
         "tts_backend": str(status.tts_backend or ""),
-        "available_modes": [str(item or "") for item in list(status.streaming_available_modes or [])],
+        "available_modes": list(OPERATOR_ASR_MODES),
         "listening": bool(status.listening),
         "assistant_speaking": bool(status.assistant_speaking),
         "conversation_dispatch_enabled": bool(getattr(status, "conversation_dispatch_enabled", True)),
         "supports_hotwords": bool(status.supports_hotwords),
         "hotwords_count": int(status.hotwords_count),
         "hotword_strategy": str(status.hotword_strategy or ""),
+        "command_asr_enabled": bool(getattr(status, "command_asr_enabled", False)),
+        "command_asr_provider": str(getattr(status, "command_asr_provider", "") or ""),
+        "command_asr_status": str(getattr(status, "command_asr_status", "") or ""),
+        "gemini_live_command_tools_enabled": bool(getattr(status, "gemini_live_command_tools_enabled", False)),
         "current_partial": str(status.current_partial or ""),
         "stable_partial": str(status.stable_partial or ""),
         "final_transcript": str(getattr(status, "final_transcript", "") or ""),
@@ -1611,6 +1600,30 @@ async def _build_asr_status_payload() -> Dict[str, Any]:
         "input_device_source": str(getattr(status, "input_device_source", "") or ""),
         "input_device_sample_rate": _safe_json_float(getattr(status, "input_device_sample_rate", 0.0), 0.0),
     }
+    runtime_cfg: Optional[Dict[str, Any]] = None
+    try:
+        _, _, _, _, merged = _load_launcher_config_pair()
+        runtime_cfg = _build_runtime_payload(
+            merged,
+            user_path=_resolve_launcher_config_path(),
+            default_path=_resolve_launcher_default_config_path(),
+            message="runtime config",
+        )
+        payload["conversation_profile"] = str(runtime_cfg.get("conversation_profile") or "")
+        payload["cloud_response_provider"] = str(runtime_cfg.get("cloud_response_provider") or "")
+        payload["gemini_response_model"] = str(runtime_cfg.get("gemini_response_model") or "")
+        payload["gemini_live_model"] = str(runtime_cfg.get("gemini_live_model") or "")
+        payload["gemini_live_native_response"] = bool(runtime_cfg.get("gemini_live_native_response"))
+    except Exception:
+        runtime_cfg = None
+    if str(status.asr_mode or "") == "gemini-live":
+        payload["server_transcribe"] = {
+            "status": "ok",
+            "mode": "not_used",
+            "source": "gemini_live",
+            "message": "Gemini Live handles conversation audio directly; command words use the configured command ASR path.",
+        }
+        return payload
     try:
         response = await panel_http.get(f"{DEFAULT_ASR_BASE_URL}/transcribe/config")
         if response.is_success:
@@ -1639,6 +1652,10 @@ def _build_asr_event_payload(*, event_type: str) -> Dict[str, Any]:
         "supports_hotwords": bool(status.supports_hotwords),
         "hotwords_count": int(status.hotwords_count),
         "hotword_strategy": str(status.hotword_strategy or ""),
+        "command_asr_enabled": bool(getattr(status, "command_asr_enabled", False)),
+        "command_asr_provider": str(getattr(status, "command_asr_provider", "") or ""),
+        "command_asr_status": str(getattr(status, "command_asr_status", "") or ""),
+        "gemini_live_command_tools_enabled": bool(getattr(status, "gemini_live_command_tools_enabled", False)),
     }
 
 
@@ -1708,7 +1725,7 @@ async def api_asr_update(request: Request) -> Dict[str, Any]:
         if action in {"", "status"}:
             return await _build_asr_status_payload()
         if action in {"set_mode", "mode"}:
-            requested_mode = normalize_streaming_asr_mode(payload.get("mode") or payload.get("value"))
+            requested_mode = _normalize_operator_asr_mode(payload.get("mode") or payload.get("value"))
             await audio_agent.set_asr_mode(requested_mode)
             result = await _build_asr_status_payload()
             actual_mode = str(result.get("mode") or "").strip()
@@ -1851,10 +1868,10 @@ async def api_runtime_config_post(request: Request) -> Dict[str, Any]:
         env_obj["VOICE_ASR_STABLE_PARTIAL_REPEATS"] = str(repeats)
     if "openai_response_model" in payload:
         env_obj["OPENAI_RESPONSE_MODEL"] = str(payload.get("openai_response_model") or "").strip()
-    if "gemini_live_model" in payload or "gemini_response_model" in payload:
-        env_obj["GEMINI_LIVE_MODEL"] = str(
-            payload.get("gemini_live_model") or payload.get("gemini_response_model") or ""
-        ).strip()
+    if "gemini_response_model" in payload:
+        env_obj["GEMINI_RESPONSE_MODEL"] = str(payload.get("gemini_response_model") or "").strip()
+    if "gemini_live_model" in payload:
+        env_obj["GEMINI_LIVE_MODEL"] = str(payload.get("gemini_live_model") or "").strip()
     if "gemini_live_voice" in payload:
         env_obj["GEMINI_LIVE_VOICE"] = str(payload.get("gemini_live_voice") or "").strip()
     coerced_cloud_asr_mode, coerced_cloud_streaming_asr_mode = _coerce_cloud_pipeline_for_provider(

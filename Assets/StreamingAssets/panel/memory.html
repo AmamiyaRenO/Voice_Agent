@@ -178,6 +178,8 @@ textarea{min-height:88px;font-family:'Segoe UI',sans-serif;font-size:.9rem;line-
         <div>Pending Clips</div><div id="speakerPendingState">0</div>
         <div>Last Enrollment</div><div id="speakerUpdatedAt">-</div>
         <div>Last Match</div><div id="speakerLastMatch">-</div>
+        <div>Active Voice User</div><div id="speakerActiveUser">-</div>
+        <div>Recent Audio Segments</div><div id="speakerRecentSegments">-</div>
       </div>
       <div class="muted">Record at least 3 clips. Each clip should be one natural sentence, about 1.5 to 6 seconds. Clips stay pending until you commit them into a voiceprint.</div>
     </div>
@@ -237,6 +239,8 @@ const speakerProfileStateEl = document.getElementById('speakerProfileState');
 const speakerPendingStateEl = document.getElementById('speakerPendingState');
 const speakerUpdatedAtEl = document.getElementById('speakerUpdatedAt');
 const speakerLastMatchEl = document.getElementById('speakerLastMatch');
+const speakerActiveUserEl = document.getElementById('speakerActiveUser');
+const speakerRecentSegmentsEl = document.getElementById('speakerRecentSegments');
 const speakerPromptExampleEl = document.getElementById('speakerPromptExample');
 
 let memoryState = null;
@@ -497,6 +501,18 @@ function renderSpeakerSelection(data){
       speakerLastMatchEl.textContent = '-';
     }
   }
+  if(speakerActiveUserEl){
+    const activeUser = String(speakerState.active_user_id || '').trim();
+    const lastSeen = isoTextFromTs(speakerState.active_user_last_seen_ts);
+    speakerActiveUserEl.textContent = activeUser ? (activeUser + ' / ' + lastSeen) : '-';
+  }
+  if(speakerRecentSegmentsEl){
+    const count = Number(speakerState.recent_segment_count || 0);
+    const age = speakerState.freshest_segment_age_seconds;
+    speakerRecentSegmentsEl.textContent = count
+      ? (String(count) + ' captured / newest ' + String(age) + 's ago')
+      : 'none';
+  }
   if(commitSpeakerBtnEl){
     commitSpeakerBtnEl.disabled = !selectedUserId || !(pending && pending.can_commit);
   }
@@ -642,6 +658,8 @@ async function reloadMemory(){
       if(speakerPendingStateEl){ speakerPendingStateEl.textContent = '-'; }
       if(speakerUpdatedAtEl){ speakerUpdatedAtEl.textContent = '-'; }
       if(speakerLastMatchEl){ speakerLastMatchEl.textContent = String(err); }
+      if(speakerActiveUserEl){ speakerActiveUserEl.textContent = '-'; }
+      if(speakerRecentSegmentsEl){ speakerRecentSegmentsEl.textContent = '-'; }
     }
     setStatus('Loaded.');
   }catch(err){

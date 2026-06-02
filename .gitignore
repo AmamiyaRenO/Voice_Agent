@@ -43,6 +43,7 @@ ExportedObj/
 
 # Unity3D generated file on crash reports
 sysinfo.txt
+*.bak
 
 # Builds
 *.apk
@@ -92,7 +93,7 @@ __pycache__/
 !/native/python/windows-x64/Lib/site-packages/pip/_internal/operations/build/
 !/native/python/windows-x64/Lib/site-packages/pip/_internal/operations/build/**
 
-# Local packaging/build artifacts
+# Local build artifacts
 /.build/
 /dist/
 
@@ -104,11 +105,12 @@ __pycache__/
 # Runtime-generated local state
 /runtime/eval_assets/
 /runtime/evals/
+/runtime/backups/
 /runtime/live_captions/
 /runtime/models/
 /runtime/qmd/
-/runtime/services/
 /docs/rag/**/.doc_rag/
+/scripts/telemetry_service/telemetry.db*
 
 # NuGet for Unity generated assets
 /[Aa]ssets/NuGetEditor/
@@ -133,13 +135,25 @@ __pycache__/
 /[Aa]ssets/Plugins/manifest.json
 /[Aa]ssets/Plugins/manifest.json.meta
 
-# Downloaded speech models
-/[Aa]ssets/StreamingAssets/vosk*
-/[Aa]ssets/StreamingAssets/vosk*/*.zip
-/[Aa]ssets/StreamingAssets/vosk*/*.zip.meta
+# Downloaded speech/doc models
+/models/whisper/
+/models/doc_rag/
+/python_voice_service/models/
 
 # Keep Unity package manifest/lock tracked for reproducible dependency resolution.
 
 # Mediapipe
 Assets/StreamingAssets/mediapipe
 Packages/com.github.homuler.mediapipe/Runtime/Plugins/Android/mediapipe_android.aar
+Packages/com.github.homuler.mediapipe/Tests/
+Packages/com.github.homuler.mediapipe/PackageResources/MediaPipe/*
+!Packages/com.github.homuler.mediapipe/PackageResources/MediaPipe/pose_landmarker_lite.bytes
+!Packages/com.github.homuler.mediapipe/PackageResources/MediaPipe/pose_landmarker_lite.bytes.meta
+!Packages/com.github.homuler.mediapipe/PackageResources/MediaPipe/pose_landmarker_full.bytes
+!Packages/com.github.homuler.mediapipe/PackageResources/MediaPipe/pose_landmarker_full.bytes.meta
+!Packages/com.github.homuler.mediapipe/PackageResources/MediaPipe/pose_landmarker_heavy.bytes
+!Packages/com.github.homuler.mediapipe/PackageResources/MediaPipe/pose_landmarker_heavy.bytes.meta
+
+# Imported package examples
+Assets/TextMesh Pro/Examples & Extras/
+Assets/TextMesh Pro/Examples & Extras.meta

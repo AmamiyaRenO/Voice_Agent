@@ -156,6 +156,19 @@ namespace RobotVoice
             return Regex.IsMatch(code, "^[abefhijpzm][fm]_[a-z0-9_]+$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         }
 
+        private static bool IsLikelyQwenVoiceCode(string voiceCode)
+        {
+            var code = string.IsNullOrWhiteSpace(voiceCode) ? string.Empty : voiceCode.Trim();
+            if (string.IsNullOrEmpty(code))
+            {
+                return false;
+            }
+
+            return code.IndexOf("qwen", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   code.IndexOf("kokoro", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   code.IndexOf(":", StringComparison.Ordinal) >= 0;
+        }
+
         private string ResolveSpeakUrlForVoice(string voiceCode)
         {
             if (IsLikelyKokoroVoiceCode(voiceCode) && !string.IsNullOrWhiteSpace(kokoroSpeakUrl))
@@ -462,7 +475,7 @@ namespace RobotVoice
                 var quietWindow = ResolveSpeechDispatchQuietWindowSeconds();
                 var maxWait = ResolveSpeechDispatchMaxWaitSeconds(quietWindow);
                 var now = Time.realtimeSinceStartup;
-                var speechStillActive = speechToText != null && speechToText.IsSpeechSegmentActiveForDispatch;
+                var speechStillActive = unitySpeechInput != null && unitySpeechInput.IsSpeechSegmentActiveForDispatch;
                 if (speechStillActive)
                 {
                     yield return null;
@@ -1032,19 +1045,18 @@ namespace RobotVoice
             pendingTtsText = text;
 
             var shouldMute = muteMicDuringTtsWhenAecInactive;
-            if (speechToText != null)
+            if (unitySpeechInput != null)
             {
-                var vosk = speechToText as VoskSpeechToText;
-                var aecActive = vosk != null && vosk.HasActiveAec();
+                var aecActive = unitySpeechInput.HasActiveAec();
                 if (aecActive)
                 {
                     shouldMute = muteMicDuringTtsEvenWithAec;
                 }
             }
 
-            if (shouldMute && speechToText != null)
+            if (shouldMute && unitySpeechInput != null)
             {
-                speechToText.SetPlaybackMute(true);
+                unitySpeechInput.SetPlaybackMute(true);
             }
 
             ttsSessionActive = true;
@@ -1055,9 +1067,9 @@ namespace RobotVoice
         private void EndTtsPlaybackSession(bool shouldMute)
         {
             var muteApplied = ttsSessionMuteApplied || shouldMute;
-            if (muteApplied && speechToText != null)
+            if (muteApplied && unitySpeechInput != null)
             {
-                speechToText.SetPlaybackMute(false);
+                unitySpeechInput.SetPlaybackMute(false);
             }
 
             if (ttsSessionActive && publisher != null)

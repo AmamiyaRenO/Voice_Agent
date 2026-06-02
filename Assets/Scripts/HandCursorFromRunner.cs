@@ -1,14 +1,13 @@
 using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.UI;
-using Mediapipe.Unity.Sample.PoseLandmarkDetection;
-using Mediapipe.Tasks.Vision.PoseLandmarker;
 
 public class HandCursorFromRunner : MonoBehaviour
 {
 	[Header("Refs")]
-	public PoseLandmarkerRunner runner;
+	public MonoBehaviour runner;
 	public Canvas canvas;                   // Screen Space - Overlay recommended
 	public RectTransform cursorRect;        // Cursor_Hand rect
 
@@ -26,6 +25,8 @@ public class HandCursorFromRunner : MonoBehaviour
 	const int RIGHT_WRIST_INDEX = 16;
 
 	FieldInfo _landmarksField;
+	PropertyInfo _latestResultProperty;
+	FieldInfo _poseLandmarksField;
 	bool _bound;
 	bool _initialized;
 	Vector2 _filtered;
@@ -40,13 +41,13 @@ public class HandCursorFromRunner : MonoBehaviour
 	void Reset()
 	{
 		if (!canvas) canvas = FindObjectOfType<Canvas>();
-		if (!runner) runner = FindObjectOfType<PoseLandmarkerRunner>();
+		if (!runner) runner = FindPoseRunner();
 		if (!cursorRect && canvas) cursorRect = canvas.transform.Find("Cursor_Hand") as RectTransform;
 	}
 
 	void Awake()
 	{
-		if (!runner) runner = FindObjectOfType<PoseLandmarkerRunner>();
+		if (!runner) runner = FindPoseRunner();
 		StartCoroutine(BindWhenReady());
 	}
 
@@ -56,11 +57,9 @@ public class HandCursorFromRunner : MonoBehaviour
 		{
 			if (runner != null)
 			{
-				var res = runner.LatestResult;
-				if (!Equals(res, default(PoseLandmarkerResult)) &&
-					res.poseLandmarks != null && res.poseLandmarks.Count > 0)
+				var poseLandmarks = TryGetPoseLandmarks(runner, out var firstList);
+				if (poseLandmarks != null && poseLandmarks.Count > 0 && firstList != null)
 				{
-					var firstList = res.poseLandmarks[0];
 					_landmarksField = firstList.GetType()
 						.GetField("landmarks", BindingFlags.Instance | BindingFlags.Public);
 
@@ -79,11 +78,9 @@ public class HandCursorFromRunner : MonoBehaviour
 	{
 		if (!_bound || runner == null || cursorRect == null || canvas == null) return;
 
-		var result = runner.LatestResult;
-		if (Equals(result, default(PoseLandmarkerResult)) ||
-			result.poseLandmarks == null || result.poseLandmarks.Count == 0) return;
+		var poseLandmarks = TryGetPoseLandmarks(runner, out var firstList);
+		if (poseLandmarks == null || poseLandmarks.Count == 0 || firstList == null) return;
 
-		var firstList = result.poseLandmarks[0];
 		var raw = _landmarksField.GetValue(firstList) as System.Collections.IList;
 		if (raw == null) return;
 
@@ -150,6 +147,53 @@ public class HandCursorFromRunner : MonoBehaviour
 		var f = obj.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.Public);
 		if (f == null) return fallback;
 		try { return (float)f.GetValue(obj); } catch { return fallback; }
+	}
+
+	static MonoBehaviour FindPoseRunner()
+	{
+		foreach (var behaviour in FindObjectsOfType<MonoBehaviour>())
+		{
+			if (behaviour == null) continue;
+			if (behaviour.GetType().Name == "PoseLandmarkerRunner")
+			{
+				return behaviour;
+			}
+		}
+		return null;
+	}
+
+	IList TryGetPoseLandmarks(MonoBehaviour source, out object firstList)
+	{
+		firstList = null;
+		if (source == null) return null;
+
+		var sourceType = source.GetType();
+		if (_latestResultProperty == null || _latestResultProperty.DeclaringType != sourceType)
+		{
+			_latestResultProperty = sourceType.GetProperty("LatestResult", BindingFlags.Instance | BindingFlags.Public);
+		}
+		if (_latestResultProperty == null) return null;
+
+		object result;
+		try
+		{
+			result = _latestResultProperty.GetValue(source);
+		}
+		catch
+		{
+			return null;
+		}
+		if (result == null) return null;
+
+		var resultType = result.GetType();
+		if (_poseLandmarksField == null || _poseLandmarksField.DeclaringType != resultType)
+		{
+			_poseLandmarksField = resultType.GetField("poseLandmarks", BindingFlags.Instance | BindingFlags.Public);
+		}
+		var poseLandmarks = _poseLandmarksField?.GetValue(result) as IList;
+		if (poseLandmarks == null || poseLandmarks.Count == 0) return poseLandmarks;
+		firstList = poseLandmarks[0];
+		return poseLandmarks;
 	}
 }
 

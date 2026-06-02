@@ -37,6 +37,7 @@ class LauncherDefaults:
     openai_base_url: str
     openai_transcribe_model: str
     openai_transcribe_prompt: str
+    gemini_api_key: str
     intent_launch_triggers: List[str]
     intent_exit_keywords: List[str]
     intent_use_llm_classifier: bool
@@ -239,19 +240,6 @@ def _resolve_launcher_config_path(repo_root: Path) -> Path:
             return expanded
         return (repo_root / expanded).resolve()
 
-    # Installed one-click mode should default to user-writable config.
-    if bool(getattr(sys, "frozen", False)):
-        state_raw = _normalize_string(os.environ.get("VOICE_AGENT_STATE_DIR", ""))
-        if state_raw:
-            state_dir = Path(os.path.expandvars(state_raw)).expanduser()
-        else:
-            local_app_data = _normalize_string(os.environ.get("LOCALAPPDATA", ""))
-            if local_app_data:
-                state_dir = Path(local_app_data) / "VoiceAgent"
-            else:
-                state_dir = Path.home() / "AppData" / "Local" / "VoiceAgent"
-        return state_dir / "local_services.user.json"
-
     return repo_root / "scripts" / "local_services.user.json"
 
 
@@ -306,33 +294,6 @@ def _load_launcher_config(repo_root: Path) -> Tuple[Path, Path, Dict[str, object
             _config_get_string_list(merged, "intent", "exit_keywords")
         )
     return user_config_path, default_config_path, merged
-
-
-def _service_runtime_roots(repo_root: Path) -> List[Path]:
-    roots = [
-        repo_root / "runtime" / "services",
-        repo_root / "dist" / "services",
-        repo_root / "runtime",
-        repo_root / "dist",
-        repo_root / "services",
-        repo_root / "bin",
-    ]
-    return roots
-
-
-def _find_packaged_service_executable(repo_root: Path, stem: str) -> str:
-    candidates = [stem, stem.replace("_", "-"), stem.replace("-", "_")]
-    extensions = [".exe"] if os.name == "nt" else [""]
-    for root in _service_runtime_roots(repo_root):
-        for candidate in candidates:
-            for ext in extensions:
-                path = root / f"{candidate}{ext}"
-                if path.exists():
-                    return str(path)
-                nested = root / candidate / f"{candidate}{ext}"
-                if nested.exists():
-                    return str(nested)
-    return ""
 
 
 def _resolve_executable_override(value: str, *, base_dir: Path) -> str:
@@ -714,6 +675,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
     python_cfg = _json_object(launcher_config.get("python"))
     paths_cfg = _json_object(launcher_config.get("paths"))
     openai_cfg = _json_object(launcher_config.get("openai"))
+    gemini_cfg = _json_object(launcher_config.get("gemini"))
     intent_cfg = _json_object(launcher_config.get("intent"))
     raw_env_cfg = _json_object(launcher_config.get("env"))
     env_cfg: Dict[str, str] = {}
@@ -730,13 +692,8 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         launcher_config, "tts_python"
     )
 
-    running_frozen = bool(getattr(sys, "frozen", False))
     bootstrap_python = _pick_bootstrap_python(sys.executable)
     auto_bootstrap_venv = _env_bool("VOICE_AGENT_AUTO_BOOTSTRAP_VENV", True)
-    if running_frozen:
-        # In packaged mode we prefer bundled service executables and should not
-        # try to create venvs from a frozen launcher executable.
-        auto_bootstrap_venv = False
     if auto_bootstrap_venv and not asr_override:
         asr_ok = _ensure_python_venv(
             venv_dir=service_dir / ".venv_asr",
@@ -779,7 +736,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         config_override=asr_override,
         config_base_dir=repo_root,
         env_var="VOICE_AGENT_ASR_PYTHON",
-        fallback="python" if running_frozen else bootstrap_python,
+        fallback=bootstrap_python,
     )
     tts_python = _resolve_python_executable(
         preferred_paths=[
@@ -839,6 +796,9 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
     openai_transcribe_prompt = _config_get_string(
         openai_cfg, "transcribe_prompt"
     ) or _config_get_string(launcher_config, "openai_transcribe_prompt")
+    gemini_api_key = _config_get_string(gemini_cfg, "api_key") or _config_get_string(
+        launcher_config, "gemini_api_key"
+    )
     intent_launch_triggers = _config_get_string_list(
         intent_cfg, "launch_triggers"
     ) or _config_get_string_list(launcher_config, "launch_triggers")
@@ -860,110 +820,37 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
     telemetry_main = _quote_command_token(str(script_dir / "telemetry_service" / "main.py"))
     launcher_main = _quote_command_token(str(script_dir / "game_launcher" / "main.py"))
 
-    # In source/dev mode we should default to Python scripts so local edits take
-    # effect immediately. Packaged services are used by default only when frozen.
-    use_packaged_services = running_frozen or _env_bool("VOICE_AGENT_USE_PACKAGED_SERVICES", False)
-    if use_packaged_services:
-        voice_exe = _find_packaged_service_executable(repo_root, "voice_service")
-        piper_exe = _find_packaged_service_executable(repo_root, "piper_http")
-        kokoro_exe = _find_packaged_service_executable(repo_root, "kokoro_tts_http")
-        desktop_runtime_exe = _find_packaged_service_executable(repo_root, "desktop_runtime")
-        intent_exe = _find_packaged_service_executable(repo_root, "intent_service")
-        dialog_exe = _find_packaged_service_executable(repo_root, "dialog_service")
-        telemetry_exe = _find_packaged_service_executable(repo_root, "telemetry_service")
-        launcher_exe = _find_packaged_service_executable(repo_root, "game_launcher")
-    else:
-        voice_exe = ""
-        piper_exe = ""
-        kokoro_exe = ""
-        desktop_runtime_exe = ""
-        intent_exe = ""
-        dialog_exe = ""
-        telemetry_exe = ""
-        launcher_exe = ""
-
     source_service_available = service_dir.exists()
 
-    default_voice_cmd = (
-        _quote_command_token(voice_exe)
-        if voice_exe
-        else f"{asr_python_cmd} -m uvicorn main:app --host 0.0.0.0 --port 8000"
-    )
-    default_voice_dir = str(Path(voice_exe).resolve().parent) if voice_exe else str(service_dir)
-    default_piper_http_cmd = (
-        _quote_command_token(piper_exe)
-        if piper_exe
-        else f"{tts_python_cmd} -m uvicorn piper_http:app --host 0.0.0.0 --port 5005"
-    )
-    default_piper_http_dir = str(Path(piper_exe).resolve().parent) if piper_exe else str(service_dir)
-    if kokoro_exe:
-        default_kokoro_http_cmd = _quote_command_token(kokoro_exe)
-        default_kokoro_http_dir = str(Path(kokoro_exe).resolve().parent)
-    elif source_service_available:
+    default_voice_cmd = f"{asr_python_cmd} -m uvicorn main:app --host 0.0.0.0 --port 8000"
+    default_voice_dir = str(service_dir)
+    default_piper_http_cmd = f"{tts_python_cmd} -m uvicorn piper_http:app --host 0.0.0.0 --port 5005"
+    default_piper_http_dir = str(service_dir)
+    if source_service_available:
         default_kokoro_http_cmd = f"{tts_python_cmd} -m uvicorn kokoro_tts_http:app --host 0.0.0.0 --port 5007"
         default_kokoro_http_dir = str(service_dir)
     else:
         default_kokoro_http_cmd = ""
         default_kokoro_http_dir = str(repo_root)
-    default_desktop_runtime_cmd = (
-        _quote_command_token(desktop_runtime_exe)
-        if desktop_runtime_exe
-        else f"{asr_python_cmd} -m uvicorn desktop_runtime:app --host 0.0.0.0 --port 8787"
-    )
-    default_desktop_runtime_dir = (
-        str(Path(desktop_runtime_exe).resolve().parent)
-        if desktop_runtime_exe
-        else str(service_dir)
-    )
-    default_telemetry_cmd = (
-        _quote_command_token(telemetry_exe)
-        if telemetry_exe
-        else f"{tts_python_cmd} {telemetry_main}"
-    )
-    default_telemetry_dir = (
-        str(Path(telemetry_exe).resolve().parent)
-        if telemetry_exe
-        else str(script_dir / "telemetry_service")
-    )
-    default_launcher_cmd = (
-        _quote_command_token(launcher_exe)
-        if launcher_exe
-        else f"{asr_python_cmd} {launcher_main}"
-    )
-    default_launcher_dir = (
-        str(Path(launcher_exe).resolve().parent)
-        if launcher_exe
-        else str(script_dir / "game_launcher")
-    )
+    default_desktop_runtime_cmd = f"{asr_python_cmd} -m uvicorn desktop_runtime:app --host 0.0.0.0 --port 8787"
+    default_desktop_runtime_dir = str(service_dir)
+    default_telemetry_cmd = f"{tts_python_cmd} {telemetry_main}"
+    default_telemetry_dir = str(script_dir / "telemetry_service")
+    default_launcher_cmd = f"{asr_python_cmd} {launcher_main}"
+    default_launcher_dir = str(script_dir / "game_launcher")
 
     default_intent_cmd = (
-        _quote_command_token(intent_exe)
-        if intent_exe
-        else (
-            _quote_command_token(asr_python)
-            + " "
-            + _quote_command_token(str(script_dir / "intent_service" / "main.py"))
-        )
+        _quote_command_token(asr_python)
+        + " "
+        + _quote_command_token(str(script_dir / "intent_service" / "main.py"))
     )
-    default_intent_dir = (
-        str(Path(intent_exe).resolve().parent)
-        if intent_exe
-        else str(script_dir / "intent_service")
-    )
+    default_intent_dir = str(script_dir / "intent_service")
     default_dialog_cmd = (
-        _quote_command_token(dialog_exe)
-        if dialog_exe
-        else (
-            _quote_command_token(asr_python)
-            + " "
-            + _quote_command_token(str(script_dir / "dialog_service" / "main.py"))
-        )
+        _quote_command_token(asr_python)
+        + " "
+        + _quote_command_token(str(script_dir / "dialog_service" / "main.py"))
     )
-    default_dialog_dir = (
-        str(Path(dialog_exe).resolve().parent)
-        if dialog_exe
-        else str(script_dir / "dialog_service")
-    )
+    default_dialog_dir = str(script_dir / "dialog_service")
 
     default_hub_cmd = _normalize_string(env_cfg.get("VOICE_AGENT_BROKER_CMD")) or _resolve_default_hub_command(
         repo_root,
@@ -985,6 +872,7 @@ def _build_defaults(repo_root: Path) -> LauncherDefaults:
         openai_base_url=openai_base_url,
         openai_transcribe_model=openai_transcribe_model,
         openai_transcribe_prompt=openai_transcribe_prompt,
+        gemini_api_key=gemini_api_key,
         intent_launch_triggers=intent_launch_triggers,
         intent_exit_keywords=intent_exit_keywords,
         intent_use_llm_classifier=intent_use_llm_classifier,
@@ -1295,6 +1183,8 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
         env["OPENAI_TRANSCRIBE_MODEL"] = defaults.openai_transcribe_model
     if defaults.openai_transcribe_prompt:
         env["OPENAI_TRANSCRIBE_PROMPT"] = defaults.openai_transcribe_prompt
+    if defaults.gemini_api_key:
+        env["GEMINI_API_KEY"] = defaults.gemini_api_key
     if defaults.intent_launch_triggers:
         env["INTENT_LAUNCH_TRIGGERS"] = json.dumps(defaults.intent_launch_triggers, ensure_ascii=False)
     if defaults.intent_exit_keywords:
@@ -1369,10 +1259,9 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
     env.setdefault("OPENAI_RESPONSE_MODEL", "gpt-4o-mini")
     env.setdefault("DOC_RAG_ENABLE", "1")
     env.setdefault("DOC_RAG_ROOT", str(defaults.repo_root / "docs" / "rag" / "bioadaptive_lab"))
-    env.setdefault(
-        "DOC_RAG_EMBEDDING_MODEL_DIR",
-        str(defaults.repo_root / "models" / "doc_rag" / "Qdrant__bge-small-en-v1.5-onnx-Q"),
-    )
+    env.setdefault("DOC_RAG_EMBEDDING_REPO_ID", "Qdrant/bge-small-en-v1.5-onnx-Q")
+    env.setdefault("DOC_RAG_EMBEDDING_CACHE_DIR", str(defaults.repo_root / "models" / "doc_rag"))
+    env.setdefault("DOC_RAG_EMBEDDING_AUTO_DOWNLOAD", "1")
     if explicit_transcribe_mode:
         env["TRANSCRIBE_MODE"] = explicit_transcribe_mode
     else:
@@ -1740,11 +1629,6 @@ def _run_supervisor(handles: List[ProcessHandle], env: Dict[str, str], *, no_wai
 
 
 def _resolve_repo_root() -> Path:
-    if bool(getattr(sys, "frozen", False)):
-        exe_dir = Path(sys.executable).resolve().parent
-        if exe_dir.name.lower() == "services" and exe_dir.parent.name.lower() == "runtime":
-            return exe_dir.parent.parent
-        return exe_dir
     return Path(__file__).resolve().parents[1]
 
 

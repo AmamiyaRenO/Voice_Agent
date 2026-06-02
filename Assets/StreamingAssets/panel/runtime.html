@@ -33,6 +33,14 @@ summary{cursor:pointer;font-size:.9rem;opacity:.92;}
 <div id="configPath"></div>
 <div class="grid">
 <div class="field">
+  <label>Speech Recognition Provider</label>
+  <select id="recognitionProvider">
+    <option value="live-captions">Windows Captions</option>
+    <option value="api">OpenAI API</option>
+    <option value="gemini-live">Google API</option>
+  </select>
+</div>
+<div class="field">
   <label>Conversation Pipeline</label>
   <select id="conversationPipelineMode">
     <option value="direct_unified">Direct Unified (Recommended)</option>
@@ -46,36 +54,32 @@ summary{cursor:pointer;font-size:.9rem;opacity:.92;}
     <option value="cloud">Cloud Assisted</option>
   </select>
 </div>
-<div class="field">
+<div class="field" hidden>
   <label>Backend Local ASR</label>
   <select id="localAsrMode">
-    <option value="moonshine-medium">moonshine-medium</option>
-    <option value="whisper-large-v3">whisper-large-v3</option>
     <option value="api">api</option>
   </select>
 </div>
-<div class="field">
+<div class="field" hidden>
   <label>Backend Cloud ASR</label>
   <select id="cloudAsrMode">
     <option value="api">api</option>
-    <option value="moonshine-medium">moonshine-medium</option>
-    <option value="whisper-large-v3">whisper-large-v3</option>
   </select>
 </div>
-<div class="field">
+<div class="field" hidden>
   <label>Desktop Local Streaming ASR</label>
   <select id="localStreamingAsrMode">
-    <option value="moonshine-medium">moonshine-medium</option>
-    <option value="moonshine-small">moonshine-small</option>
     <option value="live-captions">live-captions</option>
+    <option value="api">api</option>
+    <option value="gemini-live">gemini-live</option>
   </select>
 </div>
-<div class="field">
+<div class="field" hidden>
   <label>Desktop Cloud Streaming ASR</label>
   <select id="cloudStreamingAsrMode">
-    <option value="moonshine-medium">moonshine-medium</option>
-    <option value="moonshine-small">moonshine-small</option>
     <option value="live-captions">live-captions</option>
+    <option value="api">api</option>
+    <option value="gemini-live">gemini-live</option>
   </select>
 </div>
 <div class="field">
@@ -100,7 +104,6 @@ summary{cursor:pointer;font-size:.9rem;opacity:.92;}
 <div class="field"><label>Launch Triggers (comma separated)</label><input id="launchTriggers" placeholder="open, start, launch, play, begin, load"></div>
 <div class="field"><label>Exit Keywords (comma separated)</label><input id="exitKeywords" placeholder="back home, go home, quit, exit, stop, close game"></div>
 <div class="field"><label>LLM Intent Classifier</label><div class="toggle"><input id="llmIntentClassifier" type="checkbox"><span>Use LLM fallback for ambiguous command intent</span></div></div>
-<div class="field"><label>Moonshine Intent Recognizer</label><div class="toggle"><input id="moonshineIntentRecognizer" type="checkbox"><span>Use Moonshine embedding matcher for game-name intent mapping</span></div></div>
 </div>
 <details>
   <summary>Advanced (optional): Manifest paths</summary>
@@ -122,6 +125,7 @@ const intentManifestEl = document.getElementById('intentManifest');
 const gameManifestEl = document.getElementById('gameManifest');
 const pipelineModeEl = document.getElementById('conversationPipelineMode');
 const profileEl = document.getElementById('conversationProfile');
+const recognitionProviderEl = document.getElementById('recognitionProvider');
 const localAsrModeEl = document.getElementById('localAsrMode');
 const cloudAsrModeEl = document.getElementById('cloudAsrMode');
 const localStreamingAsrModeEl = document.getElementById('localStreamingAsrMode');
@@ -137,12 +141,55 @@ const ollamaModelEl = document.getElementById('ollamaModel');
 const launchTriggersEl = document.getElementById('launchTriggers');
 const exitKeywordsEl = document.getElementById('exitKeywords');
 const llmIntentClassifierEl = document.getElementById('llmIntentClassifier');
-const moonshineIntentRecognizerEl = document.getElementById('moonshineIntentRecognizer');
 function setText(el, v){ if(el){ el.value = String(v || ''); } }
 function getText(el){ return el ? String(el.value || '').trim() : ''; }
 function setChecked(el, v){ if(el){ el.checked = !!v; } }
 function getChecked(el){ return !!(el && el.checked); }
 function setSelect(el, v){ if(el){ el.value = String(v || ''); } }
+function recognitionProviderFromConfig(data){
+  const localStreaming = String(data.local_streaming_asr_mode || '').trim();
+  const cloudStreaming = String(data.cloud_streaming_asr_mode || '').trim();
+  const provider = String(data.cloud_response_provider || '').trim();
+  if(localStreaming === 'gemini-live' || cloudStreaming === 'gemini-live' || provider === 'gemini'){
+    return 'gemini-live';
+  }
+  if(localStreaming === 'api' || cloudStreaming === 'api'){
+    return 'api';
+  }
+  if(localStreaming === 'live-captions' || cloudStreaming === 'live-captions'){
+    return 'live-captions';
+  }
+  if(data.local_asr_mode === 'api' || data.cloud_asr_mode === 'api'){
+    return 'api';
+  }
+  return 'live-captions';
+}
+function recognitionProviderPayload(provider){
+  if(provider === 'gemini-live'){
+    return {
+      conversation_profile: 'cloud',
+      cloud_response_provider: 'gemini',
+      local_asr_mode: 'api',
+      cloud_asr_mode: 'api',
+      local_streaming_asr_mode: 'gemini-live',
+      cloud_streaming_asr_mode: 'gemini-live'
+    };
+  }
+  if(provider === 'api'){
+    return {
+      conversation_profile: 'cloud',
+      cloud_response_provider: 'openai',
+      local_asr_mode: 'api',
+      cloud_asr_mode: 'api',
+      local_streaming_asr_mode: 'api',
+      cloud_streaming_asr_mode: 'api'
+    };
+  }
+  return {
+    local_streaming_asr_mode: 'live-captions',
+    cloud_streaming_asr_mode: 'live-captions'
+  };
+}
 async function reloadConfig(){
   statusEl.textContent = 'Loading...';
   try {
@@ -151,12 +198,13 @@ async function reloadConfig(){
     if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status)); }
     setText(intentManifestEl, data.intent_manifest_path);
     setText(gameManifestEl, data.game_manifest_path);
+    setSelect(recognitionProviderEl, recognitionProviderFromConfig(data));
     setSelect(pipelineModeEl, data.conversation_pipeline_mode || 'direct_unified');
     setSelect(profileEl, data.conversation_profile || 'local');
-    setSelect(localAsrModeEl, data.local_asr_mode || 'moonshine-medium');
+    setSelect(localAsrModeEl, data.local_asr_mode || 'api');
     setSelect(cloudAsrModeEl, data.cloud_asr_mode || 'api');
-    setSelect(localStreamingAsrModeEl, data.local_streaming_asr_mode || 'moonshine-medium');
-    setSelect(cloudStreamingAsrModeEl, data.cloud_streaming_asr_mode || 'moonshine-medium');
+    setSelect(localStreamingAsrModeEl, data.local_streaming_asr_mode || 'live-captions');
+    setSelect(cloudStreamingAsrModeEl, data.cloud_streaming_asr_mode || 'live-captions');
     setSelect(asrHotwordStrategyEl, data.asr_hotword_strategy || 'commands_games_memory');
     setText(asrStablePartialRepeatsEl, data.asr_stable_partial_repeats || '2');
     setText(ollamaModelEl, data.ollama_model);
@@ -168,7 +216,6 @@ async function reloadConfig(){
     setText(launchTriggersEl, data.launch_triggers);
     setText(exitKeywordsEl, data.exit_keywords);
     setChecked(llmIntentClassifierEl, !!data.use_llm_intent_classifier);
-    setChecked(moonshineIntentRecognizerEl, !!data.use_moonshine_intent_recognizer);
     if(configPathEl){ configPathEl.textContent = 'Config: ' + String(data.path || ''); }
     statusEl.textContent = data.message || 'Loaded.';
   } catch(err){
@@ -177,15 +224,11 @@ async function reloadConfig(){
 }
 async function saveConfig(){
   statusEl.textContent = 'Saving...';
-  const payload = {
+  const payload = Object.assign({
     intent_manifest_path: getText(intentManifestEl),
     game_manifest_path: getText(gameManifestEl),
     conversation_pipeline_mode: getText(pipelineModeEl),
     conversation_profile: getText(profileEl),
-    local_asr_mode: getText(localAsrModeEl),
-    cloud_asr_mode: getText(cloudAsrModeEl),
-    local_streaming_asr_mode: getText(localStreamingAsrModeEl),
-    cloud_streaming_asr_mode: getText(cloudStreamingAsrModeEl),
     asr_hotword_strategy: getText(asrHotwordStrategyEl),
     asr_stable_partial_repeats: getText(asrStablePartialRepeatsEl),
     ollama_model: getText(ollamaModelEl),
@@ -196,9 +239,8 @@ async function saveConfig(){
     openai_transcribe_prompt: getText(openaiPromptEl),
     launch_triggers: getText(launchTriggersEl),
     exit_keywords: getText(exitKeywordsEl),
-    use_llm_intent_classifier: getChecked(llmIntentClassifierEl),
-    use_moonshine_intent_recognizer: getChecked(moonshineIntentRecognizerEl)
-  };
+    use_llm_intent_classifier: getChecked(llmIntentClassifierEl)
+  }, recognitionProviderPayload(getText(recognitionProviderEl)));
   try {
     const resp = await fetch('/api/runtime/config', {
       method:'POST',

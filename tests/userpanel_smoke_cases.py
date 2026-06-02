@@ -19,6 +19,7 @@ class PanelOp:
 USERPANEL_SMOKE_CASES: Dict[str, List[PanelOp]] = {
     "/": [PanelOp(method="GET", expected_statuses=(200,))],
     "/index.html": [PanelOp(method="GET", expected_statuses=(200,))],
+    "/panel.html": [PanelOp(method="GET", expected_statuses=(200,))],
     "/games": [PanelOp(method="GET", expected_statuses=(200,))],
     "/games.html": [PanelOp(method="GET", expected_statuses=(200,))],
     "/runtime": [PanelOp(method="GET", expected_statuses=(200,))],
