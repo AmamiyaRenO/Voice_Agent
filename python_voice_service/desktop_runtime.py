@@ -1570,6 +1570,7 @@ async def _build_asr_status_payload() -> Dict[str, Any]:
         "command_asr_provider": str(getattr(status, "command_asr_provider", "") or ""),
         "command_asr_status": str(getattr(status, "command_asr_status", "") or ""),
         "gemini_live_command_tools_enabled": bool(getattr(status, "gemini_live_command_tools_enabled", False)),
+        "gemini_live_local_knowledge_enabled": bool(getattr(status, "gemini_live_local_knowledge_enabled", False)),
         "current_partial": str(status.current_partial or ""),
         "stable_partial": str(status.stable_partial or ""),
         "final_transcript": str(getattr(status, "final_transcript", "") or ""),
@@ -1656,6 +1657,7 @@ def _build_asr_event_payload(*, event_type: str) -> Dict[str, Any]:
         "command_asr_provider": str(getattr(status, "command_asr_provider", "") or ""),
         "command_asr_status": str(getattr(status, "command_asr_status", "") or ""),
         "gemini_live_command_tools_enabled": bool(getattr(status, "gemini_live_command_tools_enabled", False)),
+        "gemini_live_local_knowledge_enabled": bool(getattr(status, "gemini_live_local_knowledge_enabled", False)),
     }
 
 

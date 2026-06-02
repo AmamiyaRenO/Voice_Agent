@@ -1266,6 +1266,161 @@ def test_desktop_audio_agent_gemini_live_declares_command_tools():
     assert "cornhole" in agent._gemini_live_system_instruction().lower()
 
 
+def test_desktop_audio_agent_gemini_live_declares_local_knowledge_tool():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_local_knowledge_declare_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent.gemini_live_command_tools_enabled = False
+    agent.gemini_live_local_knowledge_enabled = True
+
+    tools = agent._gemini_live_command_tools()
+
+    declarations = tools[0].function_declarations
+    assert declarations[0].name == "search_local_knowledge"
+    assert "local knowledge" in agent._gemini_live_system_instruction().lower()
+
+
+def test_desktop_audio_agent_gemini_live_local_knowledge_tool_calls_endpoint():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_local_knowledge_call_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {
+                "matched": True,
+                "spoken_text": "Bean Bag Toss is the cornhole-style throwing game.",
+                "doc_confidence": 0.82,
+                "stage1_result": "doc_candidate",
+                "stage2_result": "doc_answer",
+                "doc_snippets": ["Bean Bag Toss uses bean bags and targets."],
+                "doc_source_ids": ["games.md#1"],
+            }
+
+    class FakeClient:
+        async def post(self, url, json=None, timeout=None):
+            calls.append((url, json, timeout))
+            return FakeResponse()
+
+    agent.asr_base_url = "http://127.0.0.1:8000"
+    agent._client = FakeClient()
+    agent._active_user_fallback = lambda: ("user_001", "active_fallback")
+    agent.log_store = SimpleNamespace(add=lambda *_args, **_kwargs: None)
+
+    result = asyncio.run(
+        agent._execute_gemini_live_function_call(
+            name="search_local_knowledge",
+            args={"query": "What is Bean Bag Toss?", "heard_text": "what is bean bag toss"},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["matched"] is True
+    assert result["spoken_text"] == "Bean Bag Toss is the cornhole-style throwing game."
+    assert result["user_id"] == "user_001"
+    assert calls[0][0].endswith("/conversation/local-knowledge/query")
+    assert calls[0][1]["text"] == "What is Bean Bag Toss?"
+    assert calls[0][1]["user_id"] == "user_001"
+
+
+def test_local_knowledge_query_endpoint_returns_probe_payload(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    api_module = _load_module(
+        "api_routes_local_knowledge_endpoint_module",
+        PYTHON_VOICE_DIR / "api_routes.py",
+    )
+    service_models = _load_module(
+        "service_models_local_knowledge_endpoint_module",
+        PYTHON_VOICE_DIR / "service_models.py",
+    )
+
+    class FakeProbe:
+        stage1_result = "doc_candidate"
+        stage2_result = "doc_answer"
+        fallback_reason = ""
+        doc_confidence = 0.82
+        response_text = "Bean Bag Toss is a cornhole-style tossing game."
+        payload = {
+            "type": "doc_answer",
+            "doc_snippets": ["Bean Bag Toss uses bean bags and a target board."],
+            "doc_source_ids": ["games.md#bean-bag-toss"],
+        }
+
+        @staticmethod
+        def telemetry():
+            return {"stage1_result": "doc_candidate"}
+
+    class FakeRag:
+        ready = True
+        error = ""
+
+        @staticmethod
+        def probe(text, **_kwargs):
+            assert text == "What is Bean Bag Toss?"
+            return FakeProbe()
+
+    class FakeSessionStore:
+        @staticmethod
+        def capability_state(_user_id):
+            return None
+
+        @staticmethod
+        def is_game_suppressed(_user_id):
+            return False
+
+        @staticmethod
+        def game_state(_user_id):
+            return None
+
+    class FakeRuntime:
+        local_docs_rag = FakeRag()
+        session_store = FakeSessionStore()
+
+        @staticmethod
+        def ensure_ready():
+            return None
+
+        @staticmethod
+        def _profile_snapshot(user_id=None):
+            return {"user_id": user_id or ""}
+
+    async def fake_get_runtime():
+        return FakeRuntime()
+
+    monkeypatch.setattr(api_module, "_get_unified_conversation_runtime", fake_get_runtime)
+    request = service_models.LocalKnowledgeQueryRequest(
+        text="What is Bean Bag Toss?",
+        user_id="user_001",
+        source="test",
+        render=False,
+    )
+
+    response = asyncio.run(api_module.conversation_local_knowledge_query(request))
+
+    assert response.status == "ok"
+    assert response.matched is True
+    assert response.spoken_text == "Bean Bag Toss is a cornhole-style tossing game."
+    assert response.doc_snippets == ["Bean Bag Toss uses bean bags and a target board."]
+    assert response.doc_source_ids == ["games.md#bean-bag-toss"]
+
+
 def test_desktop_audio_agent_gemini_live_tool_launch_replaces_bad_transcript():
     if str(PYTHON_VOICE_DIR) not in sys.path:
         sys.path.insert(0, str(PYTHON_VOICE_DIR))

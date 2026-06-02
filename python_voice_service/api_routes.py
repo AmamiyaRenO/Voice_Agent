@@ -52,6 +52,8 @@ try:
         ConversationConfigRequest,
         ConversationConfigResponse,
         ConversationTurnRequest,
+        LocalKnowledgeQueryRequest,
+        LocalKnowledgeQueryResponse,
         OllamaError,
         OpenAIResponseError,
         RespondConfigRequest,
@@ -67,6 +69,8 @@ except Exception:
         ConversationConfigRequest,
         ConversationConfigResponse,
         ConversationTurnRequest,
+        LocalKnowledgeQueryRequest,
+        LocalKnowledgeQueryResponse,
         OllamaError,
         OpenAIResponseError,
         RespondConfigRequest,
@@ -6232,6 +6236,78 @@ async def _stream_unified_conversation_events(
             "user_id": user_id or "",
             **decision_final_meta,
         }
+    )
+
+
+@app.post("/conversation/local-knowledge/query", response_model=LocalKnowledgeQueryResponse)
+async def conversation_local_knowledge_query(payload: LocalKnowledgeQueryRequest) -> LocalKnowledgeQueryResponse:
+    runtime = await _get_unified_conversation_runtime()
+    try:
+        runtime.ensure_ready()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    local_docs_rag = getattr(runtime, "local_docs_rag", None)
+    if local_docs_rag is None or not getattr(local_docs_rag, "ready", False):
+        detail = str(getattr(local_docs_rag, "error", "") or "local docs rag is not ready").strip()
+        raise HTTPException(status_code=503, detail=detail)
+
+    text = " ".join(str(payload.text or "").strip().split())[:240]
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    user_id = str(payload.user_id or "").strip() or None
+    focus_state = runtime.session_store.capability_state(user_id)
+    session_state = None if runtime.session_store.is_game_suppressed(user_id) else runtime.session_store.game_state(user_id)
+    try:
+        doc_probe = local_docs_rag.probe(
+            text,
+            focus_state=focus_state,
+            session_state=session_state,
+            user_profile=runtime._profile_snapshot(user_id=user_id),
+        )
+    except Exception as exc:
+        logger.warning("local knowledge probe failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"local knowledge probe failed: {exc}") from exc
+
+    telemetry = doc_probe.telemetry()
+    structured_payload = dict(getattr(doc_probe, "payload", {}) or {})
+    spoken_text = _normalize_final_reply_text(str(getattr(doc_probe, "response_text", "") or ""))
+    if bool(payload.render) and structured_payload:
+        try:
+            spoken_text = await runtime._render_structured_reply(user_text=text, payload=structured_payload)
+        except Exception as exc:
+            logger.warning("local knowledge render failed: %s", exc)
+            if not spoken_text:
+                spoken_text = _normalize_final_reply_text(str(structured_payload.get("text") or ""))
+
+    snippets = [
+        str(item).strip()
+        for item in structured_payload.get("doc_snippets", []) or []
+        if str(item).strip()
+    ]
+    source_ids = [
+        str(item).strip()
+        for item in structured_payload.get("doc_source_ids", []) or []
+        if str(item).strip()
+    ]
+    matched = (
+        str(getattr(doc_probe, "stage1_result", "") or "").strip() == "doc_candidate"
+        and str(getattr(doc_probe, "stage2_result", "") or "").strip() in {"doc_answer", "doc_clarify"}
+    )
+    return LocalKnowledgeQueryResponse(
+        status="ok",
+        matched=matched,
+        text=text,
+        spoken_text=spoken_text,
+        stage1_result=str(getattr(doc_probe, "stage1_result", "") or "").strip(),
+        stage2_result=str(getattr(doc_probe, "stage2_result", "") or "").strip(),
+        fallback_reason=str(getattr(doc_probe, "fallback_reason", "") or "").strip(),
+        doc_confidence=round(float(getattr(doc_probe, "doc_confidence", 0.0) or 0.0), 4),
+        structured_payload=structured_payload,
+        telemetry=telemetry if isinstance(telemetry, dict) else {},
+        doc_snippets=snippets[:3],
+        doc_source_ids=source_ids[:5],
     )
 
 

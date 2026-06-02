@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -170,6 +170,28 @@ class ConversationTurnRequest(BaseModel):
     interrupted_tts_corr_id: Optional[str] = Field(default=None)
     transcript_source: Optional[str] = Field(default=None)
     transcript_confidence: Optional[str] = Field(default=None)
+
+
+class LocalKnowledgeQueryRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="User question to search against local project/game documents.")
+    user_id: Optional[str] = Field(default=None, description="Optional stable user identifier for local memory/session context.")
+    source: Optional[str] = Field(default=None, description="Source label for diagnostics.")
+    render: bool = Field(default=True, description="Render a concise spoken answer from the structured local evidence.")
+
+
+class LocalKnowledgeQueryResponse(BaseModel):
+    status: str = "ok"
+    matched: bool = False
+    text: str = ""
+    spoken_text: str = ""
+    stage1_result: str = ""
+    stage2_result: str = ""
+    fallback_reason: str = ""
+    doc_confidence: float = 0.0
+    structured_payload: Dict[str, Any] = Field(default_factory=dict)
+    telemetry: Dict[str, Any] = Field(default_factory=dict)
+    doc_snippets: List[str] = Field(default_factory=list)
+    doc_source_ids: List[str] = Field(default_factory=list)
 
 
 class OllamaError(RuntimeError):

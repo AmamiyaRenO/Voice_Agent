@@ -221,6 +221,12 @@ DEFAULT_GEMINI_LIVE_COMMAND_TOOLS_ENABLED = str(
 DEFAULT_GEMINI_LIVE_TOOL_TRANSCRIPT_SUPPRESS_SECONDS = float(
     os.getenv("VOICE_GEMINI_LIVE_TOOL_TRANSCRIPT_SUPPRESS_SECONDS", "8.0") or "8.0"
 )
+DEFAULT_GEMINI_LIVE_LOCAL_KNOWLEDGE_ENABLED = str(
+    os.getenv("VOICE_GEMINI_LIVE_LOCAL_KNOWLEDGE_ENABLED", "1") or "1"
+).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+DEFAULT_GEMINI_LIVE_LOCAL_KNOWLEDGE_TIMEOUT_SECONDS = float(
+    os.getenv("VOICE_GEMINI_LIVE_LOCAL_KNOWLEDGE_TIMEOUT_SECONDS", "8.0") or "8.0"
+)
 DEFAULT_SPEAKER_ID_PREROLL_MS = float(os.getenv("VOICE_SPEAKER_ID_PREROLL_MS", "180") or "180")
 DEFAULT_SPEAKER_ID_SEGMENT_MAX_AGE_SECONDS = float(
     os.getenv("VOICE_SPEAKER_ID_SEGMENT_MAX_AGE_SECONDS", "8.0") or "8.0"
@@ -1541,6 +1547,7 @@ class AudioAgentStatus:
     command_asr_provider: str = ""
     command_asr_status: str = ""
     gemini_live_command_tools_enabled: bool = False
+    gemini_live_local_knowledge_enabled: bool = False
     current_partial: str = ""
     stable_partial: str = ""
     final_transcript: str = ""
@@ -1624,6 +1631,10 @@ class DesktopAudioAgent:
         self.gemini_live_command_tools_enabled = _env_bool(
             "VOICE_GEMINI_LIVE_COMMAND_TOOLS_ENABLED",
             DEFAULT_GEMINI_LIVE_COMMAND_TOOLS_ENABLED,
+        )
+        self.gemini_live_local_knowledge_enabled = _env_bool(
+            "VOICE_GEMINI_LIVE_LOCAL_KNOWLEDGE_ENABLED",
+            DEFAULT_GEMINI_LIVE_LOCAL_KNOWLEDGE_ENABLED,
         )
         self.command_asr_enabled = _env_bool("VOICE_COMMAND_ASR_ENABLED", DEFAULT_COMMAND_ASR_ENABLED)
         self.command_asr_provider = _normalize_command_asr_provider(
@@ -2194,6 +2205,10 @@ class DesktopAudioAgent:
             "VOICE_GEMINI_LIVE_COMMAND_TOOLS_ENABLED",
             bool(self.gemini_live_command_tools_enabled),
         )
+        self.gemini_live_local_knowledge_enabled = _env_bool(
+            "VOICE_GEMINI_LIVE_LOCAL_KNOWLEDGE_ENABLED",
+            bool(self.gemini_live_local_knowledge_enabled),
+        )
         self.command_asr_enabled = _env_bool("VOICE_COMMAND_ASR_ENABLED", bool(self.command_asr_enabled))
         self.command_asr_provider = _normalize_command_asr_provider(
             _env("VOICE_COMMAND_ASR_PROVIDER", self.command_asr_provider or DEFAULT_COMMAND_ASR_PROVIDER)
@@ -2314,62 +2329,105 @@ class DesktopAudioAgent:
 
     def _gemini_live_system_instruction(self) -> str:
         base = DEFAULT_GEMINI_LIVE_SYSTEM_PROMPT
-        if not bool(getattr(self, "gemini_live_command_tools_enabled", False)):
+        command_tools_enabled = bool(getattr(self, "gemini_live_command_tools_enabled", False))
+        local_knowledge_enabled = bool(getattr(self, "gemini_live_local_knowledge_enabled", False))
+        if not command_tools_enabled and not local_knowledge_enabled:
             return base
-        game_names = self._command_game_names()
-        game_list = ", ".join(game_names) if game_names else "the available games"
-        return (
-            f"{base} "
-            "When the user asks to open, start, launch, begin, load, or play a game, call the launch_game tool. "
-            "Do this even if the transcript text looks wrong but the spoken meaning is clear. "
-            "If the user says cornhole, corn hole, corn home, core hole, call home, or similar, use game_name 'Bean Bag Toss'. "
-            "If the user asks to go home, back home, exit, quit, or close the current game, call the go_home tool. "
-            "After a command tool result, say exactly the spoken_ack field once, with no extra confirmation or rephrasing. "
-            f"Available canonical game names: {game_list}."
-        )
+        parts = [base]
+        if local_knowledge_enabled:
+            parts.append(
+                "When the user asks about local project knowledge, Rachel's demo setup, available games, rehab game details, "
+                "local documents, or remembered participant/profile facts, call the search_local_knowledge tool before answering. "
+                "If the tool returns matched=false or an error, say briefly that you could not find that in the local knowledge base. "
+                "When the tool returns spoken_text, use that grounded answer and do not invent extra facts."
+            )
+        if command_tools_enabled:
+            game_names = self._command_game_names()
+            game_list = ", ".join(game_names) if game_names else "the available games"
+            parts.append(
+                "When the user asks to open, start, launch, begin, load, or play a game, call the launch_game tool. "
+                "Do this even if the transcript text looks wrong but the spoken meaning is clear. "
+                "If the user says cornhole, corn hole, corn home, core hole, call home, or similar, use game_name 'Bean Bag Toss'. "
+                "If the user asks to go home, back home, exit, quit, or close the current game, call the go_home tool. "
+                "After a command tool result, say exactly the spoken_ack field once, with no extra confirmation or rephrasing. "
+                f"Available canonical game names: {game_list}."
+            )
+        return " ".join(parts)
 
     def _gemini_live_command_tools(self) -> List[Any]:
-        if not bool(getattr(self, "gemini_live_command_tools_enabled", False)):
+        command_tools_enabled = bool(getattr(self, "gemini_live_command_tools_enabled", False))
+        local_knowledge_enabled = bool(getattr(self, "gemini_live_local_knowledge_enabled", False))
+        if not command_tools_enabled and not local_knowledge_enabled:
             return []
-        game_names = self._command_game_names()
-        game_name_schema: Dict[str, Any] = {
-            "type": "string",
-            "description": "Canonical game name to launch.",
-        }
-        if game_names:
-            game_name_schema["enum"] = game_names
-        launch_declaration = genai_types.FunctionDeclaration(
-            name="launch_game",
-            description=(
-                "Launch a rehabilitation game requested by the user. "
-                "Use this for phrases like open cornhole, play corn hole, start air hockey, or launch Bean Bag Toss."
-            ),
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "game_name": game_name_schema,
-                    "heard_text": {
-                        "type": "string",
-                        "description": "Optional best-effort text for what the user said.",
+        declarations: List[Any] = []
+        if local_knowledge_enabled:
+            declarations.append(
+                genai_types.FunctionDeclaration(
+                    name="search_local_knowledge",
+                    description=(
+                        "Search Rachel's local knowledge base for project, demo, rehabilitation game, local document, "
+                        "or participant/profile facts before answering."
+                    ),
+                    parameters_json_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The user's question rewritten as a concise search query.",
+                            },
+                            "heard_text": {
+                                "type": "string",
+                                "description": "Optional best-effort text for what the user said.",
+                            },
+                        },
+                        "required": ["query"],
                     },
-                },
-                "required": ["game_name"],
-            },
-        )
-        home_declaration = genai_types.FunctionDeclaration(
-            name="go_home",
-            description="Return to the home screen or close the current game when the user asks to go back/home/exit.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "heard_text": {
-                        "type": "string",
-                        "description": "Optional best-effort text for what the user said.",
+                )
+            )
+        if command_tools_enabled:
+            game_names = self._command_game_names()
+            game_name_schema: Dict[str, Any] = {
+                "type": "string",
+                "description": "Canonical game name to launch.",
+            }
+            if game_names:
+                game_name_schema["enum"] = game_names
+            declarations.append(
+                genai_types.FunctionDeclaration(
+                    name="launch_game",
+                    description=(
+                        "Launch a rehabilitation game requested by the user. "
+                        "Use this for phrases like open cornhole, play corn hole, start air hockey, or launch Bean Bag Toss."
+                    ),
+                    parameters_json_schema={
+                        "type": "object",
+                        "properties": {
+                            "game_name": game_name_schema,
+                            "heard_text": {
+                                "type": "string",
+                                "description": "Optional best-effort text for what the user said.",
+                            },
+                        },
+                        "required": ["game_name"],
                     },
-                },
-            },
-        )
-        return [genai_types.Tool(function_declarations=[launch_declaration, home_declaration])]
+                )
+            )
+            declarations.append(
+                genai_types.FunctionDeclaration(
+                    name="go_home",
+                    description="Return to the home screen or close the current game when the user asks to go back/home/exit.",
+                    parameters_json_schema={
+                        "type": "object",
+                        "properties": {
+                            "heard_text": {
+                                "type": "string",
+                                "description": "Optional best-effort text for what the user said.",
+                            },
+                        },
+                    },
+                )
+            )
+        return [genai_types.Tool(function_declarations=declarations)] if declarations else []
 
     async def _run_gemini_live_session_once(self, api_key: str) -> None:
         client = genai.Client(api_key=api_key)
@@ -2478,6 +2536,9 @@ class DesktopAudioAgent:
     async def _execute_gemini_live_function_call(self, *, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         normalized_name = str(name or "").strip().lower()
         heard_text = _collapse_spaces(str(args.get("heard_text") or args.get("text") or ""))
+        if normalized_name == "search_local_knowledge":
+            query = _collapse_spaces(str(args.get("query") or heard_text or ""))
+            return await self._query_gemini_live_local_knowledge(query=query, heard_text=heard_text)
         if normalized_name == "launch_game":
             game_name = _collapse_spaces(str(args.get("game_name") or args.get("game") or ""))
             seed = f"open {game_name or heard_text}".strip()
@@ -2585,6 +2646,63 @@ class DesktopAudioAgent:
             source="gemini_live_tool",
         )
         return {"status": "error", "message": f"Unknown tool: {name}"}
+
+    async def _query_gemini_live_local_knowledge(self, *, query: str, heard_text: str = "") -> Dict[str, Any]:
+        query_text = _collapse_spaces(query or heard_text)
+        if not query_text:
+            return {
+                "status": "error",
+                "matched": False,
+                "message": "Missing local knowledge query.",
+            }
+        user_id, identity_resolution = self._active_user_fallback()
+        payload: Dict[str, Any] = {
+            "text": query_text,
+            "source": "gemini_live_tool",
+            "render": True,
+        }
+        if user_id:
+            payload["user_id"] = user_id
+        try:
+            response = await self._client.post(
+                f"{self.asr_base_url}/conversation/local-knowledge/query",
+                json=payload,
+                timeout=DEFAULT_GEMINI_LIVE_LOCAL_KNOWLEDGE_TIMEOUT_SECONDS,
+            )
+            if response.status_code != 200:
+                message = response.text.strip() or f"HTTP {response.status_code}"
+                raise RuntimeError(message)
+            data = response.json()
+        except Exception as exc:
+            message = f"Local knowledge search failed: {exc}"
+            self.log_store.add("system", message, speaker="system", source="gemini_live_tool")
+            return {
+                "status": "error",
+                "matched": False,
+                "query": query_text,
+                "message": message,
+            }
+
+        spoken_text = _collapse_spaces(str(data.get("spoken_text") or ""))
+        matched = bool(data.get("matched"))
+        result = {
+            "status": "ok",
+            "matched": matched,
+            "query": query_text,
+            "spoken_text": spoken_text,
+            "doc_confidence": data.get("doc_confidence", 0.0),
+            "stage1_result": str(data.get("stage1_result") or ""),
+            "stage2_result": str(data.get("stage2_result") or ""),
+            "fallback_reason": str(data.get("fallback_reason") or ""),
+            "doc_snippets": data.get("doc_snippets") or [],
+            "doc_source_ids": data.get("doc_source_ids") or [],
+        }
+        if user_id:
+            result["user_id"] = user_id
+            result["identity_resolution"] = identity_resolution
+        if not matched and not spoken_text:
+            result["message"] = "No grounded match found in the local knowledge base."
+        return result
 
     async def _handle_gemini_live_server_content(self, server_content: Any) -> None:
         input_transcription = getattr(server_content, "input_transcription", None)
@@ -3318,6 +3436,10 @@ class DesktopAudioAgent:
             command_asr_status=self._command_asr_status,
             gemini_live_command_tools_enabled=bool(
                 self.gemini_live_command_tools_enabled
+                and self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE
+            ),
+            gemini_live_local_knowledge_enabled=bool(
+                self.gemini_live_local_knowledge_enabled
                 and self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE
             ),
             current_partial=self._last_partial_text,
