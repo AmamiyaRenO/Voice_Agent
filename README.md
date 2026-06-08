@@ -404,10 +404,109 @@ Live Pi service model:
 - `face-neutral.service` keeps the display renderer running through `faceScript.py`.
 - `face-agent.service` handles servo and LED dispatch through `face_agent.py`.
 
-Deployment note:
+### Recommended PC/Pi network
 
-- The checked-in Pi env sample is `Firmware/face_agent.env`. It currently points at broker host `10.0.0.1` on port `1884`, while the default local dev launcher in this repo uses `1883`. Align the Pi env/systemd settings with your actual broker topology before deployment.
-- See [`Firmware/README.md`](Firmware/README.md) for the synced source summary and current file inventory.
+For demos using a direct Ethernet cable, use one small static subnet:
+
+| Device | Ethernet IPv4 | Role |
+|---|---|---|
+| Windows PC | `10.0.0.1/24` | Runs Voice Agent services and the MQTT broker |
+| Raspberry Pi | `10.0.0.2/24` | Runs the face, servo, and LED subscribers |
+
+Keep Wi-Fi enabled if either device still needs internet access. Do not configure a gateway on the direct Ethernet link.
+
+On Windows, set the Ethernet adapter IPv4 address to `10.0.0.1` with subnet mask `255.255.255.0`. The equivalent elevated PowerShell command is:
+
+```powershell
+# Replace "Ethernet" with the adapter name shown by Get-NetAdapter.
+New-NetIPAddress -InterfaceAlias "Ethernet" -IPAddress 10.0.0.1 -PrefixLength 24
+
+# Allow Pi access to the MQTT broker. Panel access is optional.
+New-NetFirewallRule -DisplayName "Voice Agent MQTT" -Direction Inbound -Protocol TCP -LocalPort 1883 -RemoteAddress 10.0.0.2 -Action Allow -Profile Any
+New-NetFirewallRule -DisplayName "Voice Agent Panel" -Direction Inbound -Protocol TCP -LocalPort 8787 -RemoteAddress 10.0.0.2 -Action Allow -Profile Any
+```
+
+On a Raspberry Pi OS installation using NetworkManager:
+
+```bash
+nmcli connection show
+
+# Replace "Wired connection 1" with the actual wired connection name.
+sudo nmcli connection modify "Wired connection 1" \
+  ipv4.method manual ipv4.addresses 10.0.0.2/24 \
+  ipv4.gateway "" ipv4.dns "" ipv4.never-default yes
+sudo nmcli connection up "Wired connection 1"
+ip -4 addr show
+```
+
+If the PC and Pi connect through an existing router instead, leave both on DHCP and replace `10.0.0.1` with the PC's reachable LAN address everywhere below.
+
+### Pi deployment and startup
+
+1. Copy the contents of `Firmware/` to `/home/RACHEL/RACHEL/` on the Pi. Copy `Firmware/LCD Output/facialExpressions/` as `/home/RACHEL/RACHEL/facialExpressions/`.
+2. Install the Pi dependencies and create the runtime environment:
+
+   ```bash
+   sudo apt update
+   sudo apt install -y python3-venv python3-pip mosquitto-clients
+   sudo raspi-config nonint do_spi 0
+   sudo usermod -aG gpio,spi,video,input RACHEL
+   cd /home/RACHEL/RACHEL
+   python3 -m venv venv
+   ./venv/bin/pip install paho-mqtt pygame RPi.GPIO adafruit-blinka adafruit-circuitpython-neopixel-spi
+   ```
+
+   Reboot the Pi after changing SPI or group membership.
+
+3. Configure both Pi processes to use the PC broker at `10.0.0.1:1883`. The project launcher uses port `1883` by default:
+
+   ```bash
+   # Hardware subscriber: face_agent.py
+   /home/RACHEL/RACHEL/venv/bin/python /home/RACHEL/RACHEL/face_agent.py \
+     --broker 10.0.0.1 --port 1883 \
+     --venv /home/RACHEL/RACHEL/venv --base /home/RACHEL/RACHEL
+
+   # Face renderer environment used by face-neutral.service
+   export FACE_BROKER=10.0.0.1
+   export FACE_BROKER_PORT=1883
+   ```
+
+4. After direct-run testing succeeds, restart the existing services:
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now face-neutral.service face-agent.service
+   systemctl status face-neutral.service face-agent.service --no-pager
+   journalctl -u face-agent.service -u face-neutral.service -n 100 --no-pager
+   ```
+
+The checked-in `Firmware/face_agent.env` mirrors an older live-Pi configuration using port `1884`. Change it or the service definitions to `1883` before using the default desktop launcher. The PC broker and every Pi subscriber must use the same port.
+
+### Verify PC/Pi communication
+
+Start `.\helper.bat` on the PC first, then check each layer:
+
+```powershell
+# PC: confirm the broker is listening on all interfaces.
+Get-NetAdapter
+Get-NetTCPConnection -LocalPort 1883 -State Listen
+ping 10.0.0.2
+
+# PC: publish through the running desktop runtime and MQTT bridge.
+Invoke-RestMethod -Method Post http://127.0.0.1:8787/api/face `
+  -ContentType "application/json" `
+  -Body '{"mode":"happy","seconds":5}'
+```
+
+The Ethernet adapter must show `Up`. The MQTT listener must show `0.0.0.0`, `::`, or `10.0.0.1`; a listener bound only to `127.0.0.1` / `::1` cannot accept Pi connections. If an old local-only Mosquitto process owns `1883`, stop that confirmed Mosquitto process and restart `.\helper.bat` so it launches the broker with `scripts/mqtt/mosquitto.conf`.
+
+```bash
+# Pi: confirm the PC and broker are reachable.
+ping -c 4 10.0.0.1
+mosquitto_sub -h 10.0.0.1 -p 1883 -t 'robot/pi/#' -v
+```
+
+Successful end-to-end communication means the Pi can connect to `10.0.0.1:1883`, `mosquitto_sub` sees the published command, and the requested face/servo/LED action occurs. See [`Firmware/README.md`](Firmware/README.md) for Pi-side service templates and hardware-specific checks.
 
 ## Python SDK
 
