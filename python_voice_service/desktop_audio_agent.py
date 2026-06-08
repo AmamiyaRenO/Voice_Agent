@@ -309,7 +309,8 @@ RESPONSE_PROVIDER_OPENAI = "openai"
 RESPONSE_PROVIDER_GEMINI = "gemini"
 TTS_BACKEND_PIPER = "piper"
 TTS_BACKEND_KOKORO = "kokoro"
-TTS_BACKENDS = [TTS_BACKEND_PIPER, TTS_BACKEND_KOKORO]
+TTS_BACKEND_GOOGLE_CLOUD = "google-cloud"
+TTS_BACKENDS = [TTS_BACKEND_PIPER, TTS_BACKEND_KOKORO, TTS_BACKEND_GOOGLE_CLOUD]
 
 TRANSCRIBE_MODE_WHISPER = "whisper-large-v3"
 TRANSCRIBE_MODE_MOONSHINE_SMALL = "moonshine-small"
@@ -398,9 +399,11 @@ def _normalize_cloud_response_provider(value: Optional[str]) -> str:
 
 
 def _normalize_tts_backend(value: Optional[str]) -> str:
-    normalized = (value or "").strip().lower()
+    normalized = (value or "").strip().lower().replace("_", "-")
     if normalized in {TTS_BACKEND_KOKORO, "kokoro_tts", "kokoro-tts"}:
         return TTS_BACKEND_KOKORO
+    if normalized in {TTS_BACKEND_GOOGLE_CLOUD, "google", "google-cloud-tts", "cloud-tts"}:
+        return TTS_BACKEND_GOOGLE_CLOUD
     return TTS_BACKEND_PIPER
 
 
@@ -1624,6 +1627,8 @@ class DesktopAudioAgent:
         self.active_tts_model = _env("VOICE_AGENT_DEFAULT_TTS_MODEL", "").strip()
         self.active_tts_backend = _normalize_tts_backend(_env("VOICE_AGENT_TTS_BACKEND", TTS_BACKEND_PIPER))
         self.active_kokoro_voice = _env("KOKORO_TTS_VOICE", "af_heart")
+        self.active_google_cloud_voice = _env("GOOGLE_CLOUD_TTS_VOICE", "")
+        self.google_cloud_tts_language_code = _env("GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "en-US")
         self.conversation_dispatch_enabled = True
         self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
         self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
@@ -2195,6 +2200,11 @@ class DesktopAudioAgent:
         )
         self.active_tts_backend = _normalize_tts_backend(_env("VOICE_AGENT_TTS_BACKEND", self.active_tts_backend))
         self.active_kokoro_voice = _env("KOKORO_TTS_VOICE", self.active_kokoro_voice)
+        self.active_google_cloud_voice = _env("GOOGLE_CLOUD_TTS_VOICE", self.active_google_cloud_voice)
+        self.google_cloud_tts_language_code = _env(
+            "GOOGLE_CLOUD_TTS_LANGUAGE_CODE",
+            self.google_cloud_tts_language_code,
+        )
         self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
         self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
         self.gemini_live_native_response_enabled = _env_bool(
@@ -3637,6 +3647,7 @@ class DesktopAudioAgent:
         model: Optional[str] = None,
         backend: Optional[str] = None,
         kokoro_voice: Optional[str] = None,
+        google_cloud_voice: Optional[str] = None,
     ) -> None:
         if voice is not None:
             self.active_voice_code = str(voice or "").strip() or self.active_voice_code
@@ -3646,6 +3657,8 @@ class DesktopAudioAgent:
             self.active_tts_backend = _normalize_tts_backend(backend)
         if kokoro_voice is not None:
             self.active_kokoro_voice = str(kokoro_voice or "").strip() or self.active_kokoro_voice
+        if google_cloud_voice is not None:
+            self.active_google_cloud_voice = str(google_cloud_voice or "").strip()
         try:
             await self._publish_mqtt(
                 "robot/tts/options",
@@ -3654,6 +3667,7 @@ class DesktopAudioAgent:
                     "model": self.active_tts_model,
                     "backend": self.active_tts_backend,
                     "kokoro_voice": self.active_kokoro_voice,
+                    "google_cloud_voice": self.active_google_cloud_voice,
                 },
             )
         except Exception:
@@ -3667,6 +3681,7 @@ class DesktopAudioAgent:
         model: Optional[str] = None,
         instruct: Optional[str] = None,
         backend: str = TTS_BACKEND_PIPER,
+        google_cloud_api_key: Optional[str] = None,
         source: str = "wizard_panel",
         speaker_label: str = "Wizard Override",
     ) -> None:
@@ -3676,6 +3691,16 @@ class DesktopAudioAgent:
             return
         self.log_store.add("wizard", normalized_text, speaker=speaker_label, source=source)
         selected_backend = _normalize_tts_backend(backend or self.active_tts_backend)
+        if selected_backend == TTS_BACKEND_GOOGLE_CLOUD:
+            await self._play_google_cloud_text(
+                text=normalized_text,
+                voice=voice or self.active_google_cloud_voice,
+                source=source,
+                log_message=False,
+                wait_for_drain=False,
+                api_key=google_cloud_api_key,
+            )
+            return
         self._manual_task = asyncio.create_task(
             self._play_tts_text(
                 text=normalized_text,
@@ -4952,6 +4977,15 @@ class DesktopAudioAgent:
         wait_for_drain: bool = True,
     ) -> None:
         selected_backend = _normalize_tts_backend(backend or self.active_tts_backend)
+        if selected_backend == TTS_BACKEND_GOOGLE_CLOUD:
+            await self._play_google_cloud_text(
+                text=text,
+                voice=voice or self.active_google_cloud_voice,
+                source=source,
+                log_message=log_message,
+                wait_for_drain=wait_for_drain,
+            )
+            return
         if selected_backend == TTS_BACKEND_KOKORO:
             await self._play_kokoro_text(
                 text=text,
@@ -5043,6 +5077,101 @@ class DesktopAudioAgent:
         )
         response.raise_for_status()
         audio, sample_rate = _decode_wav_bytes(response.content)
+        self._player.begin_stream()
+        try:
+            self._player.enqueue_audio(audio, sample_rate)
+            if log_message:
+                self.log_store.add("coach", normalized, speaker="RACHEL", source=source)
+            if wait_for_drain:
+                await self._wait_for_playback_drain()
+        finally:
+            self._player.end_stream()
+
+    @staticmethod
+    def _google_cloud_tts_module() -> Any:
+        try:
+            return importlib.import_module("google.cloud.texttospeech")
+        except Exception as exc:
+            raise RuntimeError(
+                "Google Cloud TTS is unavailable. Install google-cloud-texttospeech and configure "
+                "GOOGLE_APPLICATION_CREDENTIALS."
+            ) from exc
+
+    def _google_cloud_tts_client(self, api_key: Optional[str] = None) -> Any:
+        texttospeech = self._google_cloud_tts_module()
+        resolved_api_key = str(api_key or _env("GOOGLE_CLOUD_TTS_API_KEY", "")).strip()
+        if resolved_api_key:
+            return texttospeech.TextToSpeechClient(client_options={"api_key": resolved_api_key})
+        credentials_path = _env("GOOGLE_APPLICATION_CREDENTIALS", "")
+        if not credentials_path:
+            raise RuntimeError("Google Cloud API key or GOOGLE_APPLICATION_CREDENTIALS is required.")
+        if not Path(os.path.expandvars(credentials_path)).expanduser().is_file():
+            raise RuntimeError(f"Google Cloud credentials file not found: {credentials_path}")
+        return texttospeech.TextToSpeechClient()
+
+    def _list_google_cloud_voices_sync(self, api_key: Optional[str] = None) -> List[str]:
+        client = self._google_cloud_tts_client(api_key)
+        response = client.list_voices(language_code=self.google_cloud_tts_language_code)
+        names = {
+            str(voice.name or "").strip()
+            for voice in response.voices
+            if str(voice.name or "").strip()
+        }
+        return sorted(names)
+
+    async def get_google_cloud_voice_options(self, api_key: Optional[str] = None) -> Dict[str, Any]:
+        try:
+            voices = await asyncio.to_thread(self._list_google_cloud_voices_sync, api_key)
+            current = self.active_google_cloud_voice
+            if current and current not in voices:
+                voices.append(current)
+            return {
+                "voices": voices,
+                "current": current,
+                "languageCode": self.google_cloud_tts_language_code,
+                "ready": True,
+                "error": "",
+            }
+        except Exception as exc:
+            return {
+                "voices": [self.active_google_cloud_voice] if self.active_google_cloud_voice else [],
+                "current": self.active_google_cloud_voice,
+                "languageCode": self.google_cloud_tts_language_code,
+                "ready": False,
+                "error": str(exc),
+            }
+
+    def _synthesize_google_cloud_text_sync(self, text: str, voice: Optional[str], api_key: Optional[str] = None) -> bytes:
+        texttospeech = self._google_cloud_tts_module()
+        client = self._google_cloud_tts_client(api_key)
+        voice_params: Dict[str, str] = {"language_code": self.google_cloud_tts_language_code}
+        if voice:
+            voice_params["name"] = str(voice).strip()
+        response = client.synthesize_speech(
+            input=texttospeech.SynthesisInput(text=text),
+            voice=texttospeech.VoiceSelectionParams(**voice_params),
+            audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16),
+        )
+        if not response.audio_content:
+            raise RuntimeError("Google Cloud TTS returned empty audio.")
+        return bytes(response.audio_content)
+
+    async def _play_google_cloud_text(
+        self,
+        *,
+        text: str,
+        voice: Optional[str],
+        source: str,
+        log_message: bool,
+        wait_for_drain: bool = True,
+        api_key: Optional[str] = None,
+    ) -> None:
+        normalized = self._sanitize_assistant_text(text)
+        if not normalized:
+            return
+        wav_bytes = await asyncio.to_thread(self._synthesize_google_cloud_text_sync, normalized, voice, api_key)
+        audio, sample_rate = _decode_wav_bytes(wav_bytes)
+        self._remember_assistant_text(normalized)
         self._player.begin_stream()
         try:
             self._player.enqueue_audio(audio, sample_rate)

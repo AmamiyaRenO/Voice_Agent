@@ -416,9 +416,11 @@ def _normalize_cloud_response_provider(value: Optional[str]) -> str:
 
 
 def _normalize_tts_backend(value: Optional[str]) -> str:
-    normalized = (value or "").strip().lower()
+    normalized = (value or "").strip().lower().replace("_", "-")
     if normalized in {"kokoro", "kokoro_tts", "kokoro-tts"}:
         return "kokoro"
+    if normalized in {"google-cloud", "google", "google-cloud-tts", "cloud-tts"}:
+        return "google-cloud"
     return "piper"
 
 
@@ -1445,7 +1447,7 @@ async def api_logs_stream() -> StreamingResponse:
 
 
 @app.get("/api/voice/options")
-async def api_voice_options() -> Dict[str, Any]:
+async def api_voice_options(request: Request) -> Dict[str, Any]:
     models_dir = _env("VOICE_MODELS_DIR", _env("PIPER_MODELS_DIR", r"D:\piper\models"))
     models: List[str] = []
     current_model = audio_agent.active_tts_model or _env("PIPER_MODEL_PATH", "")
@@ -1456,14 +1458,22 @@ async def api_voice_options() -> Dict[str, Any]:
                 models.append(str(file))
     except Exception:
         models = []
+    google_cloud = await audio_agent.get_google_cloud_voice_options(
+        request.headers.get("X-Google-Cloud-TTS-Api-Key", "")
+    )
     return {
         "voices": ["en_US"],
         "current": audio_agent.active_voice_code,
         "models": models or ([current_model] if current_model else []),
         "modelCurrent": current_model,
-        "backends": ["piper", "kokoro"],
+        "backends": ["piper", "kokoro", "google-cloud"],
         "backendCurrent": audio_agent.active_tts_backend,
         "kokoroVoiceCurrent": audio_agent.active_kokoro_voice,
+        "googleCloudVoices": google_cloud["voices"],
+        "googleCloudVoiceCurrent": google_cloud["current"],
+        "googleCloudLanguageCode": google_cloud["languageCode"],
+        "googleCloudReady": google_cloud["ready"],
+        "googleCloudError": google_cloud["error"],
     }
 
 
@@ -1508,6 +1518,12 @@ async def api_voice(request: Request) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="kokoro voice required")
         await audio_agent.set_tts_options(kokoro_voice=kokoro_voice)
         return {"status": "ok", "message": f"kokoro voice set to {kokoro_voice}"}
+    if action in {"set_google_cloud_voice", "google_cloud_voice"}:
+        google_cloud_voice = str(payload.get("voice") or payload.get("value") or "").strip()
+        if not google_cloud_voice:
+            raise HTTPException(status_code=400, detail="google cloud voice required")
+        await audio_agent.set_tts_options(google_cloud_voice=google_cloud_voice)
+        return {"status": "ok", "message": f"google cloud voice set to {google_cloud_voice}"}
     raise HTTPException(status_code=400, detail="unknown voice action")
 
 
@@ -1518,15 +1534,21 @@ async def api_speak(request: Request) -> Dict[str, Any]:
     if not text:
         raise HTTPException(status_code=400, detail="text required")
     backend = _normalize_tts_backend(payload.get("backend") or audio_agent.active_tts_backend)
-    await audio_agent.manual_speak(
-        text=text,
-        voice=str(payload.get("voice") or "").strip() or None,
-        model=str(payload.get("model") or "").strip() or audio_agent.active_tts_model,
-        instruct=str(payload.get("instruct") or "").strip(),
-        backend=backend,
-        source="tester_panel",
-    )
-    return {"status": "ok", "message": f"playing locally ({backend})"}
+    try:
+        await audio_agent.manual_speak(
+            text=text,
+            voice=str(payload.get("voice") or "").strip() or None,
+            model=str(payload.get("model") or "").strip() or audio_agent.active_tts_model,
+            instruct=str(payload.get("instruct") or "").strip(),
+            backend=backend,
+            google_cloud_api_key=str(payload.get("googleCloudApiKey") or "").strip() or None,
+            source="tester_panel",
+        )
+    except Exception as exc:
+        if backend == "google-cloud":
+            raise HTTPException(status_code=502, detail=f"Google Cloud TTS failed: {exc}") from exc
+        raise
+    return {"status": "ok", "message": f"speech started ({backend})"}
 
 
 @app.post("/api/kokoro/speak")

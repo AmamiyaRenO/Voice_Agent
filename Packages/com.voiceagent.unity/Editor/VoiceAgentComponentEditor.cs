@@ -91,15 +91,44 @@ namespace VoiceAgent.Unity.Editor
             DrawProperty("speakText");
             var backendProperty = serializedObject.FindProperty("backend");
             var selectedBackend = backendProperty != null ? backendProperty.stringValue : string.Empty;
-            var primaryVoiceChoices = IsKokoroBackend(selectedBackend) ? inspectorOptions.KokoroVoices : inspectorOptions.PiperVoices;
+            var primaryVoiceProperty = "voice";
+            var primaryVoiceLabel = "Voice";
+            var primaryVoiceChoices = inspectorOptions.PiperVoices;
+            if (IsKokoroBackend(selectedBackend))
+            {
+                primaryVoiceProperty = "kokoroVoice";
+                primaryVoiceLabel = "Kokoro Voice";
+                primaryVoiceChoices = inspectorOptions.KokoroVoices;
+            }
+            else if (IsGoogleCloudBackend(selectedBackend))
+            {
+                primaryVoiceProperty = "googleCloudVoice";
+                primaryVoiceLabel = "Google Cloud Voice";
+                primaryVoiceChoices = inspectorOptions.GoogleCloudVoices;
+            }
             using (new EditorGUILayout.HorizontalScope())
             {
-                DrawStringChoice("voice", "Voice", primaryVoiceChoices);
+                DrawStringChoice(primaryVoiceProperty, primaryVoiceLabel, primaryVoiceChoices);
                 DrawStringChoice("backend", "Backend", inspectorOptions.Backends);
-                using (new EditorGUI.DisabledScope(IsKokoroBackend(selectedBackend)))
+                using (new EditorGUI.DisabledScope(IsKokoroBackend(selectedBackend) || IsGoogleCloudBackend(selectedBackend)))
                 {
                     DrawStringChoice("ttsModel", "TTS Model", inspectorOptions.TtsModels);
                 }
+            }
+            if (IsGoogleCloudBackend(selectedBackend))
+            {
+                var apiKeyProperty = serializedObject.FindProperty("googleCloudApiKey");
+                if (apiKeyProperty != null)
+                {
+                    apiKeyProperty.stringValue = EditorGUILayout.PasswordField("Google Cloud API Key", apiKeyProperty.stringValue ?? string.Empty);
+                }
+                EditorGUILayout.HelpBox(
+                    "This API key is serialized into the scene or prefab. Do not commit it to a shared repository.",
+                    MessageType.Warning);
+                var message = inspectorOptions.GoogleCloudReady
+                    ? $"Google Cloud TTS ready ({inspectorOptions.GoogleCloudLanguageCode})."
+                    : "Google Cloud TTS is not ready: " + inspectorOptions.GoogleCloudError;
+                EditorGUILayout.HelpBox(message, inspectorOptions.GoogleCloudReady ? MessageType.Info : MessageType.Error);
             }
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -119,6 +148,7 @@ namespace VoiceAgent.Unity.Editor
                     ("Get TTS Options", async () => { await component.GetTtsOptionsAsync(); }),
                     ("Get Kokoro Options", async () => { await component.GetKokoroOptionsAsync(); }),
                     ("Set Kokoro Voice", async () => { await component.SetKokoroVoiceAsync(); }),
+                    ("Set Google Voice", async () => { await component.SetGoogleCloudVoiceAsync(); }),
                     ("Kokoro Speak", async () => { await component.KokoroSpeakAsync(); }));
             }
         }
@@ -531,6 +561,24 @@ namespace VoiceAgent.Unity.Editor
             }
 
             AddChoices(values, display, options);
+            if (string.Equals(label, "Backend", StringComparison.Ordinal))
+            {
+                for (var index = 0; index < values.Count; index++)
+                {
+                    if (string.Equals(values[index], "piper", StringComparison.OrdinalIgnoreCase))
+                    {
+                        display[index] = "Piper (Local)";
+                    }
+                    else if (string.Equals(values[index], "kokoro", StringComparison.OrdinalIgnoreCase))
+                    {
+                        display[index] = "Kokoro (Local)";
+                    }
+                    else if (string.Equals(values[index], "google-cloud", StringComparison.OrdinalIgnoreCase))
+                    {
+                        display[index] = "Google Cloud TTS";
+                    }
+                }
+            }
 
             if (!string.IsNullOrWhiteSpace(current) && !ContainsValue(values, current))
             {
@@ -573,7 +621,7 @@ namespace VoiceAgent.Unity.Editor
             {
                 using (var client = new VoiceAgentClient(component.Settings))
                 {
-                    var voiceResult = await client.GetTtsOptionsAsync();
+                    var voiceResult = await client.GetTtsOptionsAsync(component.GoogleCloudApiKey);
                     var kokoroResult = await client.GetKokoroOptionsAsync();
                     var faceResult = await client.GetFaceOptionsAsync();
                     var runtimeResult = await client.GetRuntimeConfigAsync();
@@ -614,6 +662,12 @@ namespace VoiceAgent.Unity.Editor
                     options.PiperVoices = NormalizeChoices(payload != null ? payload.voices : null, payload != null ? payload.current : null);
                     options.TtsModels = NormalizeChoices(payload != null ? payload.models : null, payload != null ? payload.modelCurrent : null);
                     options.Backends = NormalizeChoices(payload != null ? payload.backends : null, payload != null ? payload.backendCurrent : null);
+                    options.GoogleCloudVoices = NormalizeChoices(
+                        payload != null ? payload.googleCloudVoices : null,
+                        payload != null ? payload.googleCloudVoiceCurrent : null);
+                    options.GoogleCloudLanguageCode = payload != null ? payload.googleCloudLanguageCode : string.Empty;
+                    options.GoogleCloudReady = payload != null && payload.googleCloudReady;
+                    options.GoogleCloudError = payload != null ? payload.googleCloudError : string.Empty;
                 }
                 catch
                 {
@@ -738,6 +792,11 @@ namespace VoiceAgent.Unity.Editor
             return string.Equals((backend ?? string.Empty).Trim(), "kokoro", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool IsGoogleCloudBackend(string backend)
+        {
+            return string.Equals((backend ?? string.Empty).Trim(), "google-cloud", StringComparison.OrdinalIgnoreCase);
+        }
+
         private async void RunTask(VoiceAgentComponent component, Func<Task> action)
         {
             if (isRunning || action == null)
@@ -773,6 +832,11 @@ namespace VoiceAgent.Unity.Editor
             public string modelCurrent;
             public string[] backends;
             public string backendCurrent;
+            public string[] googleCloudVoices;
+            public string googleCloudVoiceCurrent;
+            public string googleCloudLanguageCode;
+            public bool googleCloudReady;
+            public string googleCloudError;
         }
 
         [Serializable]
@@ -817,6 +881,10 @@ namespace VoiceAgent.Unity.Editor
             public List<string> TtsModels { get; set; } = new List<string>();
             public List<string> Backends { get; set; } = new List<string>();
             public List<string> KokoroVoices { get; set; } = new List<string>();
+            public List<string> GoogleCloudVoices { get; set; } = new List<string>();
+            public string GoogleCloudLanguageCode { get; set; } = string.Empty;
+            public bool GoogleCloudReady { get; set; }
+            public string GoogleCloudError { get; set; } = string.Empty;
             public List<string> FacePresets { get; set; } = new List<string>();
             public List<string> LocalModels { get; set; } = new List<string>();
             public List<string> AsrModes { get; set; } = new List<string>();
@@ -827,7 +895,7 @@ namespace VoiceAgent.Unity.Editor
                 get
                 {
                     var count = 0;
-                    if (PiperVoices.Count > 0 || TtsModels.Count > 0 || Backends.Count > 0) count++;
+                    if (PiperVoices.Count > 0 || TtsModels.Count > 0 || Backends.Count > 0 || GoogleCloudVoices.Count > 0) count++;
                     if (KokoroVoices.Count > 0) count++;
                     if (FacePresets.Count > 0) count++;
                     if (LocalModels.Count > 0) count++;

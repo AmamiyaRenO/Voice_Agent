@@ -24,6 +24,7 @@ namespace VoiceAgent.Unity
         public string voice;
         public string backend;
         public string model;
+        public string googleCloudApiKey;
         [Min(0.1f)] public float speed = 1f;
         [Min(0f)] public float volume = 1f;
     }

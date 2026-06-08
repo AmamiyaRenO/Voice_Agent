@@ -22,6 +22,8 @@ namespace VoiceAgent.Unity
         [SerializeField] private float speechVolume = 1f;
         [SerializeField, TextArea(2, 5)] private string kokoroText = "Hello from Kokoro.";
         [SerializeField] private string kokoroVoice = "af_heart";
+        [SerializeField] private string googleCloudVoice;
+        [SerializeField] private string googleCloudApiKey;
 
         [Header("LLM / Runtime")]
         [SerializeField, TextArea(2, 5)] private string llmPrompt = "You are a helpful voice assistant.";
@@ -107,6 +109,7 @@ namespace VoiceAgent.Unity
         public string LastMatchedAt => lastMatchedAt;
         public string LastInterceptedTranscript => lastInterceptedTranscript;
         public string LastRoutingOutcome => lastRoutingOutcome;
+        public string GoogleCloudApiKey => googleCloudApiKey ?? string.Empty;
         public VoiceAgentReplyMatchedEvent OnReplyMatched => onReplyMatched ?? (onReplyMatched = new VoiceAgentReplyMatchedEvent());
 
         private void OnEnable()
@@ -171,12 +174,23 @@ namespace VoiceAgent.Unity
 
         public VoiceAgentSpeechRequest CreateSpeechRequest()
         {
+            var selectedVoice = voice;
+            if (IsBackend(backend, "kokoro"))
+            {
+                selectedVoice = kokoroVoice;
+            }
+            else if (IsBackend(backend, "google-cloud"))
+            {
+                selectedVoice = googleCloudVoice;
+            }
+
             return new VoiceAgentSpeechRequest
             {
                 text = speakText,
-                voice = voice,
+                voice = selectedVoice,
                 backend = backend,
                 model = ttsModel,
+                googleCloudApiKey = IsBackend(backend, "google-cloud") ? googleCloudApiKey : string.Empty,
                 speed = speechSpeed,
                 volume = speechVolume,
             };
@@ -184,14 +198,20 @@ namespace VoiceAgent.Unity
 
         public Task<VoiceAgentConnectionHealth> CheckConnectionAsync() => RunConnectionAsync(current => current.CheckConnectionHealthAsync());
         public Task<VoiceAgentApiResult> GetLogsAsync() => RunAsync(current => current.GetLogsAsync());
-        public Task<VoiceAgentApiResult> GetTtsOptionsAsync() => RunAsync(current => current.GetTtsOptionsAsync());
+        public Task<VoiceAgentApiResult> GetTtsOptionsAsync() => RunAsync(current => current.GetTtsOptionsAsync(googleCloudApiKey));
         public Task<VoiceAgentApiResult> GetKokoroOptionsAsync() => RunAsync(current => current.GetKokoroOptionsAsync());
         public Task<VoiceAgentApiResult> SpeakAsync() => RunAsync(current => current.SpeakAsync(CreateSpeechRequest()));
         public Task<VoiceAgentApiResult> SetVoiceAsync() => RunAsync(current => current.SetVoiceAsync(voice));
         public Task<VoiceAgentApiResult> SetTtsModelAsync() => RunAsync(current => current.SetTtsModelAsync(ttsModel));
         public Task<VoiceAgentApiResult> SetTtsBackendAsync() => RunAsync(current => current.SetTtsBackendAsync(backend));
         public Task<VoiceAgentApiResult> SetKokoroVoiceAsync() => RunAsync(current => current.SetKokoroVoiceAsync(kokoroVoice));
+        public Task<VoiceAgentApiResult> SetGoogleCloudVoiceAsync() => RunAsync(current => current.SetGoogleCloudVoiceAsync(googleCloudVoice));
         public Task<VoiceAgentApiResult> KokoroSpeakAsync() => RunAsync(current => current.KokoroSpeakAsync(kokoroText, kokoroVoice));
+
+        private static bool IsBackend(string value, string expected)
+        {
+            return string.Equals((value ?? string.Empty).Trim(), expected, StringComparison.OrdinalIgnoreCase);
+        }
         public Task<VoiceAgentApiResult> GetLlmPromptAsync() => RunAsync(current => current.GetLlmPromptAsync());
         public Task<VoiceAgentApiResult> SetLlmPromptAsync() => RunAsync(current => current.SetLlmPromptAsync(llmPrompt));
         public Task<VoiceAgentApiResult> ResetLlmPromptAsync() => RunAsync(current => current.ResetLlmPromptAsync());

@@ -31,6 +31,9 @@ namespace VoiceAgent.Unity
         public Task<VoiceAgentApiResult> GetTtsOptionsAsync(CancellationToken cancellationToken = default) =>
             SendJsonAsync(HttpMethod.Get, "/api/voice/options", null, cancellationToken);
 
+        public Task<VoiceAgentApiResult> GetTtsOptionsAsync(string googleCloudApiKey, CancellationToken cancellationToken = default) =>
+            SendJsonAsync(HttpMethod.Get, "/api/voice/options", null, cancellationToken, googleCloudApiKey);
+
         public Task<VoiceAgentApiResult> GetKokoroOptionsAsync(CancellationToken cancellationToken = default) =>
             SendJsonAsync(HttpMethod.Get, "/api/kokoro/options", null, cancellationToken);
 
@@ -46,6 +49,7 @@ namespace VoiceAgent.Unity
                 voice = string.IsNullOrWhiteSpace(request.voice) ? Settings.defaultVoice : request.voice,
                 backend = string.IsNullOrWhiteSpace(request.backend) ? Settings.defaultBackend : request.backend,
                 model = string.IsNullOrWhiteSpace(request.model) ? Settings.defaultTtsModel : request.model,
+                googleCloudApiKey = request.googleCloudApiKey ?? string.Empty,
                 speed = request.speed,
                 volume = request.volume,
             });
@@ -77,6 +81,13 @@ namespace VoiceAgent.Unity
             SendJsonAsync(HttpMethod.Post, "/api/voice", JsonUtility.ToJson(new VoiceActionPayload
             {
                 action = "set_kokoro_voice",
+                voice = voice ?? string.Empty,
+            }), cancellationToken);
+
+        public Task<VoiceAgentApiResult> SetGoogleCloudVoiceAsync(string voice, CancellationToken cancellationToken = default) =>
+            SendJsonAsync(HttpMethod.Post, "/api/voice", JsonUtility.ToJson(new VoiceActionPayload
+            {
+                action = "set_google_cloud_voice",
                 voice = voice ?? string.Empty,
             }), cancellationToken);
 
@@ -342,12 +353,21 @@ namespace VoiceAgent.Unity
             }), cancellationToken);
         }
 
-        private async Task<VoiceAgentApiResult> SendJsonAsync(HttpMethod method, string path, string payload, CancellationToken cancellationToken)
+        private async Task<VoiceAgentApiResult> SendJsonAsync(
+            HttpMethod method,
+            string path,
+            string payload,
+            CancellationToken cancellationToken,
+            string googleCloudApiKey = null)
         {
             try
             {
                 using (var request = new HttpRequestMessage(method, BaseUrl + path))
                 {
+                    if (!string.IsNullOrWhiteSpace(googleCloudApiKey))
+                    {
+                        request.Headers.TryAddWithoutValidation("X-Google-Cloud-TTS-Api-Key", googleCloudApiKey.Trim());
+                    }
                     if (!string.IsNullOrWhiteSpace(payload))
                     {
                         request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
@@ -443,7 +463,7 @@ namespace VoiceAgent.Unity
             public string detail;
         }
 
-        [Serializable] private struct SpeakPayload { public string text; public string voice; public string backend; public string model; public float speed; public float volume; }
+        [Serializable] private struct SpeakPayload { public string text; public string voice; public string backend; public string model; public string googleCloudApiKey; public float speed; public float volume; }
         [Serializable] private struct KokoroSpeakPayload { public string text; public string voice; }
         [Serializable] private struct VoiceActionPayload { public string action; public string voice; public string backend; public string model; }
         [Serializable] private struct PromptPayload { public string prompt; public bool reset; }

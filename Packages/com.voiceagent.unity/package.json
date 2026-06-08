@@ -1,7 +1,7 @@
 {
   "name": "com.voiceagent.unity",
   "displayName": "VoiceAgent Unity SDK",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "unity": "2022.3",
   "description": "Minimal Unity SDK with an inspector-driven VoiceAgent component for calling the external voice-agent runtime.",
   "keywords": [

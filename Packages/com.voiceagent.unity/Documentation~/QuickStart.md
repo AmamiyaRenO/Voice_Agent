@@ -16,6 +16,16 @@ It gives you:
 4. Fill in host, port, text, voice, backend, face, LED, and other fields in the Inspector.
 5. Click the buttons in the Inspector to call the runtime directly.
 
+## Google Cloud TTS
+
+Google Cloud TTS is opt-in. The runtime never falls back to a local voice when it is selected.
+
+1. Enable the Google Cloud Text-to-Speech API for the API-key project.
+2. Start the local services, select `Google Cloud TTS`, enter the API key in the Inspector, and click `Refresh Options`.
+3. Choose a Google voice and click `Speak`.
+
+The API key is serialized into the scene or prefab. Do not commit a scene or prefab containing a real key to a shared repository. Server-side `GOOGLE_APPLICATION_CREDENTIALS` remains available as an optional alternative.
+
 ## Runtime scripting
 
 Developers can either:

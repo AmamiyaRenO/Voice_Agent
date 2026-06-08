@@ -46,6 +46,8 @@
     "VOICE_SPEAKER_ID_ACTIVE_FALLBACK_SECONDS": "30",
     "VOICE_CLOUD_RESPONSE_PROVIDER": "openai",
     "VOICE_AGENT_TTS_BACKEND": "piper",
+    "GOOGLE_CLOUD_TTS_LANGUAGE_CODE": "en-US",
+    "GOOGLE_CLOUD_TTS_VOICE": "",
     "OPENAI_RESPONSE_MODEL": "gpt-4o-mini",
     "GEMINI_RESPONSE_MODEL": "gemini-2.5-flash",
     "GEMINI_LIVE_MODEL": "models/gemini-2.5-flash-native-audio-latest",
