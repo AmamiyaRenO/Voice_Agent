@@ -187,10 +187,10 @@ class SpeakerIdConfig:
     enabled: bool = True
     model_path: str = str(DEFAULT_MODEL_PATH)
     profiles_path: str = ""
-    match_threshold: float = 0.72
-    match_margin: float = 0.05
+    match_threshold: float = 0.38
+    match_margin: float = 0.08
     min_match_seconds: float = 1.2
-    enroll_min_seconds: float = 1.5
+    enroll_min_seconds: float = 0.5
     enroll_max_seconds: float = 6.0
     enroll_min_clips: int = 3
 
@@ -207,10 +207,10 @@ class SpeakerIdConfig:
                 ).expanduser()
             ),
             profiles_path=str(resolved_profiles),
-            match_threshold=_safe_float(os.getenv("VOICE_SPEAKER_ID_MATCH_THRESHOLD"), 0.72),
-            match_margin=_safe_float(os.getenv("VOICE_SPEAKER_ID_MATCH_MARGIN"), 0.05),
+            match_threshold=_safe_float(os.getenv("VOICE_SPEAKER_ID_MATCH_THRESHOLD"), 0.38),
+            match_margin=_safe_float(os.getenv("VOICE_SPEAKER_ID_MATCH_MARGIN"), 0.08),
             min_match_seconds=max(0.1, _safe_float(os.getenv("VOICE_SPEAKER_ID_MIN_MATCH_SECONDS"), 1.2)),
-            enroll_min_seconds=max(0.1, _safe_float(os.getenv("VOICE_SPEAKER_ID_ENROLL_MIN_SECONDS"), 1.5)),
+            enroll_min_seconds=max(0.1, _safe_float(os.getenv("VOICE_SPEAKER_ID_ENROLL_MIN_SECONDS"), 0.5)),
             enroll_max_seconds=max(0.1, _safe_float(os.getenv("VOICE_SPEAKER_ID_ENROLL_MAX_SECONDS"), 6.0)),
             enroll_min_clips=max(1, _safe_int(os.getenv("VOICE_SPEAKER_ID_ENROLL_MIN_CLIPS"), 3)),
         )
@@ -412,7 +412,15 @@ class SpeakerIdService:
             top2_user_id = str(scored[1][0]) if len(scored) > 1 else ""
             top2 = float(scored[1][1]) if len(scored) > 1 else 0.0
             margin = float(top1 - top2)
-            matched = top1 >= self._config.match_threshold and margin >= self._config.match_margin
+            score_passed = top1 >= self._config.match_threshold
+            margin_passed = margin >= self._config.match_margin
+            matched = score_passed and margin_passed
+            if matched:
+                reason = "matched"
+            elif not score_passed:
+                reason = "below_score_threshold"
+            else:
+                reason = "below_margin_threshold"
             return SpeakerMatchResult(
                 user_id=user_id if matched else "",
                 matched=matched,
@@ -424,7 +432,7 @@ class SpeakerIdService:
                 top2_score=float(top2),
                 candidate_count=len(scored),
                 duration_seconds=duration_seconds,
-                reason="matched" if matched else "below_threshold",
+                reason=reason,
             )
 
     def add_pending_clip(self, user_id: str, audio: np.ndarray, sample_rate: int) -> Dict[str, Any]:
@@ -504,6 +512,57 @@ class SpeakerIdService:
             self._pending.pop(normalized_user_id, None)
             self._save_profiles()
             return self.user_summary(normalized_user_id)
+
+    def commit_pending_clips_as(self, source_user_id: str, target_user_id: str) -> Dict[str, Any]:
+        normalized_source_id = str(source_user_id or "").strip()
+        normalized_target_id = str(target_user_id or "").strip()
+        if not normalized_source_id:
+            raise ValueError("source_user_id is required")
+        if not normalized_target_id:
+            raise ValueError("target_user_id is required")
+        with self._lock:
+            clips = list(self._pending.get(normalized_source_id) or [])
+            if len(clips) < self._config.enroll_min_clips:
+                raise ValueError("not enough enrollment clips")
+            embeddings = []
+            for item in clips:
+                raw_embedding = item.get("embedding")
+                embeddings.append(
+                    _normalize_embedding(
+                        np.asarray(raw_embedding if raw_embedding is not None else [], dtype=np.float32)
+                    )
+                )
+            valid_embeddings = [item for item in embeddings if item.size > 0]
+            if len(valid_embeddings) < self._config.enroll_min_clips:
+                raise RuntimeError("not enough valid enrollment embeddings")
+
+            existing = self._profiles.get(normalized_target_id) or {}
+            existing_centroid_raw = existing.get("centroid")
+            existing_centroid = _normalize_embedding(
+                np.asarray(existing_centroid_raw if existing_centroid_raw is not None else [], dtype=np.float32)
+            )
+            existing_clip_count = max(0, int(existing.get("clip_count") or 0))
+            weighted_embeddings = list(valid_embeddings)
+            if existing_centroid.size > 0 and existing_clip_count > 0:
+                weighted_embeddings.append(existing_centroid * float(existing_clip_count))
+            centroid = _normalize_embedding(np.sum(np.stack(weighted_embeddings, axis=0), axis=0))
+            now_ts = float(time.time())
+            self._profiles[normalized_target_id] = {
+                "centroid": centroid,
+                "clip_count": existing_clip_count + len(valid_embeddings),
+                "created_ts": _safe_float(existing.get("created_ts"), now_ts),
+                "updated_ts": now_ts,
+                "embedding_dim": int(centroid.size),
+            }
+            self._pending.pop(normalized_source_id, None)
+            self._save_profiles()
+            return self.user_summary(normalized_target_id)
+
+    def clear_pending(self, user_id: str) -> Dict[str, Any]:
+        normalized_user_id = str(user_id or "").strip()
+        with self._lock:
+            self._pending.pop(normalized_user_id, None)
+            return self.pending_summary(normalized_user_id)
 
     def clear_profile(self, user_id: str) -> Dict[str, Any]:
         normalized_user_id = str(user_id or "").strip()

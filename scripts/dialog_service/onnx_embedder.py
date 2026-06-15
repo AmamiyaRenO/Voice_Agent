@@ -140,6 +140,10 @@ class OnnxTextEmbedder:
             self.error = f"Embedding model dir not found: {path}"
             return None
 
+        cached_snapshot = self._resolve_cached_snapshot()
+        if cached_snapshot is not None:
+            return cached_snapshot
+
         if snapshot_download is None:
             self.error = "huggingface_hub not available and no model dir configured."
             return None
@@ -156,6 +160,52 @@ class OnnxTextEmbedder:
         except Exception as exc:
             self.error = f"Failed to resolve embedding model '{self.repo_id}': {exc}"
             return None
+
+    def _resolve_cached_snapshot(self) -> Optional[Path]:
+        if not self.cache_dir or not self.repo_id:
+            return None
+        cache_root = Path(self.cache_dir).expanduser()
+        repo_cache = cache_root / f"models--{self.repo_id.replace('/', '--')}"
+        snapshots_dir = repo_cache / "snapshots"
+        if not snapshots_dir.is_dir():
+            return None
+
+        candidates: List[Path] = []
+        ref_path = repo_cache / "refs" / "main"
+        try:
+            revision = ref_path.read_text(encoding="utf-8").strip()
+            if revision:
+                candidates.append(snapshots_dir / revision)
+        except OSError:
+            pass
+        try:
+            candidates.extend(
+                sorted(
+                    (path for path in snapshots_dir.iterdir() if path.is_dir()),
+                    key=lambda path: path.stat().st_mtime,
+                    reverse=True,
+                )
+            )
+        except OSError:
+            return None
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if self._cached_snapshot_is_complete(candidate):
+                return candidate
+        return None
+
+    def _cached_snapshot_is_complete(self, root: Path) -> bool:
+        model_path = root / self.model_file if self.model_file else root / "model.onnx"
+        tokenizer_path = root / self.tokenizer_file if self.tokenizer_file else root / "tokenizer.json"
+        try:
+            return model_path.is_file() and tokenizer_path.is_file()
+        except OSError:
+            return False
 
     def _resolve_model_path(self, root: Path) -> Optional[Path]:
         if self.model_file:

@@ -53,7 +53,7 @@ def test_smoke_dialog_user_memory_persists_identity(tmp_path: Path):
     context = store_b.build_memory_context(user_id_b, query_text="hello")
 
     assert user_id_a == user_id_b
-    assert "Preferred name: Alex." in context
+    assert "my name is alex" in context
 
 
 def test_smoke_dialog_relevant_memory_retrieval(tmp_path: Path):
@@ -89,7 +89,7 @@ def test_smoke_dialog_relevant_memory_retrieval(tmp_path: Path):
     store.remember_utterance(user_id, "disc golf is easy")
 
     context = store.build_memory_context(user_id, query_text="let us play cornhole")
-    assert "Relevant memory:" in context
+    assert "Relevant saved conversation history:" in context
     assert "cornhole" in context.lower()
 
 
@@ -290,6 +290,35 @@ def test_local_docs_rag_module_resolves_onnx_embedder_from_dialog_service():
     assert getattr(module, "OnnxTextEmbedder", None) is not None
 
 
+def test_onnx_embedder_prefers_complete_cached_snapshot(monkeypatch, tmp_path: Path):
+    module = _load_module("smoke_onnx_embedder_cached_snapshot", DIALOG_DIR / "onnx_embedder.py")
+    snapshot = (
+        tmp_path
+        / "models--Qdrant--bge-small-en-v1.5-onnx-Q"
+        / "snapshots"
+        / "revision-1"
+    )
+    snapshot.mkdir(parents=True)
+    (snapshot / "model_optimized.onnx").write_bytes(b"model")
+    (snapshot / "tokenizer.json").write_text("{}", encoding="utf-8")
+    refs = snapshot.parent.parent / "refs"
+    refs.mkdir()
+    (refs / "main").write_text("revision-1\n", encoding="utf-8")
+
+    embedder = module.OnnxTextEmbedder.__new__(module.OnnxTextEmbedder)
+    embedder.repo_id = "Qdrant/bge-small-en-v1.5-onnx-Q"
+    embedder.model_dir = ""
+    embedder.model_file = "model_optimized.onnx"
+    embedder.tokenizer_file = "tokenizer.json"
+    embedder.cache_dir = str(tmp_path)
+    embedder.auto_download = True
+    embedder.error = ""
+    monkeypatch.setattr(module, "snapshot_download", lambda **_kwargs: pytest.fail("unexpected download"))
+
+    assert embedder._resolve_model_root() == snapshot
+    assert embedder.error == ""
+
+
 def test_smoke_dialog_context_summary_and_slots(tmp_path: Path):
     if str(DIALOG_DIR) not in sys.path:
         sys.path.insert(0, str(DIALOG_DIR))
@@ -325,7 +354,6 @@ def test_smoke_dialog_context_summary_and_slots(tmp_path: Path):
 
     assert slots["current_topic"] == "balance training schedule"
     assert slots["open_question"].startswith("Do you prefer morning or evening practice")
-    assert "Conversation summary:" in dialog_context
     assert "Current topic: balance training schedule." in dialog_context
     assert "Recent dialogue:" in dialog_context
     assert len(dialog_context) <= 600
@@ -349,10 +377,9 @@ def test_smoke_dialog_schedule_preference_memory(tmp_path: Path):
 
     context = store.build_memory_context(user_id, query_text="which day do I prefer")
     facts = store.build_facts_reply(user_id)
-    assert "Preferred training day: Friday." in context
-    assert "Preferred training time: morning." in context
-    assert "you prefer training on Friday" in facts
-    assert "you prefer training in the morning" in facts
+    assert "Friday" in context
+    assert "Morning" in context
+    assert facts == ""
 
 
 def test_smoke_memory_query_reply_is_no_longer_system_like(tmp_path: Path):
@@ -374,7 +401,7 @@ def test_smoke_memory_query_reply_is_no_longer_system_like(tmp_path: Path):
     reply = store.answer_memory_query(user_id, "What do you know about me?")
 
     assert "From what I have saved" not in reply
-    assert "Alex" in reply
+    assert "my name is Alex" in reply
     assert "disc golf" in reply.lower()
 
 
@@ -401,8 +428,7 @@ def test_smoke_dialog_game_context_accepts_new_manifest_games(tmp_path: Path):
 
     assert store.get_game_reference(user_id) == "Balance Quest"
     snapshot = store.profile_snapshot(user_id)
-    assert snapshot["last_game_recommended"] == "Balance Quest"
-    assert snapshot["recent_game_candidates"][0]["game_name"] == "Balance Quest"
+    assert set(snapshot) == {"display_name", "dialog_turns"}
 
 
 def test_smoke_game_catalog_extracts_alias_mentions(tmp_path: Path):

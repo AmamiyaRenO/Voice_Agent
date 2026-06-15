@@ -1,5 +1,5 @@
 paho-mqtt==2.0.0
-httpx==0.27.0
+httpx>=0.28.1,<1.0.0
 numpy==1.26.4
 onnxruntime==1.24.2
 tokenizers==0.22.2

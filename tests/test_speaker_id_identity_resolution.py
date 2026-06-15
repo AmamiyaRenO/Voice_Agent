@@ -89,6 +89,323 @@ def test_speaker_id_commit_reload_and_clear(tmp_path: Path, monkeypatch: pytest.
     assert payload["users"] == {}
 
 
+def test_speaker_id_commits_guest_clips_into_existing_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    speaker_id = _load_module("speaker_id_guest_commit_module", PYTHON_VOICE_DIR / "speaker_id.py")
+    config = speaker_id.SpeakerIdConfig(
+        enabled=True,
+        model_path=str(tmp_path / "missing.onnx"),
+        profiles_path=str(tmp_path / "speaker_profiles.json"),
+        enroll_min_clips=3,
+    )
+    service = speaker_id.SpeakerIdService(config)
+    service._session = object()
+    service._input_name = "feats"
+    service.error = ""
+    service._profiles = {
+        "user_001": {
+            "centroid": speaker_id._normalize_embedding(np.asarray([1.0, 0.0], dtype=np.float32)),
+            "clip_count": 2,
+            "created_ts": 1.0,
+        }
+    }
+    embeddings = iter(
+        [
+            np.asarray([0.9, 0.1], dtype=np.float32),
+            np.asarray([1.0, 0.1], dtype=np.float32),
+            np.asarray([0.9, -0.1], dtype=np.float32),
+        ]
+    )
+    monkeypatch.setattr(service, "_embedding_for_audio", lambda _audio, _rate: (next(embeddings), 2.0))
+    for _ in range(3):
+        service.add_pending_clip("__guest__", np.ones(32000, dtype=np.float32), 16000)
+
+    summary = service.commit_pending_clips_as("__guest__", "user_001")
+
+    assert summary["has_profile"] is True
+    assert summary["clip_count"] == 5
+    assert service.pending_summary("__guest__")["pending_clip_count"] == 0
+
+
+def test_desktop_audio_agent_participant_status_exposes_guest_learning_and_possible_match():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_participant_status_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._active_user_id = ""
+    agent._last_speaker_match = {
+        "matched": False,
+        "top1_user_id": "user_008",
+        "top1_score": 0.35,
+    }
+    agent._guest_learning_last_error = ""
+    agent._speaker_id = SimpleNamespace(config=SimpleNamespace(enroll_min_clips=3))
+    payload = {
+        "users": [
+            {
+                "user_id": "__guest__",
+                "pending": {"pending_clip_count": 2, "required_clip_count": 3, "can_commit": False},
+            }
+        ]
+    }
+
+    participant = agent._participant_status(payload)
+
+    assert participant["state"] == "possible_match"
+    assert participant["possible_user_id"] == "user_008"
+    assert participant["learning_clip_count"] == 2
+    assert participant["ready_to_confirm"] is False
+
+
+def test_desktop_audio_agent_extracts_participant_name_from_intro_and_short_answer():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_name_extract_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+
+    assert audio_agent_module.DesktopAudioAgent._extract_participant_name(
+        "My name is Alex Chen",
+        allow_short_answer=False,
+    ) == "Alex Chen"
+    assert audio_agent_module.DesktopAudioAgent._extract_participant_name(
+        "Taylor",
+        allow_short_answer=True,
+    ) == "Taylor"
+    assert audio_agent_module.DesktopAudioAgent._extract_participant_name(
+        "open cornhole",
+        allow_short_answer=True,
+    ) == ""
+    assert audio_agent_module.DesktopAudioAgent._extract_participant_name(
+        "I'm lifting.",
+        allow_short_answer=True,
+    ) == ""
+    assert audio_agent_module.DesktopAudioAgent._extract_participant_name(
+        "I'm Taylor.",
+        allow_short_answer=False,
+    ) == ""
+
+
+def test_desktop_audio_agent_name_answer_automatically_binds_profile():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_auto_name_bind_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._participant_confirmed_user_id = ""
+    agent._identity_awaiting_name = True
+    agent._guest_turns = deque(maxlen=12)
+    agent._active_user_id = "user_005"
+    agent._active_user_last_seen_at = time.time()
+    agent._last_speaker_match = {}
+    logs = []
+    agent.log_store = SimpleNamespace(add=lambda *args, **kwargs: logs.append((args, kwargs)))
+
+    async def fake_handler(**kwargs):
+        assert kwargs["name"] == "Taylor"
+        agent._participant_confirmed_user_id = "user_005"
+        return {"user_id": "user_005", "message": "Using Taylor's existing profile."}
+
+    agent._auto_identity_handler = fake_handler
+
+    user_id, resolution = asyncio.run(agent._maybe_resolve_identity_from_text("Taylor"))
+
+    assert user_id == "user_005"
+    assert resolution == "operator_confirmed"
+    assert agent._identity_awaiting_name is False
+    assert list(agent._guest_turns)[0]["text"] == "Taylor"
+    assert any("Using Taylor's existing profile." in args[1] for args, _kwargs in logs)
+
+
+def test_desktop_audio_agent_switches_to_guest_after_repeated_current_user_mismatch(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_auto_switch_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    monkeypatch.setattr(audio_agent_module, "DEFAULT_SPEAKER_ID_AUTO_SWITCH_MISMATCH_REPEATS", 2)
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._speaker_id = SimpleNamespace(config=SimpleNamespace(match_threshold=0.38, match_margin=0.08))
+    agent._participant_confirmed_user_id = "user_001"
+    agent._active_user_id = "user_001"
+    agent._active_user_last_seen_at = time.time()
+    agent._last_speaker_match = {}
+    agent._confirmed_user_mismatch_count = 0
+    logs = []
+    agent.log_store = SimpleNamespace(add=lambda *args, **kwargs: logs.append((args, kwargs)))
+    mismatch = audio_agent_module.SpeakerMatchResult(
+        matched=False,
+        top1_user_id="user_002",
+        top1_score=0.25,
+        reason="below_score_threshold",
+    )
+
+    agent._update_last_speaker_match(mismatch, source="test")
+    assert agent._participant_confirmed_user_id == "user_001"
+    agent._update_last_speaker_match(mismatch, source="test")
+
+    assert agent._participant_confirmed_user_id == ""
+    assert agent._active_user_id == ""
+    assert any("different participant voice" in args[1] for args, _kwargs in logs)
+
+
+def test_desktop_audio_agent_name_question_cancels_current_native_reply():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_identity_exclusive_turn_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._participant_confirmed_user_id = ""
+    agent._participant_continue_as_guest = False
+    agent._auto_identity_candidate_id = ""
+    agent._auto_identity_candidate_count = 0
+    agent._identity_awaiting_name = False
+    agent._identity_question_asked_at = 0.0
+    agent.current_asr_mode = audio_agent_module.STREAMING_ASR_MODE_GEMINI_LIVE
+    agent.gemini_live_native_response_enabled = True
+    cancelled = []
+    spoken = []
+    agent.cancel_current_turn = lambda **kwargs: cancelled.append(kwargs)
+
+    async def fake_speak(**kwargs):
+        spoken.append(kwargs)
+
+    agent.manual_speak = fake_speak
+    agent.active_tts_backend = "piper"
+
+    asyncio.run(agent._auto_resolve_or_ask_name())
+
+    assert agent._identity_awaiting_name is True
+    assert agent._identity_prompt_suppress_native_output is True
+    assert cancelled == [{"reason": "auto_identity_question", "capture_barge_in": False}]
+    assert spoken[0]["text"] == "I don't think we've met yet. What's your name?"
+
+
+def test_desktop_audio_agent_unclear_name_retries_without_leaving_identity_flow():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_identity_name_retry_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._participant_confirmed_user_id = ""
+    agent._identity_awaiting_name = True
+    agent._identity_name_retry_count = 0
+    agent._identity_name_last_retry_at = 0.0
+    agent.current_asr_mode = audio_agent_module.STREAMING_ASR_MODE_GEMINI_LIVE
+    agent.gemini_live_native_response_enabled = True
+    agent.active_tts_backend = "piper"
+    cancelled = []
+    spoken = []
+    logs = []
+    agent.cancel_current_turn = lambda **kwargs: cancelled.append(kwargs)
+    agent.log_store = SimpleNamespace(add=lambda *args, **kwargs: logs.append((args, kwargs)))
+
+    async def fake_speak(**kwargs):
+        spoken.append(kwargs)
+
+    agent.manual_speak = fake_speak
+
+    user_id, resolution = asyncio.run(agent._maybe_resolve_identity_from_text("I'm"))
+
+    assert (user_id, resolution) == ("", "none")
+    assert agent._identity_awaiting_name is True
+    assert agent._identity_name_retry_count == 1
+    assert agent._identity_prompt_suppress_native_output is True
+    assert cancelled == [{"reason": "auto_identity_name_retry", "capture_barge_in": False}]
+    assert spoken[0]["text"] == "Sorry, I didn't catch that. Please say only your name."
+    assert any("recognition was unclear" in args[1] for args, _kwargs in logs)
+
+
+def test_desktop_audio_agent_gemini_unclear_name_does_not_continue_normal_reply():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_identity_name_consumed_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._listening = True
+    agent._identity_awaiting_name = True
+    agent._gemini_live_last_input_text = ""
+    agent._last_final_event_at = 0.0
+    agent._last_gemini_tool_command_at = 0.0
+    agent._participant_confirmed_user_id = ""
+    agent.gemini_live_native_response_enabled = True
+    agent._command_grammar = SimpleNamespace(
+        canonicalize=lambda text, allow_bare_game=False: SimpleNamespace(
+            canonical_text=text,
+            route_type="QUERY",
+            game_name="",
+            confidence=0.0,
+        )
+    )
+    logs = []
+    agent.log_store = SimpleNamespace(add=lambda *args, **kwargs: logs.append((args, kwargs)))
+    agent._record_user_transcript_event = lambda _text: None
+    agent._remember_guest_turn_text = lambda *_args, **_kwargs: None
+
+    async def fake_identity(_text):
+        return "", "none"
+
+    async def unexpected_speaker_resolution(**_kwargs):
+        raise AssertionError("speaker resolution should not run during the name retry turn")
+
+    agent._maybe_resolve_identity_from_text = fake_identity
+    agent._resolve_recent_speaker_user = unexpected_speaker_resolution
+
+    asyncio.run(agent._handle_gemini_live_user_turn("I'm"))
+
+    assert len(logs) == 1
+    assert logs[0][0][0] == "user"
+    assert logs[0][0][1] == "I'm"
+
+
+def test_desktop_audio_agent_identity_prompt_survives_gemini_turn_complete():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_identity_prompt_playback_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    player_calls = []
+    agent._player = SimpleNamespace(
+        end_stream=lambda: player_calls.append("end_stream"),
+        clear=lambda: player_calls.append("clear"),
+    )
+    agent._identity_prompt_suppress_native_output = True
+    agent._gemini_live_output_open = True
+    agent._gemini_live_input_text = ""
+    agent._assistant_buffer_text = "old Gemini reply"
+    agent._assistant_corr_id = "old-turn"
+    agent._gemini_live_output_text = "old Gemini reply"
+    agent._gemini_live_logged_output_text = ""
+
+    asyncio.run(agent._handle_gemini_live_server_content(SimpleNamespace(turn_complete=True)))
+
+    assert player_calls == ["end_stream"]
+    assert agent._identity_prompt_suppress_native_output is False
+    assert agent._gemini_live_output_open is False
+
+
 def test_speaker_id_match_threshold_margin_and_min_duration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     speaker_id = _load_module("speaker_id_match_module", PYTHON_VOICE_DIR / "speaker_id.py")
     config = speaker_id.SpeakerIdConfig(
@@ -126,7 +443,7 @@ def test_speaker_id_match_threshold_margin_and_min_duration(tmp_path: Path, monk
     below_threshold = service.match_audio(dummy_audio, 16000)
     assert below_threshold.matched is False
     assert below_threshold.top1_score < config.match_threshold
-    assert below_threshold.reason == "below_threshold"
+    assert below_threshold.reason == "below_score_threshold"
     assert below_threshold.top1_user_id == "alice"
     assert below_threshold.top2_user_id == "bob"
 
@@ -138,6 +455,7 @@ def test_speaker_id_match_threshold_margin_and_min_duration(tmp_path: Path, monk
     assert below_margin.matched is False
     assert below_margin.top1_score >= config.match_threshold
     assert below_margin.margin < config.match_margin
+    assert below_margin.reason == "below_margin_threshold"
 
     service._profiles = {
         "alice": {"centroid": speaker_id._normalize_embedding(_unit_vector(0.96, math.sqrt(1.0 - 0.96**2)))},
@@ -358,6 +676,189 @@ def test_desktop_audio_agent_requeues_invalid_enrollment_clip():
 
     assert call_count["value"] == 2
     assert any("ignored invalid enrollment clip" in args[1] for args, _kwargs in log_lines)
+
+
+def test_desktop_audio_agent_auto_voice_learning_rejects_noise_without_clear_transcript():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_auto_learning_noise_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._recent_credible_transcripts = deque()
+
+    sample_rate = 16000
+    rng = np.random.default_rng(7)
+    noise = rng.normal(0.0, 0.02, sample_rate * 2).astype(np.float32)
+    segment = audio_agent_module.CapturedSpeechSegment(
+        audio=noise,
+        sample_rate=sample_rate,
+        started_at=100.0,
+        ended_at=102.0,
+        speech_seconds=2.0,
+    )
+
+    useful, reason = agent._guest_learning_segment_quality(segment)
+
+    assert useful is False
+    assert "transcript" in reason.lower() or "background noise" in reason.lower()
+
+
+def test_desktop_audio_agent_auto_voice_learning_accepts_dynamic_audio_with_clear_transcript():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_auto_learning_voice_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._recent_credible_transcripts = deque([(102.2, "Hello, my name is Leo.")])
+
+    sample_rate = 16000
+    time_axis = np.arange(sample_rate * 2, dtype=np.float32) / sample_rate
+    envelope = np.tile(
+        np.concatenate(
+            [
+                np.full(sample_rate // 4, 0.15, dtype=np.float32),
+                np.full(sample_rate // 4, 1.0, dtype=np.float32),
+            ]
+        ),
+        4,
+    )
+    voice_like_audio = (0.08 * envelope * np.sin(2.0 * np.pi * 180.0 * time_axis)).astype(np.float32)
+    segment = audio_agent_module.CapturedSpeechSegment(
+        audio=voice_like_audio,
+        sample_rate=sample_rate,
+        started_at=100.0,
+        ended_at=102.0,
+        speech_seconds=2.0,
+    )
+
+    useful, reason = agent._guest_learning_segment_quality(segment)
+
+    assert useful is True
+    assert reason == ""
+
+
+def test_desktop_audio_agent_auto_voice_learning_accepts_gemini_confirmed_speech_without_usable_transcript():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_auto_learning_gemini_confirmation_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._recent_credible_transcripts = deque()
+    agent._recent_speech_confirmations = deque([102.2])
+
+    sample_rate = 16000
+    time_axis = np.arange(sample_rate, dtype=np.float32) / sample_rate
+    envelope = np.concatenate(
+        [
+            np.full(sample_rate // 2, 0.2, dtype=np.float32),
+            np.full(sample_rate // 2, 1.0, dtype=np.float32),
+        ]
+    )
+    voice_like_audio = (0.08 * envelope * np.sin(2.0 * np.pi * 180.0 * time_axis)).astype(np.float32)
+    segment = audio_agent_module.CapturedSpeechSegment(
+        audio=voice_like_audio,
+        sample_rate=sample_rate,
+        started_at=101.0,
+        ended_at=102.0,
+        speech_seconds=1.0,
+    )
+
+    useful, reason = agent._guest_learning_segment_quality(segment)
+
+    assert useful is True
+    assert reason == ""
+
+
+def test_desktop_audio_agent_auto_voice_learning_ignores_noise_transcripts():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_auto_learning_transcript_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+
+    assert audio_agent_module.DesktopAudioAgent._is_credible_voice_learning_transcript("<noise>") is False
+    assert audio_agent_module.DesktopAudioAgent._is_credible_voice_learning_transcript("[silence]") is False
+    assert audio_agent_module.DesktopAudioAgent._is_credible_voice_learning_transcript("um") is False
+    assert audio_agent_module.DesktopAudioAgent._is_credible_voice_learning_transcript("My name is Leo") is True
+
+
+def test_audio_frontend_does_not_treat_low_level_noise_after_silence_as_speech():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_frontend_noise_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    processor = audio_agent_module.AudioFrontEndProcessor(sample_rate_hz=16000, frame_size=320)
+    silence = np.zeros(320, dtype=np.float32)
+    for _ in range(audio_agent_module.DEFAULT_FRONTEND_NOISE_BOOTSTRAP_FRAMES + 2):
+        processor.process(silence)
+
+    time_axis = np.arange(320, dtype=np.float32) / 16000.0
+    low_noise = (0.001 * np.sin(2.0 * np.pi * 600.0 * time_axis)).astype(np.float32)
+    processor.process(low_noise)
+
+    assert not bool(processor.status().speech_active)
+
+
+def test_speaker_capture_discards_active_segment_when_assistant_starts_speaking():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_speaker_capture_assistant_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._speaker_capture_enabled = lambda: True
+    agent.is_assistant_speaking = lambda: True
+    agent._speaker_capture_suppress_until = 0.0
+    agent._speaker_segment_active = True
+    agent._speaker_segment_frames = [np.ones(320, dtype=np.float32)]
+    agent._speaker_segment_started_at = time.time() - 1.0
+    agent._speaker_segment_preroll_frames = deque([np.ones(320, dtype=np.float32)])
+
+    agent._update_speaker_capture(np.ones(320, dtype=np.float32), speech_active=True)
+
+    assert agent._speaker_segment_active is False
+    assert agent._speaker_segment_frames == []
+    assert list(agent._speaker_segment_preroll_frames) == []
+    assert agent._speaker_capture_suppress_until > time.time()
+
+
+def test_speaker_capture_ignores_echo_during_assistant_tail_window():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_speaker_capture_tail_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._speaker_capture_enabled = lambda: True
+    agent.is_assistant_speaking = lambda: False
+    agent._speaker_capture_suppress_until = time.time() + 1.0
+    agent._speaker_segment_active = False
+    agent._speaker_segment_frames = []
+    agent._speaker_segment_started_at = 0.0
+    agent._speaker_segment_preroll_frames = deque([np.ones(320, dtype=np.float32)])
+
+    agent._update_speaker_capture(np.ones(320, dtype=np.float32), speech_active=True)
+
+    assert agent._speaker_segment_active is False
+    assert list(agent._speaker_segment_preroll_frames) == []
 
 
 def test_desktop_audio_agent_suppresses_transcript_during_enrollment_cooldown():
@@ -766,6 +1267,153 @@ def test_gemini_live_input_transcription_keeps_cumulative_updates_clean():
     assert submitted == ["I want to play air hockey"]
 
 
+def test_gemini_live_input_transcription_replaces_non_english_text_in_english_mode():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_wake_alias_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._gemini_live_input_text = ""
+    agent._last_partial_text = ""
+    agent._last_stable_partial_text = ""
+    agent.gemini_live_force_english_transcripts = True
+    submitted = []
+
+    async def fake_user_turn(text):
+        submitted.append(text)
+
+    agent._handle_gemini_live_user_turn = fake_user_turn
+
+    asyncio.run(agent._handle_gemini_live_input_transcription(SimpleNamespace(text="太日球了。", finished=True)))
+
+    assert submitted == ["Speech recognized."]
+
+
+def test_gemini_live_input_transcription_replaces_short_non_english_text_in_english_mode():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_short_non_english_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._gemini_live_input_text = ""
+    agent._last_partial_text = ""
+    agent._last_stable_partial_text = ""
+    agent.gemini_live_force_english_transcripts = True
+    submitted = []
+
+    async def fake_user_turn(text):
+        submitted.append(text)
+
+    agent._handle_gemini_live_user_turn = fake_user_turn
+
+    asyncio.run(agent._handle_gemini_live_input_transcription(SimpleNamespace(text="嘿球。", finished=True)))
+
+    assert submitted == ["Speech recognized."]
+
+
+def test_gemini_live_partial_transcription_never_displays_non_english_text_in_english_mode():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_non_english_partial_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._gemini_live_input_text = ""
+    agent._last_partial_text = ""
+    agent._last_stable_partial_text = ""
+    agent.gemini_live_force_english_transcripts = True
+
+    asyncio.run(agent._handle_gemini_live_input_transcription(SimpleNamespace(text="嘿球。", finished=False)))
+
+    assert agent._last_partial_text == "Speech recognized."
+    assert agent._last_stable_partial_text == "Speech recognized."
+
+
+def test_gemini_live_turn_complete_normalizes_buffered_non_english_transcript():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_turn_complete_english_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._gemini_live_input_text = "嘿球。"
+    agent._last_partial_text = "Speech recognized."
+    agent._last_stable_partial_text = "Speech recognized."
+    agent.gemini_live_force_english_transcripts = True
+    agent._identity_prompt_suppress_native_output = False
+    agent.gemini_live_native_response_enabled = False
+    submitted = []
+
+    async def fake_user_turn(text):
+        submitted.append(text)
+
+    agent._handle_gemini_live_user_turn = fake_user_turn
+
+    asyncio.run(agent._handle_gemini_live_server_content(SimpleNamespace(turn_complete=True)))
+
+    assert submitted == ["Speech recognized."]
+    assert agent._gemini_live_input_text == ""
+
+
+def test_gemini_live_input_transcription_replaces_long_non_english_text():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_long_non_english_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._gemini_live_input_text = ""
+    agent._last_partial_text = ""
+    agent._last_stable_partial_text = ""
+    agent.gemini_live_force_english_transcripts = True
+    submitted = []
+
+    async def fake_user_turn(text):
+        submitted.append(text)
+
+    agent._handle_gemini_live_user_turn = fake_user_turn
+
+    asyncio.run(
+        agent._handle_gemini_live_input_transcription(
+            SimpleNamespace(text="这是一句明确而且较长的中文内容。", finished=True)
+        )
+    )
+
+    assert submitted == ["Speech recognized."]
+
+
+def test_gemini_live_unavailable_english_transcript_is_not_saved_to_memory():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_unavailable_transcript_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    logs = []
+    recorded = []
+    remembered = []
+    agent._listening = True
+    agent._gemini_live_last_input_text = ""
+    agent._last_final_event_at = 0.0
+    agent.log_store = SimpleNamespace(add=lambda *args, **kwargs: logs.append((args, kwargs)))
+    agent._record_user_transcript_event = lambda text: recorded.append(text)
+    agent._remember_guest_turn_text = lambda text, **_kwargs: remembered.append(text)
+
+    asyncio.run(agent._handle_gemini_live_user_turn("Speech recognized."))
+
+    assert recorded == []
+    assert remembered == []
+    assert logs[0][0][1] == "Speech recognized."
+
+
 def test_gemini_live_output_transcription_accumulates_delta_chunks():
     if str(PYTHON_VOICE_DIR) not in sys.path:
         sys.path.insert(0, str(PYTHON_VOICE_DIR))
@@ -916,7 +1564,7 @@ def test_desktop_audio_agent_live_captions_prefers_recent_strict_segment_over_ol
     assert recent_noise.caption_uses == 1
 
 
-def test_desktop_audio_agent_live_captions_can_use_recent_fallback_segment_window():
+def test_desktop_audio_agent_live_captions_match_requires_operator_confirmation():
     if str(PYTHON_VOICE_DIR) not in sys.path:
         sys.path.insert(0, str(PYTHON_VOICE_DIR))
 
@@ -957,9 +1605,9 @@ def test_desktop_audio_agent_live_captions_can_use_recent_fallback_segment_windo
         agent._resolve_recent_speaker_user(source="live_captions", observed_at=now)
     )
 
-    assert user_id == "user_003"
-    assert identity_resolution == "auto"
-    assert agent._active_user_id == "user_003"
+    assert user_id == ""
+    assert identity_resolution == "none"
+    assert agent._active_user_id == ""
     assert agent._last_speaker_match["matched"] is True
     assert agent._last_speaker_match["segment_used_fallback_window"] is True
     assert agent._last_speaker_match["segment_selection_window"] == "fallback"
@@ -969,6 +1617,105 @@ def test_desktop_audio_agent_live_captions_can_use_recent_fallback_segment_windo
     assert agent._last_speaker_match["candidate_count"] == 2
     assert agent._last_speaker_match["profile_candidate_count"] == 2
     assert older_voice.caption_uses == 1
+
+
+def test_desktop_audio_agent_keep_guest_discards_pending_voice_learning():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_keep_guest_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._active_user_id = "user_001"
+    agent._active_user_last_seen_at = time.time()
+    agent._last_speaker_match = {"matched": True}
+    agent._guest_learning_last_error = ""
+    agent._guest_turns = deque([{"role": "user", "text": "hello"}])
+    agent._speaker_id = SimpleNamespace(clear_pending=lambda user_id: {"user_id": user_id, "pending_clip_count": 0})
+
+    summary = asyncio.run(agent.keep_guest_participant())
+
+    assert summary["pending_clip_count"] == 0
+    assert agent._active_user_id == ""
+    assert agent._participant_continue_as_guest is True
+    assert list(agent._guest_turns) == []
+
+
+def test_desktop_audio_agent_clear_current_speaker_profile_restarts_guest_identity_flow():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_clear_current_profile_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._active_user_id = "user_001"
+    agent._active_user_last_seen_at = time.time()
+    agent._last_speaker_match = {"matched": True}
+    agent._participant_confirmed_user_id = "user_001"
+    agent._participant_continue_as_guest = True
+    agent._identity_awaiting_name = True
+    agent._identity_question_asked_at = time.time()
+    agent._auto_identity_candidate_id = "user_001"
+    agent._auto_identity_candidate_count = 2
+    agent._confirmed_user_mismatch_count = 2
+    agent._guest_turns = deque([{"role": "user", "text": "hello"}])
+    calls = []
+    agent._speaker_id = SimpleNamespace(
+        clear_profile=lambda user_id: calls.append(("profile", user_id)) or {"user_id": user_id, "has_profile": False},
+        clear_pending=lambda user_id: calls.append(("pending", user_id)) or {"user_id": user_id, "pending_clip_count": 0},
+    )
+
+    summary = asyncio.run(agent.clear_speaker_profile(user_id="user_001"))
+
+    assert summary["has_profile"] is False
+    assert calls == [("profile", "user_001"), ("pending", audio_agent_module.GUEST_SPEAKER_ID)]
+    assert agent._active_user_id == ""
+    assert agent._participant_confirmed_user_id == ""
+    assert agent._identity_awaiting_name is False
+    assert agent._participant_continue_as_guest is False
+    assert list(agent._guest_turns) == []
+
+
+def test_desktop_audio_agent_clear_noncurrent_speaker_profile_removes_stale_match_state():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_clear_stale_profile_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._active_user_id = ""
+    agent._active_user_last_seen_at = 0.0
+    agent._last_speaker_match = {"top1_user_id": "user_002", "top1_score": 0.9}
+    agent._participant_confirmed_user_id = ""
+    agent._participant_continue_as_guest = False
+    agent._identity_awaiting_name = False
+    agent._identity_question_asked_at = 0.0
+    agent._auto_identity_candidate_id = "user_002"
+    agent._auto_identity_candidate_count = 2
+    agent._auto_identity_candidate_last_at = time.time()
+    agent._confirmed_user_mismatch_count = 0
+    agent._recent_speaker_segments = deque([SimpleNamespace()])
+    agent._guest_turns = deque([{"role": "user", "text": "hello"}])
+    calls = []
+    agent._speaker_id = SimpleNamespace(
+        clear_profile=lambda user_id: calls.append(("profile", user_id)) or {"user_id": user_id, "has_profile": False},
+        clear_pending=lambda user_id: calls.append(("pending", user_id)) or {"user_id": user_id, "pending_clip_count": 0},
+    )
+
+    asyncio.run(agent.clear_speaker_profile(user_id="user_002"))
+
+    assert agent._last_speaker_match == {}
+    assert agent._auto_identity_candidate_id == ""
+    assert agent._auto_identity_candidate_count == 0
+    assert list(agent._recent_speaker_segments) == []
+    assert "user_002" in agent._deleted_speaker_user_ids
+    assert calls == [("profile", "user_002"), ("pending", audio_agent_module.GUEST_SPEAKER_ID)]
 
 
 def test_desktop_audio_agent_live_captions_blocks_stale_fallback_segment():
@@ -1283,6 +2030,80 @@ def test_desktop_audio_agent_gemini_live_declares_local_knowledge_tool():
     declarations = tools[0].function_declarations
     assert declarations[0].name == "search_local_knowledge"
     assert "local knowledge" in agent._gemini_live_system_instruction().lower()
+
+
+def test_desktop_audio_agent_gemini_live_declares_current_participant_tool():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_participant_identity_declare_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent.gemini_live_command_tools_enabled = False
+    agent.gemini_live_local_knowledge_enabled = True
+    agent._auto_identity_handler = lambda **_kwargs: {}
+
+    tools = agent._gemini_live_command_tools()
+
+    declarations = tools[0].function_declarations
+    assert declarations[0].name == "get_current_participant"
+    assert declarations[1].name == "search_participant_history"
+    assert declarations[2].name == "search_local_knowledge"
+    instruction = agent._gemini_live_system_instruction().lower()
+    assert "do not use search_local_knowledge for the current participant's identity" in instruction
+
+
+def test_desktop_audio_agent_identity_query_uses_current_profile_not_local_knowledge(monkeypatch, tmp_path: Path):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_participant_identity_call_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    memory_path = tmp_path / "user_memory.json"
+    memory_path.write_text(
+        json.dumps({"profiles": {"user_012": {"display_name": "Leo"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DIALOG_USER_MEMORY_PATH", str(memory_path))
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._active_user_fallback = lambda: ("user_012", "operator_confirmed")
+
+    result = asyncio.run(
+        agent._execute_gemini_live_function_call(
+            name="search_local_knowledge",
+            args={"query": "What is my name?"},
+        )
+    )
+
+    assert result["identified"] is True
+    assert result["display_name"] == "Leo"
+    assert result["spoken_text"] == "Your name is Leo."
+
+
+def test_desktop_audio_agent_identity_query_reports_unknown_without_profile():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_gemini_participant_identity_unknown_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._active_user_fallback = lambda: ("", "none")
+
+    result = asyncio.run(
+        agent._execute_gemini_live_function_call(
+            name="get_current_participant",
+            args={},
+        )
+    )
+
+    assert result["identified"] is False
+    assert result["spoken_text"] == "I haven't identified you yet."
 
 
 def test_desktop_audio_agent_gemini_live_local_knowledge_tool_calls_endpoint():
@@ -1922,3 +2743,119 @@ def test_desktop_runtime_clear_speaker_profile_for_user(tmp_path: Path):
     assert "user_001" not in payload["users"]
     assert "user_002" in payload["users"]
     assert runtime_module._clear_speaker_profile_for_user(memory_path, "missing") is False
+
+
+def test_desktop_runtime_clears_unlinked_runtime_speaker_profiles(monkeypatch: pytest.MonkeyPatch):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    runtime_module = _load_module(
+        "desktop_runtime_unlinked_speaker_profiles_module",
+        PYTHON_VOICE_DIR / "desktop_runtime.py",
+    )
+    cleared = []
+
+    class FakeAudioAgent:
+        async def speaker_profiles_status(self):
+            return {
+                "users": [
+                    {"user_id": "user_001"},
+                    {"user_id": "user_008"},
+                    {"user_id": "__guest__"},
+                ]
+            }
+
+        async def clear_speaker_profile(self, *, user_id):
+            cleared.append(user_id)
+            return {"user_id": user_id, "has_profile": False}
+
+    monkeypatch.setattr(runtime_module, "audio_agent", FakeAudioAgent())
+
+    result = asyncio.run(runtime_module._clear_unlinked_runtime_speaker_profiles({"user_001"}))
+
+    assert result == ["user_008"]
+    assert cleared == ["user_008"]
+
+
+def test_desktop_runtime_migrates_guest_turns_into_confirmed_memory(tmp_path: Path):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    runtime_module = _load_module("desktop_runtime_guest_migration_module", PYTHON_VOICE_DIR / "desktop_runtime.py")
+    memory_path = tmp_path / "user_memory.json"
+    memory_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "next_user_index": 2,
+                "identity_map": {},
+                "profiles": {
+                    "user_001": runtime_module._normalize_memory_profile(
+                        "user_001",
+                        {"display_name": "Lio"},
+                        None,
+                    )
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    migrated = runtime_module._migrate_guest_turns_to_memory(
+        memory_path,
+        "user_001",
+        [{"role": "user", "text": "I really enjoy disc golf.", "ts": 123.0}],
+    )
+
+    payload = json.loads(memory_path.read_text(encoding="utf-8"))
+    profile = payload["profiles"]["user_001"]
+    assert migrated == 1
+    assert profile["dialog_turns"][-1]["text"] == "I really enjoy disc golf."
+    assert set(profile) == {"display_name", "dialog_turns"}
+
+
+def test_desktop_runtime_memory_payload_lists_unlinked_speaker_profiles(tmp_path: Path):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    runtime_module = _load_module("desktop_runtime_unlinked_speaker_module", PYTHON_VOICE_DIR / "desktop_runtime.py")
+    memory_path = tmp_path / "user_memory.json"
+    memory_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "next_user_index": 2,
+                "identity_map": {},
+                "profiles": {"user_001": {"display_name": "Known User"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    memory_path.with_name("speaker_profiles.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "users": {
+                    "user_001": {"clip_count": 3, "centroid": [1.0, 0.0]},
+                    "user_002": {"clip_count": 4, "centroid": [0.0, 1.0], "updated_ts": 12.0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = runtime_module._memory_payload(memory_path, "", "loaded")
+
+    assert [item["user_id"] for item in payload["users"]] == ["user_001"]
+    assert payload["unlinked_speaker_profiles"] == [
+        {"user_id": "user_002", "clip_count": 4, "updated_ts": 12.0}
+    ]

@@ -181,6 +181,9 @@ DEFAULT_FRONTEND_SILENCE_ATTENUATION = float(
     os.getenv("AUDIO_AGENT_FRONTEND_SILENCE_ATTENUATION", "0.9") or "0.9"
 )
 DEFAULT_FRONTEND_SPEECH_MARGIN_DB = float(os.getenv("AUDIO_AGENT_FRONTEND_SPEECH_MARGIN_DB", "8.0") or "8.0")
+DEFAULT_FRONTEND_MIN_SPEECH_RMS_DBFS = float(
+    os.getenv("AUDIO_AGENT_FRONTEND_MIN_SPEECH_RMS_DBFS", "-58.0") or "-58.0"
+)
 DEFAULT_FRONTEND_CLIP_THRESHOLD = float(os.getenv("AUDIO_AGENT_FRONTEND_CLIP_THRESHOLD", "0.985") or "0.985")
 DEFAULT_FRONTEND_HANGOVER_FRAMES = int(os.getenv("AUDIO_AGENT_FRONTEND_HANGOVER_FRAMES", "28") or "28")
 DEFAULT_FRONTEND_NOISE_BOOTSTRAP_FRAMES = int(
@@ -250,11 +253,49 @@ DEFAULT_SPEAKER_ID_LIVE_CAPTIONS_MAX_CANDIDATES = int(
 DEFAULT_SPEAKER_ID_ACTIVE_FALLBACK_SECONDS = float(
     os.getenv("VOICE_SPEAKER_ID_ACTIVE_FALLBACK_SECONDS", "30.0") or "30.0"
 )
+GUEST_SPEAKER_ID = "__guest__"
+DEFAULT_SPEAKER_ID_AUTO_GUEST_LEARNING = str(
+    os.getenv("VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING", "1") or "1"
+).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+DEFAULT_SPEAKER_ID_GUEST_MAX_CLIPS = int(os.getenv("VOICE_SPEAKER_ID_GUEST_MAX_CLIPS", "5") or "5")
+DEFAULT_SPEAKER_ID_AUTO_LEARNING_REQUIRE_TRANSCRIPT = str(
+    os.getenv("VOICE_SPEAKER_ID_AUTO_LEARNING_REQUIRE_TRANSCRIPT", "1") or "1"
+).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+DEFAULT_SPEAKER_ID_AUTO_LEARNING_TRANSCRIPT_WAIT_SECONDS = float(
+    os.getenv("VOICE_SPEAKER_ID_AUTO_LEARNING_TRANSCRIPT_WAIT_SECONDS", "2.5") or "2.5"
+)
+DEFAULT_SPEAKER_ID_AUTO_LEARNING_TRANSCRIPT_WINDOW_SECONDS = float(
+    os.getenv("VOICE_SPEAKER_ID_AUTO_LEARNING_TRANSCRIPT_WINDOW_SECONDS", "8.0") or "8.0"
+)
+DEFAULT_SPEAKER_ID_AUTO_LEARNING_MIN_RMS_DBFS = float(
+    os.getenv("VOICE_SPEAKER_ID_AUTO_LEARNING_MIN_RMS_DBFS", "-50.0") or "-50.0"
+)
+DEFAULT_SPEAKER_ID_AUTO_LEARNING_MIN_DYNAMIC_DB = float(
+    os.getenv("VOICE_SPEAKER_ID_AUTO_LEARNING_MIN_DYNAMIC_DB", "4.0") or "4.0"
+)
+DEFAULT_SPEAKER_ID_ASSISTANT_TAIL_SECONDS = float(
+    os.getenv("VOICE_SPEAKER_ID_ASSISTANT_TAIL_SECONDS", "2.0") or "2.0"
+)
+DEFAULT_SPEAKER_ID_POSSIBLE_MATCH_THRESHOLD = float(
+    os.getenv("VOICE_SPEAKER_ID_POSSIBLE_MATCH_THRESHOLD", "0.28") or "0.28"
+)
+DEFAULT_SPEAKER_ID_AUTO_MATCH_THRESHOLD = float(
+    os.getenv("VOICE_SPEAKER_ID_AUTO_MATCH_THRESHOLD", "0.55") or "0.55"
+)
+DEFAULT_SPEAKER_ID_AUTO_MATCH_REPEATS = int(os.getenv("VOICE_SPEAKER_ID_AUTO_MATCH_REPEATS", "2") or "2")
+DEFAULT_SPEAKER_ID_AUTO_SWITCH_MISMATCH_REPEATS = int(
+    os.getenv("VOICE_SPEAKER_ID_AUTO_SWITCH_MISMATCH_REPEATS", "3") or "3"
+)
 DEFAULT_GEMINI_LIVE_MODEL = (
     os.getenv("GEMINI_LIVE_MODEL", "models/gemini-2.5-flash-native-audio-latest")
     or "models/gemini-2.5-flash-native-audio-latest"
 )
 DEFAULT_GEMINI_LIVE_VOICE = os.getenv("GEMINI_LIVE_VOICE", "Kore") or "Kore"
+DEFAULT_GEMINI_LIVE_LANGUAGE_CODE = os.getenv("GEMINI_LIVE_LANGUAGE_CODE", "en-US") or "en-US"
+DEFAULT_GEMINI_LIVE_FORCE_ENGLISH_TRANSCRIPTS = str(
+    os.getenv("VOICE_GEMINI_LIVE_FORCE_ENGLISH_TRANSCRIPTS", "1") or "1"
+).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+GEMINI_LIVE_ENGLISH_TRANSCRIPT_FALLBACK = "Speech recognized."
 DEFAULT_GEMINI_LIVE_OUTPUT_SAMPLE_RATE = 24000
 DEFAULT_GEMINI_LIVE_QUEUE_MAX_FRAMES = int(os.getenv("GEMINI_LIVE_QUEUE_MAX_FRAMES", "96") or "96")
 DEFAULT_GEMINI_LIVE_SUPPRESS_DURING_ASSISTANT = str(
@@ -265,6 +306,8 @@ DEFAULT_GEMINI_LIVE_ASSISTANT_TAIL_SECONDS = float(
 )
 DEFAULT_GEMINI_LIVE_SYSTEM_PROMPT = (
     "You are Rachel, a warm voice companion in a rehabilitation and exercise game system. "
+    "Treat incoming speech as English unless the user explicitly asks to use another language. "
+    "Respond only in English unless the user explicitly requests another language. "
     "Sound natural and supportive. Keep spoken replies concise and clear. "
     "Treat each user turn as part of an ongoing conversation. "
     "Do not force every topic back to exercise. "
@@ -1199,7 +1242,10 @@ class AudioFrontEndProcessor:
             speaking = peak_dbfs > -18.0 or rms_dbfs > -30.0
         else:
             speaking = (
-                rms_dbfs > (self._noise_floor_dbfs + DEFAULT_FRONTEND_SPEECH_MARGIN_DB)
+                (
+                    rms_dbfs > (self._noise_floor_dbfs + DEFAULT_FRONTEND_SPEECH_MARGIN_DB)
+                    and rms_dbfs > DEFAULT_FRONTEND_MIN_SPEECH_RMS_DBFS
+                )
                 or peak_dbfs > -24.0
                 or rms_dbfs > -36.0
             )
@@ -1632,6 +1678,11 @@ class DesktopAudioAgent:
         self.conversation_dispatch_enabled = True
         self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
         self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
+        self.gemini_live_language_code = _env("GEMINI_LIVE_LANGUAGE_CODE", DEFAULT_GEMINI_LIVE_LANGUAGE_CODE)
+        self.gemini_live_force_english_transcripts = _env_bool(
+            "VOICE_GEMINI_LIVE_FORCE_ENGLISH_TRANSCRIPTS",
+            DEFAULT_GEMINI_LIVE_FORCE_ENGLISH_TRANSCRIPTS,
+        )
         self.gemini_live_native_response_enabled = _env_bool("VOICE_GEMINI_LIVE_NATIVE_RESPONSE", False)
         self.gemini_live_command_tools_enabled = _env_bool(
             "VOICE_GEMINI_LIVE_COMMAND_TOOLS_ENABLED",
@@ -1666,10 +1717,29 @@ class DesktopAudioAgent:
         self._last_final_transcript_seq = 0
         self._last_reported_transcript_text = ""
         self._last_reported_transcript_at = 0.0
+        self._recent_credible_transcripts: Deque[Tuple[float, str]] = deque(maxlen=24)
+        self._recent_speech_confirmations: Deque[float] = deque(maxlen=24)
         self._last_assistant_spoke_at = 0.0
+        self._speaker_capture_suppress_until = 0.0
         self._active_user_id = ""
         self._active_user_last_seen_at = 0.0
         self._last_speaker_match: Dict[str, Any] = {}
+        self._deleted_speaker_user_ids: set[str] = set()
+        self._guest_learning_last_error = ""
+        self._guest_turns: Deque[Dict[str, Any]] = deque(maxlen=12)
+        self._participant_continue_as_guest = False
+        self._participant_confirmed_user_id = ""
+        self._auto_identity_handler: Optional[Callable[..., Any]] = None
+        self._identity_awaiting_name = False
+        self._identity_question_asked_at = 0.0
+        self._identity_name_retry_count = 0
+        self._identity_name_last_retry_at = 0.0
+        self._identity_resolution_task: Optional[asyncio.Task[Any]] = None
+        self._identity_prompt_suppress_native_output = False
+        self._auto_identity_candidate_id = ""
+        self._auto_identity_candidate_count = 0
+        self._auto_identity_candidate_last_at = 0.0
+        self._confirmed_user_mismatch_count = 0
         self._recent_assistant_texts: Deque[Tuple[float, str]] = deque(
             maxlen=max(32, DEFAULT_LIVE_CAPTIONS_ASSISTANT_VARIANT_LIMIT)
         )
@@ -1820,6 +1890,158 @@ class DesktopAudioAgent:
             return normalize_asr_mode(self.cloud_asr_mode)
         return normalize_asr_mode(self.local_asr_mode)
 
+    def set_auto_identity_handler(self, handler: Optional[Callable[..., Any]]) -> None:
+        self._auto_identity_handler = handler
+
+    @staticmethod
+    def _extract_participant_name(text: str, *, allow_short_answer: bool) -> str:
+        normalized = _collapse_spaces(str(text or "")).strip(" .,!?:;\"'")
+        if not normalized:
+            return ""
+        explicit_patterns = (
+            r"\bmy name is\s+([A-Za-z][A-Za-z' -]{0,40})$",
+            r"\bcall me\s+([A-Za-z][A-Za-z' -]{0,40})$",
+        )
+        for pattern in explicit_patterns:
+            match = re.search(pattern, normalized, flags=re.IGNORECASE)
+            if match:
+                return _collapse_spaces(match.group(1)).strip(" .,!?:;\"'").title()
+        if allow_short_answer:
+            for pattern in (
+                r"\bi am\s+([A-Za-z][A-Za-z' -]{0,40})$",
+                r"\bi['’]?m\s+([A-Za-z][A-Za-z' -]{0,40})$",
+            ):
+                match = re.search(pattern, normalized, flags=re.IGNORECASE)
+                if match:
+                    candidate = _collapse_spaces(match.group(1)).strip(" .,!?:;\"'")
+                    if candidate and not candidate.casefold().endswith("ing"):
+                        return candidate.title()
+                    return ""
+        if allow_short_answer and re.fullmatch(r"[A-Za-z][A-Za-z' -]{0,30}", normalized):
+            parts = normalized.split()
+            if 1 <= len(parts) <= 3:
+                blocked = {"yes", "no", "okay", "ok", "hello", "hi", "thanks", "thank you", "guest"}
+                blocked_starts = {"open", "start", "play", "close", "exit", "stop", "launch", "back", "i'm", "i", "im"}
+                if normalized.casefold() not in blocked and parts[0].casefold() not in blocked_starts:
+                    return normalized.title()
+        return ""
+
+    async def _run_auto_identity(self, *, candidate_user_id: str = "", name: str = "") -> Dict[str, Any]:
+        handler = getattr(self, "_auto_identity_handler", None)
+        if handler is None:
+            return {}
+        result = handler(candidate_user_id=str(candidate_user_id or ""), name=str(name or ""))
+        if asyncio.iscoroutine(result):
+            result = await result
+        return dict(result or {}) if isinstance(result, dict) else {}
+
+    async def _maybe_resolve_identity_from_text(self, text: str) -> Tuple[str, str]:
+        if str(getattr(self, "_participant_confirmed_user_id", "") or "").strip():
+            return self._active_user_fallback(reference_ts=time.time())
+        awaiting_name = bool(getattr(self, "_identity_awaiting_name", False))
+        name = self._extract_participant_name(
+            text,
+            allow_short_answer=awaiting_name,
+        )
+        if name:
+            self._remember_guest_turn_text(text)
+            try:
+                result = await self._run_auto_identity(name=name)
+            except Exception as exc:
+                self.log_store.add(
+                    "system",
+                    f"automatic identity resolution failed: {exc}",
+                    speaker="system",
+                    source="auto_identity",
+                )
+                return "", "none"
+            if str(result.get("user_id") or "").strip():
+                self._identity_awaiting_name = False
+                self._identity_name_retry_count = 0
+                self._identity_name_last_retry_at = 0.0
+                self.log_store.add(
+                    "system",
+                    str(result.get("message") or f"participant identified as {name}"),
+                    speaker="system",
+                    source="auto_identity",
+                )
+                return self._active_user_fallback(reference_ts=time.time())
+        elif awaiting_name:
+            await self._retry_participant_name_prompt()
+        return "", "none"
+
+    async def _speak_identity_prompt(self, text: str, *, reason: str) -> None:
+        self._identity_prompt_suppress_native_output = (
+            self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE
+            and bool(getattr(self, "gemini_live_native_response_enabled", False))
+        )
+        self.cancel_current_turn(reason=reason, capture_barge_in=False)
+        await self.manual_speak(
+            text=text,
+            backend=self.active_tts_backend,
+            source="auto_identity",
+            speaker_label="RACHEL",
+        )
+
+    async def _retry_participant_name_prompt(self) -> None:
+        now = time.time()
+        if (now - float(getattr(self, "_identity_name_last_retry_at", 0.0) or 0.0)) < 2.0:
+            return
+        self._identity_name_last_retry_at = now
+        self._identity_name_retry_count = int(getattr(self, "_identity_name_retry_count", 0) or 0) + 1
+        self.log_store.add(
+            "system",
+            "Name recognition was unclear; asking the participant to try again.",
+            speaker="system",
+            source="auto_identity",
+        )
+        await self._speak_identity_prompt(
+            "Sorry, I didn't catch that. Please say only your name.",
+            reason="auto_identity_name_retry",
+        )
+
+    def _remember_guest_turn_text(self, text: str, *, ts: Optional[float] = None) -> None:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return
+        if not hasattr(self, "_guest_turns"):
+            self._guest_turns = deque(maxlen=12)
+        turns = list(self._guest_turns)
+        if turns and str(turns[-1].get("text") or "").strip() == normalized:
+            return
+        self._guest_turns.append({"role": "user", "text": normalized, "ts": float(ts or time.time())})
+
+    async def _auto_resolve_or_ask_name(self) -> None:
+        await asyncio.sleep(0.1)
+        if str(getattr(self, "_participant_confirmed_user_id", "") or "").strip():
+            return
+        if bool(getattr(self, "_participant_continue_as_guest", False)):
+            return
+        candidate = str(getattr(self, "_auto_identity_candidate_id", "") or "").strip()
+        evidence_count = int(getattr(self, "_auto_identity_candidate_count", 0) or 0)
+        if candidate and evidence_count >= max(1, DEFAULT_SPEAKER_ID_AUTO_MATCH_REPEATS):
+            result = await self._run_auto_identity(candidate_user_id=candidate)
+            if str(result.get("user_id") or "").strip():
+                self.log_store.add(
+                    "system",
+                    str(result.get("message") or f"recognized participant {candidate}"),
+                    speaker="system",
+                    source="auto_identity",
+                )
+                return
+        if self._identity_awaiting_name:
+            return
+        if (time.time() - float(self._identity_question_asked_at or 0.0)) < 60.0:
+            return
+        self._identity_awaiting_name = True
+        self._identity_question_asked_at = time.time()
+        self._identity_name_retry_count = 0
+        self._identity_name_last_retry_at = 0.0
+        await self._speak_identity_prompt(
+            "I don't think we've met yet. What's your name?",
+            reason="auto_identity_question",
+        )
+
     def _preferred_streaming_asr_mode(self, profile: str) -> str:
         normalized = _normalize_profile(profile)
         if normalized == CONVERSATION_PROFILE_CLOUD:
@@ -1897,17 +2119,54 @@ class DesktopAudioAgent:
         source: str,
         extras: Optional[Dict[str, Any]] = None,
     ) -> None:
+        candidate_id = str(result.top1_user_id or result.user_id or "").strip()
+        if candidate_id and candidate_id in getattr(self, "_deleted_speaker_user_ids", set()):
+            result = SpeakerMatchResult(reason="profile_deleted")
         payload = result.to_payload()
         payload["profile_candidate_count"] = int(payload.get("candidate_count") or 0)
+        speaker_config = getattr(self._speaker_id, "config", None)
+        payload["match_threshold"] = float(getattr(speaker_config, "match_threshold", 0.38) or 0.38)
+        payload["match_margin_threshold"] = float(getattr(speaker_config, "match_margin", 0.08) or 0.08)
         payload["source"] = str(source or "")
         payload["ts"] = time.time()
         if extras:
             payload.update(extras)
         self._last_speaker_match = payload
-        if result.matched:
-            self._active_user_id = str(result.user_id or "").strip()
-            self._active_user_last_seen_at = float(payload.get("ts") or time.time())
-        elif str(result.reason or "") in {"stale_fallback_segment"}:
+        candidate_id = str(result.top1_user_id or result.user_id or "").strip()
+        score = float(result.top1_score or result.score or 0.0)
+        now = float(payload.get("ts") or time.time())
+        if result.matched and candidate_id and score >= DEFAULT_SPEAKER_ID_AUTO_MATCH_THRESHOLD:
+            if (
+                candidate_id == str(getattr(self, "_auto_identity_candidate_id", "") or "")
+                and (now - float(getattr(self, "_auto_identity_candidate_last_at", 0.0) or 0.0)) <= 30.0
+            ):
+                self._auto_identity_candidate_count = int(getattr(self, "_auto_identity_candidate_count", 0) or 0) + 1
+            else:
+                self._auto_identity_candidate_id = candidate_id
+                self._auto_identity_candidate_count = 1
+            self._auto_identity_candidate_last_at = now
+        confirmed_user = str(getattr(self, "_participant_confirmed_user_id", "") or "").strip()
+        if confirmed_user:
+            if result.matched and str(result.user_id or "").strip() == confirmed_user:
+                self._confirmed_user_mismatch_count = 0
+            else:
+                self._confirmed_user_mismatch_count = int(getattr(self, "_confirmed_user_mismatch_count", 0) or 0) + 1
+                if self._confirmed_user_mismatch_count >= max(1, DEFAULT_SPEAKER_ID_AUTO_SWITCH_MISMATCH_REPEATS):
+                    self._participant_confirmed_user_id = ""
+                    self._active_user_id = ""
+                    self._active_user_last_seen_at = 0.0
+                    self._identity_awaiting_name = False
+                    self._identity_question_asked_at = 0.0
+                    self._identity_name_retry_count = 0
+                    self._identity_name_last_retry_at = 0.0
+                    self._confirmed_user_mismatch_count = 0
+                    self.log_store.add(
+                        "system",
+                        "A different participant voice was detected. Starting automatic identity setup.",
+                        speaker="system",
+                        source="auto_identity",
+                    )
+        if str(result.reason or "") in {"stale_fallback_segment"}:
             self._active_user_id = ""
             self._active_user_last_seen_at = 0.0
 
@@ -1915,6 +2174,9 @@ class DesktopAudioAgent:
         return dict(self._last_speaker_match or {})
 
     def _active_user_fallback(self, *, reference_ts: Optional[float] = None) -> Tuple[str, str]:
+        confirmed_user = str(getattr(self, "_participant_confirmed_user_id", "") or "").strip()
+        if confirmed_user:
+            return confirmed_user, "operator_confirmed"
         active_user = str(getattr(self, "_active_user_id", "") or "").strip()
         if not active_user:
             return "", "none"
@@ -2105,6 +2367,103 @@ class DesktopAudioAgent:
             self._loop.call_soon_threadsafe(
                 lambda: asyncio.create_task(self._consume_next_enrollment_segment(segment))
             )
+        elif DEFAULT_SPEAKER_ID_AUTO_GUEST_LEARNING and not self._active_user_fallback(reference_ts=ended_at)[0]:
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._collect_guest_speaker_segment(segment))
+            )
+
+    async def _collect_guest_speaker_segment(self, segment: CapturedSpeechSegment) -> None:
+        if not self._speaker_id_enabled() or not self._speaker_id.ready:
+            return
+        if bool(getattr(self, "_participant_continue_as_guest", False)):
+            return
+        await asyncio.sleep(min(0.5, max(0.0, DEFAULT_SPEAKER_ID_AUTO_LEARNING_TRANSCRIPT_WAIT_SECONDS)))
+        if self._active_user_fallback(reference_ts=time.time())[0]:
+            return
+        confirmation_deadline = float(segment.ended_at) + max(
+            DEFAULT_SPEAKER_ID_AUTO_LEARNING_TRANSCRIPT_WAIT_SECONDS,
+            DEFAULT_SPEAKER_ID_AUTO_LEARNING_TRANSCRIPT_WINDOW_SECONDS,
+        )
+        while True:
+            useful, reason = self._guest_learning_segment_quality(segment)
+            if useful:
+                break
+            waiting_for_confirmation = "no confirmed speech turn" in reason
+            if not waiting_for_confirmation or time.time() >= confirmation_deadline:
+                logger.debug("Skipped automatic guest voice sample: %s", reason)
+                self._guest_learning_last_error = ""
+                return
+            await asyncio.sleep(0.4)
+        try:
+            pending = await asyncio.to_thread(self._speaker_id.pending_summary, GUEST_SPEAKER_ID)
+            if int(pending.get("pending_clip_count") or 0) >= max(1, DEFAULT_SPEAKER_ID_GUEST_MAX_CLIPS):
+                return
+            summary = await asyncio.to_thread(
+                self._speaker_id.add_pending_clip,
+                GUEST_SPEAKER_ID,
+                segment.audio,
+                segment.sample_rate,
+            )
+            self._guest_learning_last_error = ""
+            clip_count = int(summary.get("pending_clip_count") or 0)
+            required_clip_count = int(summary.get("required_clip_count") or 3)
+            if bool(summary.get("can_commit")):
+                message = "Voice learning is ready. Confirm this participant or create a new profile."
+            else:
+                message = f"Voice learning captured sample {clip_count}/{required_clip_count}."
+            self.log_store.add(
+                "system",
+                message,
+                speaker="system",
+                source="speaker_learning",
+            )
+            if bool(summary.get("can_commit")) and (
+                self._identity_resolution_task is None or self._identity_resolution_task.done()
+            ):
+                self._identity_resolution_task = asyncio.create_task(self._auto_resolve_or_ask_name())
+        except ValueError:
+            # Natural conversation often produces short fragments; they are simply not useful samples.
+            return
+        except Exception as exc:
+            self._guest_learning_last_error = str(exc)
+
+    def _guest_learning_segment_quality(self, segment: CapturedSpeechSegment) -> Tuple[bool, str]:
+        audio = np.asarray(segment.audio, dtype=np.float32).reshape(-1)
+        if audio.size <= 0:
+            return False, "Ignored automatic voice sample: empty audio."
+
+        rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
+        rms_dbfs = 20.0 * np.log10(max(rms, 1e-8))
+        if rms_dbfs < DEFAULT_SPEAKER_ID_AUTO_LEARNING_MIN_RMS_DBFS:
+            return False, "Ignored automatic voice sample: input was too quiet."
+
+        frame_size = max(1, int(segment.sample_rate * 0.02))
+        usable_size = (audio.size // frame_size) * frame_size
+        if usable_size >= frame_size * 3:
+            frame_rms = np.sqrt(
+                np.mean(
+                    np.square(audio[:usable_size].reshape(-1, frame_size), dtype=np.float64),
+                    axis=1,
+                )
+            )
+            dynamic_db = 20.0 * np.log10(
+                max(float(np.percentile(frame_rms, 90)), 1e-8)
+                / max(float(np.percentile(frame_rms, 20)), 1e-8)
+            )
+            if dynamic_db < DEFAULT_SPEAKER_ID_AUTO_LEARNING_MIN_DYNAMIC_DB:
+                return False, "Ignored automatic voice sample: audio looked like steady background noise."
+
+        if DEFAULT_SPEAKER_ID_AUTO_LEARNING_REQUIRE_TRANSCRIPT:
+            events = getattr(self, "_recent_credible_transcripts", ())
+            confirmations = getattr(self, "_recent_speech_confirmations", ())
+            earliest = float(segment.started_at)
+            latest = float(segment.ended_at) + max(0.0, DEFAULT_SPEAKER_ID_AUTO_LEARNING_TRANSCRIPT_WINDOW_SECONDS)
+            transcript_matched = any(earliest <= float(event_at) <= latest for event_at, _text in events)
+            speech_turn_matched = any(earliest <= float(event_at) <= latest for event_at in confirmations)
+            if not transcript_matched and not speech_turn_matched:
+                return False, "Ignored automatic voice sample: no confirmed speech turn matched the audio."
+
+        return True, ""
 
     def _update_speaker_capture(self, audio: np.ndarray, *, speech_active: bool) -> None:
         if not self._speaker_capture_enabled():
@@ -2113,7 +2472,23 @@ class DesktopAudioAgent:
         if frame_copy.size <= 0:
             return
         now = time.time()
-        if speech_active and not self.is_assistant_speaking():
+        if self.is_assistant_speaking():
+            self._speaker_capture_suppress_until = max(
+                float(getattr(self, "_speaker_capture_suppress_until", 0.0) or 0.0),
+                now + max(0.0, DEFAULT_SPEAKER_ID_ASSISTANT_TAIL_SECONDS),
+            )
+            self._speaker_segment_active = False
+            self._speaker_segment_frames = []
+            self._speaker_segment_started_at = 0.0
+            self._speaker_segment_preroll_frames.clear()
+            return
+        if now < float(getattr(self, "_speaker_capture_suppress_until", 0.0) or 0.0):
+            self._speaker_segment_active = False
+            self._speaker_segment_frames = []
+            self._speaker_segment_started_at = 0.0
+            self._speaker_segment_preroll_frames.clear()
+            return
+        if speech_active:
             if not self._speaker_segment_active:
                 self._speaker_segment_frames = [
                     np.asarray(item, dtype=np.float32).copy() for item in self._speaker_segment_preroll_frames
@@ -2207,6 +2582,14 @@ class DesktopAudioAgent:
         )
         self.gemini_live_model = _env("GEMINI_LIVE_MODEL", DEFAULT_GEMINI_LIVE_MODEL)
         self.gemini_live_voice = _env("GEMINI_LIVE_VOICE", DEFAULT_GEMINI_LIVE_VOICE)
+        self.gemini_live_language_code = _env(
+            "GEMINI_LIVE_LANGUAGE_CODE",
+            self.gemini_live_language_code,
+        )
+        self.gemini_live_force_english_transcripts = _env_bool(
+            "VOICE_GEMINI_LIVE_FORCE_ENGLISH_TRANSCRIPTS",
+            bool(self.gemini_live_force_english_transcripts),
+        )
         self.gemini_live_native_response_enabled = _env_bool(
             "VOICE_GEMINI_LIVE_NATIVE_RESPONSE",
             bool(self.gemini_live_native_response_enabled),
@@ -2341,13 +2724,22 @@ class DesktopAudioAgent:
         base = DEFAULT_GEMINI_LIVE_SYSTEM_PROMPT
         command_tools_enabled = bool(getattr(self, "gemini_live_command_tools_enabled", False))
         local_knowledge_enabled = bool(getattr(self, "gemini_live_local_knowledge_enabled", False))
-        if not command_tools_enabled and not local_knowledge_enabled:
+        participant_identity_enabled = bool(getattr(self, "_auto_identity_handler", None) is not None)
+        if not command_tools_enabled and not local_knowledge_enabled and not participant_identity_enabled:
             return base
         parts = [base]
+        if participant_identity_enabled:
+            parts.append(
+                "When the user asks their own name, who they are, or whether Rachel remembers them, "
+                "call get_current_participant. Do not use search_local_knowledge for the current participant's identity."
+                " When the user asks about their preferences, past statements, or previous conversations, call "
+                "search_participant_history. Do not use search_local_knowledge for personal questions."
+            )
         if local_knowledge_enabled:
             parts.append(
                 "When the user asks about local project knowledge, Rachel's demo setup, available games, rehab game details, "
-                "local documents, or remembered participant/profile facts, call the search_local_knowledge tool before answering. "
+                "local documents, or remembered participant facts other than their current identity, call the "
+                "search_local_knowledge tool before answering. "
                 "If the tool returns matched=false or an error, say briefly that you could not find that in the local knowledge base. "
                 "When the tool returns spoken_text, use that grounded answer and do not invent extra facts."
             )
@@ -2367,9 +2759,37 @@ class DesktopAudioAgent:
     def _gemini_live_command_tools(self) -> List[Any]:
         command_tools_enabled = bool(getattr(self, "gemini_live_command_tools_enabled", False))
         local_knowledge_enabled = bool(getattr(self, "gemini_live_local_knowledge_enabled", False))
-        if not command_tools_enabled and not local_knowledge_enabled:
+        participant_identity_enabled = bool(getattr(self, "_auto_identity_handler", None) is not None)
+        if not command_tools_enabled and not local_knowledge_enabled and not participant_identity_enabled:
             return []
         declarations: List[Any] = []
+        if participant_identity_enabled:
+            declarations.append(
+                genai_types.FunctionDeclaration(
+                    name="get_current_participant",
+                    description=(
+                        "Get the identity of the participant currently speaking. "
+                        "Use this for questions like what is my name, who am I, or do you remember me."
+                    ),
+                    parameters_json_schema={"type": "object", "properties": {}},
+                )
+            )
+            declarations.append(
+                genai_types.FunctionDeclaration(
+                    name="search_participant_history",
+                    description=(
+                        "Search the current participant's locally saved conversation history. "
+                        "Use this for personal questions about what they said, liked, wanted, or discussed before."
+                    ),
+                    parameters_json_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "The participant's personal question."},
+                        },
+                        "required": ["query"],
+                    },
+                )
+            )
         if local_knowledge_enabled:
             declarations.append(
                 genai_types.FunctionDeclaration(
@@ -2464,6 +2884,7 @@ class DesktopAudioAgent:
         voice_name = str(self.gemini_live_voice or "").strip()
         if voice_name:
             config.speech_config = genai_types.SpeechConfig(
+                language_code=str(self.gemini_live_language_code or "").strip() or None,
                 voice_config=genai_types.VoiceConfig(
                     prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(voice_name=voice_name)
                 )
@@ -2546,8 +2967,17 @@ class DesktopAudioAgent:
     async def _execute_gemini_live_function_call(self, *, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         normalized_name = str(name or "").strip().lower()
         heard_text = _collapse_spaces(str(args.get("heard_text") or args.get("text") or ""))
+        if normalized_name == "get_current_participant":
+            return self._current_participant_identity()
+        if normalized_name == "search_participant_history":
+            query = _collapse_spaces(str(args.get("query") or heard_text or ""))
+            return await self._query_current_participant_history(query)
         if normalized_name == "search_local_knowledge":
             query = _collapse_spaces(str(args.get("query") or heard_text or ""))
+            if self._is_current_participant_identity_query(query):
+                return self._current_participant_identity()
+            if self._is_personal_history_query(query):
+                return await self._query_current_participant_history(query)
             return await self._query_gemini_live_local_knowledge(query=query, heard_text=heard_text)
         if normalized_name == "launch_game":
             game_name = _collapse_spaces(str(args.get("game_name") or args.get("game") or ""))
@@ -2657,6 +3087,109 @@ class DesktopAudioAgent:
         )
         return {"status": "error", "message": f"Unknown tool: {name}"}
 
+    @staticmethod
+    def _is_current_participant_identity_query(text: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9' ]+", " ", str(text or "").casefold())
+        normalized = _collapse_spaces(normalized)
+        patterns = (
+            r"\bwhat(?:'s| is) my name\b",
+            r"\bdo you (?:know|remember) my name\b",
+            r"\bwho am i\b",
+            r"\bdo you remember me\b",
+        )
+        return any(re.search(pattern, normalized) for pattern in patterns)
+
+    def _current_participant_identity(self) -> Dict[str, Any]:
+        user_id, identity_resolution = self._active_user_fallback()
+        if not user_id:
+            return {
+                "status": "unknown",
+                "identified": False,
+                "spoken_text": "I haven't identified you yet.",
+                "message": "No current participant profile is active.",
+            }
+
+        profile: Dict[str, Any] = {}
+        memory_path = _env("DIALOG_USER_MEMORY_PATH", "")
+        if memory_path:
+            try:
+                memory_root = json.loads(Path(memory_path).read_text(encoding="utf-8-sig"))
+                profiles = memory_root.get("profiles", {}) if isinstance(memory_root, dict) else {}
+                candidate = profiles.get(user_id, {}) if isinstance(profiles, dict) else {}
+                if isinstance(candidate, dict):
+                    profile = candidate
+            except Exception:
+                profile = {}
+        display_name = str(profile.get("display_name") or profile.get("name") or user_id).strip() or user_id
+        return {
+            "status": "ok",
+            "identified": True,
+            "user_id": user_id,
+            "display_name": display_name,
+            "identity_resolution": identity_resolution,
+            "spoken_text": f"Your name is {display_name}.",
+        }
+
+    @staticmethod
+    def _is_personal_history_query(text: str) -> bool:
+        normalized = _collapse_spaces(re.sub(r"[^a-z0-9' ]+", " ", str(text or "").casefold()))
+        return any(
+            phrase in normalized
+            for phrase in (
+                "about me", "do i like", "did i like", "my favorite", "my favourite",
+                "my goal", "my goals", "what did i say", "what did i tell",
+                "what did we talk", "what have we talked", "remember when i",
+                "what do you remember",
+            )
+        )
+
+    async def _query_current_participant_history(self, query: str) -> Dict[str, Any]:
+        user_id, identity_resolution = self._active_user_fallback()
+        if not user_id:
+            return {
+                "status": "unknown_participant",
+                "matched": False,
+                "spoken_text": "I haven't identified you yet.",
+            }
+        try:
+            response = await self._client.post(
+                f"{self.asr_base_url}/conversation/participant-history/query",
+                json={"user_id": user_id, "text": query},
+                timeout=DEFAULT_GEMINI_LIVE_LOCAL_KNOWLEDGE_TIMEOUT_SECONDS,
+            )
+            if response.status_code != 200:
+                raise RuntimeError(response.text.strip() or f"HTTP {response.status_code}")
+            data = response.json()
+        except Exception as exc:
+            return {
+                "status": "error",
+                "matched": False,
+                "message": f"Participant history search failed: {exc}",
+            }
+        return {
+            "status": "ok",
+            "matched": bool(data.get("matched")),
+            "user_id": user_id,
+            "identity_resolution": identity_resolution,
+            "display_name": str(data.get("display_name") or user_id),
+            "history_turns": data.get("history_turns") or [],
+            "spoken_text": str(data.get("spoken_text") or ""),
+        }
+
+    async def _append_current_participant_history(self, *, role: str, text: str) -> None:
+        user_id, _identity_resolution = self._active_user_fallback()
+        normalized = str(text or "").strip()
+        if not user_id or not normalized:
+            return
+        try:
+            await self._client.post(
+                f"{self.asr_base_url}/conversation/participant-history/append",
+                json={"user_id": user_id, "role": role, "text": normalized},
+                timeout=5.0,
+            )
+        except Exception:
+            return
+
     async def _query_gemini_live_local_knowledge(self, *, query: str, heard_text: str = "") -> Dict[str, Any]:
         query_text = _collapse_spaces(query or heard_text)
         if not query_text:
@@ -2725,7 +3258,21 @@ class DesktopAudioAgent:
             self._last_partial_text = ""
             self._last_stable_partial_text = ""
             self._gemini_live_input_text = ""
-            await self._handle_gemini_live_user_turn(final_input_text)
+            self._record_speech_confirmation()
+            await self._handle_gemini_live_user_turn(self._normalize_gemini_live_input_transcript(final_input_text))
+
+        if bool(getattr(self, "_identity_prompt_suppress_native_output", False)):
+            self._assistant_buffer_text = ""
+            self._assistant_corr_id = ""
+            self._gemini_live_output_text = ""
+            self._gemini_live_logged_output_text = ""
+            # The identity question uses the shared player. The previous Gemini
+            # reply was already cleared before it started, so only close the
+            # native stream here and let the identity prompt finish playing.
+            self._close_gemini_live_output(clear_player=False)
+            if turn_complete:
+                self._identity_prompt_suppress_native_output = False
+            return
 
         output_transcription = getattr(server_content, "output_transcription", None)
         if output_transcription is not None and self.gemini_live_native_response_enabled:
@@ -2790,16 +3337,30 @@ class DesktopAudioAgent:
         finished = bool(getattr(transcription, "finished", False))
         merged_text = _merge_incremental_transcript(self._gemini_live_input_text, text)
         if not finished:
+            display_text = self._normalize_gemini_live_input_transcript(merged_text)
             self._gemini_live_input_text = merged_text
-            self._last_partial_text = merged_text
-            self._last_stable_partial_text = merged_text
+            self._last_partial_text = display_text
+            self._last_stable_partial_text = display_text
             return
         self._last_partial_text = ""
         self._last_stable_partial_text = ""
         self._gemini_live_input_text = ""
         if not merged_text:
             return
-        await self._handle_gemini_live_user_turn(merged_text)
+        self._record_speech_confirmation()
+        await self._handle_gemini_live_user_turn(self._normalize_gemini_live_input_transcript(merged_text))
+
+    def _normalize_gemini_live_input_transcript(self, text: str) -> str:
+        normalized = _collapse_spaces(text)
+        if bool(
+            getattr(self, "gemini_live_force_english_transcripts", DEFAULT_GEMINI_LIVE_FORCE_ENGLISH_TRANSCRIPTS)
+        ) and self._contains_non_english_text(normalized):
+            return GEMINI_LIVE_ENGLISH_TRANSCRIPT_FALLBACK
+        return normalized
+
+    @staticmethod
+    def _contains_non_english_text(text: str) -> bool:
+        return any(ord(char) > 127 for char in str(text or ""))
 
     def _handle_gemini_live_output_transcription(self, transcription: Any) -> None:
         text = str(getattr(transcription, "text", "") or "").strip()
@@ -2817,6 +3378,9 @@ class DesktopAudioAgent:
                 self._remember_assistant_text(clean_text)
                 self.log_store.add("coach", clean_text, speaker="RACHEL", source="gemini_live")
                 self._gemini_live_logged_output_text = clean_text
+                loop = getattr(self, "_loop", None)
+                if loop is not None:
+                    loop.create_task(self._append_current_participant_history(role="assistant", text=clean_text))
 
     async def _handle_gemini_live_user_turn(self, raw_text: str) -> None:
         normalized = str(raw_text or "").strip()
@@ -2827,6 +3391,15 @@ class DesktopAudioAgent:
             return
         self._gemini_live_last_input_text = normalized
         self._last_final_event_at = now
+        if normalized == GEMINI_LIVE_ENGLISH_TRANSCRIPT_FALLBACK:
+            self.log_store.add(
+                "user",
+                normalized,
+                speaker="User",
+                source="desktop_audio",
+                metadata="asr=gemini_live:unavailable | english_only=1",
+            )
+            return
 
         grammar_match = self._command_grammar.canonicalize(normalized, allow_bare_game=True)
         final_text = str(grammar_match.canonical_text or normalized).strip()
@@ -2846,10 +3419,17 @@ class DesktopAudioAgent:
             self._last_stable_partial_text = ""
             return
         self._record_user_transcript_event(final_text)
-        user_id, identity_resolution = await self._resolve_recent_speaker_user(
-            source="gemini_live",
-            observed_at=now,
-        )
+        if bool(getattr(self, "gemini_live_native_response_enabled", False)) and not str(
+            getattr(self, "_participant_confirmed_user_id", "") or ""
+        ).strip():
+            self._remember_guest_turn_text(final_text, ts=now)
+        user_id, identity_resolution = await self._maybe_resolve_identity_from_text(final_text)
+        identity_name_turn = bool(getattr(self, "_identity_awaiting_name", False)) and not user_id
+        if not user_id and not identity_name_turn:
+            user_id, identity_resolution = await self._resolve_recent_speaker_user(
+                source="gemini_live",
+                observed_at=now,
+            )
         if bool(getattr(self, "gemini_live_native_response_enabled", False)):
             metadata_parts: List[str] = [
                 f"asr={TRANSCRIPT_SOURCE_FINAL}:{TRANSCRIPT_CONFIDENCE_HIGH}",
@@ -2865,6 +3445,9 @@ class DesktopAudioAgent:
                 source="desktop_audio",
                 metadata=" | ".join(metadata_parts),
             )
+            if identity_name_turn:
+                return
+            await self._append_current_participant_history(role="user", text=final_text)
             if grammar_match.route_type and grammar_match.route_type != "QUERY":
                 await self._dispatch_native_command(
                     grammar_match=grammar_match,
@@ -3183,8 +3766,6 @@ class DesktopAudioAgent:
             best_segment.last_caption_ts = reference_ts
             extras["segment_duration_seconds"] = round(float(best_segment.speech_seconds), 4)
         self._update_last_speaker_match(best_result, source=source, extras=extras)
-        if best_result.matched:
-            return str(best_result.user_id or "").strip(), "auto"
         fallback_user_id, fallback_resolution = self._active_user_fallback(reference_ts=reference_ts)
         if fallback_user_id:
             extras["fallback_user_id"] = fallback_user_id
@@ -3328,6 +3909,8 @@ class DesktopAudioAgent:
         self._active_user_id = ""
         self._active_user_last_seen_at = 0.0
         self._last_speaker_match = {}
+        self._participant_continue_as_guest = False
+        self._participant_confirmed_user_id = ""
         await self._client.aclose()
         self._disconnect_mqtt()
         self.log_store.add("system", "desktop audio agent stopped", source="desktop_runtime")
@@ -3503,7 +4086,141 @@ class DesktopAudioAgent:
             if recent_segments
             else None
         )
+        payload["participant"] = self._participant_status(payload)
         return payload
+
+    def _participant_status(self, speaker_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        payload = speaker_payload or {}
+        users = list(payload.get("users") or [])
+        guest_summary = next(
+            (item for item in users if str(item.get("user_id") or "") == GUEST_SPEAKER_ID),
+            {},
+        )
+        pending = dict(guest_summary.get("pending") or {})
+        clip_count = int(pending.get("pending_clip_count") or 0)
+        required_clip_count = int(
+            pending.get("required_clip_count")
+            or getattr(getattr(self._speaker_id, "config", None), "enroll_min_clips", 3)
+            or 3
+        )
+        active_user_id, _active_resolution = self._active_user_fallback(reference_ts=time.time())
+        match = self._speaker_match_payload()
+        possible_user_id = ""
+        possible_score = 0.0
+        if not active_user_id:
+            candidate = str(match.get("top1_user_id") or match.get("user_id") or "").strip()
+            score = float(match.get("top1_score") or match.get("score") or 0.0)
+            if candidate and score >= DEFAULT_SPEAKER_ID_POSSIBLE_MATCH_THRESHOLD:
+                possible_user_id = candidate
+                possible_score = score
+        ready_to_confirm = bool(pending.get("can_commit"))
+        continue_as_guest = bool(getattr(self, "_participant_continue_as_guest", False))
+        state = (
+            "identified"
+            if active_user_id
+            else (
+                "guest"
+                if continue_as_guest
+                else (
+                    "awaiting_name"
+                    if bool(getattr(self, "_identity_awaiting_name", False))
+                    else ("possible_match" if possible_user_id else ("ready_to_confirm" if ready_to_confirm else "guest_learning"))
+                )
+            )
+        )
+        return {
+            "state": state,
+            "active_user_id": active_user_id,
+            "possible_user_id": possible_user_id,
+            "possible_score": round(possible_score, 4),
+            "learning_clip_count": clip_count,
+            "required_clip_count": required_clip_count,
+            "ready_to_confirm": ready_to_confirm,
+            "confirmation_required": bool(not active_user_id and not continue_as_guest),
+            "continue_as_guest": continue_as_guest,
+            "automatic_identity_enabled": bool(getattr(self, "_auto_identity_handler", None) is not None),
+            "awaiting_name": bool(getattr(self, "_identity_awaiting_name", False)),
+            "automatic_match_candidate": str(getattr(self, "_auto_identity_candidate_id", "") or ""),
+            "automatic_match_evidence_count": int(getattr(self, "_auto_identity_candidate_count", 0) or 0),
+            "automatic_match_required_count": max(1, DEFAULT_SPEAKER_ID_AUTO_MATCH_REPEATS),
+            "current_user_mismatch_count": int(getattr(self, "_confirmed_user_mismatch_count", 0) or 0),
+            "current_user_mismatch_required_count": max(1, DEFAULT_SPEAKER_ID_AUTO_SWITCH_MISMATCH_REPEATS),
+            "last_captured_ts": float(pending.get("last_captured_ts") or 0.0),
+            "auto_learning_enabled": bool(DEFAULT_SPEAKER_ID_AUTO_GUEST_LEARNING),
+            "last_error": str(getattr(self, "_guest_learning_last_error", "") or ""),
+        }
+
+    async def confirm_guest_participant(self, *, user_id: str) -> Dict[str, Any]:
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("user_id is required")
+        getattr(self, "_deleted_speaker_user_ids", set()).discard(normalized_user_id)
+        summary = await asyncio.to_thread(
+            self._speaker_id.commit_pending_clips_as,
+            GUEST_SPEAKER_ID,
+            normalized_user_id,
+        )
+        self._active_user_id = normalized_user_id
+        self._active_user_last_seen_at = time.time()
+        self._participant_continue_as_guest = False
+        self._participant_confirmed_user_id = normalized_user_id
+        self._identity_awaiting_name = False
+        self._identity_name_retry_count = 0
+        self._identity_name_last_retry_at = 0.0
+        self._auto_identity_candidate_id = ""
+        self._auto_identity_candidate_count = 0
+        self._confirmed_user_mismatch_count = 0
+        self._guest_learning_last_error = ""
+        self._last_speaker_match = {
+            "matched": True,
+            "user_id": normalized_user_id,
+            "top1_user_id": normalized_user_id,
+            "reason": "operator_confirmed",
+            "source": "participant_confirmation",
+            "ts": self._active_user_last_seen_at,
+        }
+        return summary
+
+    def consume_guest_turns(self) -> List[Dict[str, Any]]:
+        turns = [dict(item) for item in list(getattr(self, "_guest_turns", []) or [])]
+        if hasattr(self, "_guest_turns"):
+            self._guest_turns.clear()
+        return turns
+
+    async def keep_guest_participant(self) -> Dict[str, Any]:
+        self._active_user_id = ""
+        self._active_user_last_seen_at = 0.0
+        self._last_speaker_match = {}
+        self._guest_learning_last_error = ""
+        self._participant_continue_as_guest = True
+        self._participant_confirmed_user_id = ""
+        self._identity_awaiting_name = False
+        self._identity_name_retry_count = 0
+        self._identity_name_last_retry_at = 0.0
+        self._auto_identity_candidate_id = ""
+        self._auto_identity_candidate_count = 0
+        self._confirmed_user_mismatch_count = 0
+        if hasattr(self, "_guest_turns"):
+            self._guest_turns.clear()
+        return await asyncio.to_thread(self._speaker_id.clear_pending, GUEST_SPEAKER_ID)
+
+    async def start_fresh_guest_participant(self) -> Dict[str, Any]:
+        self._active_user_id = ""
+        self._active_user_last_seen_at = 0.0
+        self._last_speaker_match = {}
+        self._guest_learning_last_error = ""
+        self._participant_continue_as_guest = False
+        self._participant_confirmed_user_id = ""
+        self._identity_awaiting_name = False
+        self._identity_question_asked_at = 0.0
+        self._identity_name_retry_count = 0
+        self._identity_name_last_retry_at = 0.0
+        self._auto_identity_candidate_id = ""
+        self._auto_identity_candidate_count = 0
+        self._confirmed_user_mismatch_count = 0
+        if hasattr(self, "_guest_turns"):
+            self._guest_turns.clear()
+        return await asyncio.to_thread(self._speaker_id.clear_pending, GUEST_SPEAKER_ID)
 
     async def record_speaker_profile_sample(
         self,
@@ -3546,15 +4263,43 @@ class DesktopAudioAgent:
         normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
             raise ValueError("user_id is required")
+        getattr(self, "_deleted_speaker_user_ids", set()).discard(normalized_user_id)
         return await asyncio.to_thread(self._speaker_id.commit_pending_clips, normalized_user_id)
 
     async def clear_speaker_profile(self, *, user_id: str) -> Dict[str, Any]:
         normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
             raise ValueError("user_id is required")
-        if self._active_user_id == normalized_user_id:
-            self._active_user_id = ""
-        return await asyncio.to_thread(self._speaker_id.clear_profile, normalized_user_id)
+        deleted_ids = getattr(self, "_deleted_speaker_user_ids", None)
+        if deleted_ids is None:
+            deleted_ids = set()
+            self._deleted_speaker_user_ids = deleted_ids
+        deleted_ids.add(normalized_user_id)
+        identity_task = getattr(self, "_identity_resolution_task", None)
+        if identity_task is not None and not identity_task.done():
+            identity_task.cancel()
+        self._identity_resolution_task = None
+        self._active_user_id = ""
+        self._active_user_last_seen_at = 0.0
+        self._last_speaker_match = {}
+        self._participant_confirmed_user_id = ""
+        self._participant_continue_as_guest = False
+        self._identity_awaiting_name = False
+        self._identity_question_asked_at = 0.0
+        self._identity_name_retry_count = 0
+        self._identity_name_last_retry_at = 0.0
+        self._auto_identity_candidate_id = ""
+        self._auto_identity_candidate_count = 0
+        self._auto_identity_candidate_last_at = 0.0
+        self._confirmed_user_mismatch_count = 0
+        recent_segments = getattr(self, "_recent_speaker_segments", None)
+        if recent_segments is not None:
+            recent_segments.clear()
+        if hasattr(self, "_guest_turns"):
+            self._guest_turns.clear()
+        result = await asyncio.to_thread(self._speaker_id.clear_profile, normalized_user_id)
+        await asyncio.to_thread(self._speaker_id.clear_pending, GUEST_SPEAKER_ID)
+        return result
 
     async def set_listening(self, listening: bool) -> None:
         self._listening = bool(listening)
@@ -3587,6 +4332,43 @@ class DesktopAudioAgent:
         self._last_reported_transcript_at = now
         self._last_final_transcript = normalized
         self._last_final_transcript_seq += 1
+        if self._is_credible_voice_learning_transcript(normalized):
+            recent = getattr(self, "_recent_credible_transcripts", None)
+            if recent is None:
+                recent = deque(maxlen=24)
+                self._recent_credible_transcripts = recent
+            recent.append((now, normalized))
+
+    def _record_speech_confirmation(self) -> None:
+        recent = getattr(self, "_recent_speech_confirmations", None)
+        if recent is None:
+            recent = deque(maxlen=24)
+            self._recent_speech_confirmations = recent
+        recent.append(time.time())
+
+    @staticmethod
+    def _is_credible_voice_learning_transcript(text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return False
+        if re.search(r"[\[<（(]\s*(?:noise|silence|music|inaudible|unintelligible)\s*[\]>）)]", normalized):
+            return False
+        compact = re.sub(r"[^\w]+", "", normalized, flags=re.UNICODE)
+        if len(compact) < 2:
+            return False
+        return compact not in {
+            "ah",
+            "eh",
+            "er",
+            "hmm",
+            "hm",
+            "mhm",
+            "mm",
+            "noise",
+            "silence",
+            "uh",
+            "um",
+        }
 
     async def set_asr_mode(self, mode: str) -> None:
         restart_input = self._running
@@ -3689,7 +4471,8 @@ class DesktopAudioAgent:
         normalized_text = str(text or "").strip()
         if not normalized_text:
             return
-        self.log_store.add("wizard", normalized_text, speaker=speaker_label, source=source)
+        log_role = "coach" if str(source or "").strip() == "auto_identity" else "wizard"
+        self.log_store.add(log_role, normalized_text, speaker=speaker_label, source=source)
         selected_backend = _normalize_tts_backend(backend or self.active_tts_backend)
         if selected_backend == TTS_BACKEND_GOOGLE_CLOUD:
             await self._play_google_cloud_text(
@@ -3842,7 +4625,12 @@ class DesktopAudioAgent:
         return barge_in, interrupted_text, interrupted_corr_id
 
     def _sanitize_assistant_text(self, text: str) -> str:
-        return sanitize_tts_text(str(text or "").strip())
+        sanitized = sanitize_tts_text(str(text or "").strip())
+        if bool(
+            getattr(self, "gemini_live_force_english_transcripts", DEFAULT_GEMINI_LIVE_FORCE_ENGLISH_TRANSCRIPTS)
+        ) and self._contains_non_english_text(sanitized):
+            return "Rachel's response could not be displayed in English."
+        return sanitized
 
     def _remember_assistant_text(self, text: str) -> None:
         variants = _assistant_text_variants(self._sanitize_assistant_text(text))
@@ -4157,6 +4945,8 @@ class DesktopAudioAgent:
         if self._suppress_transcript_during_enrollment(source="streaming_final", text=final_text):
             return
         self._record_user_transcript_event(final_text)
+        if not str(user_id or "").strip():
+            user_id, identity_resolution = await self._maybe_resolve_identity_from_text(final_text)
         await self._submit_user_turn(
             text=final_text,
             original_text=raw_final_text,
@@ -4698,6 +5488,10 @@ class DesktopAudioAgent:
         normalized = str(text or "").strip()
         if not normalized:
             return
+        if bool(getattr(self, "_identity_awaiting_name", False)) and not str(user_id or "").strip():
+            user_id, identity_resolution = await self._maybe_resolve_identity_from_text(normalized)
+            if bool(getattr(self, "_identity_awaiting_name", False)) and not str(user_id or "").strip():
+                return
         if not self.conversation_dispatch_enabled:
             return
         now = time.time()
@@ -4728,6 +5522,8 @@ class DesktopAudioAgent:
             source="desktop_audio",
             metadata=" | ".join(metadata_parts),
         )
+        if not str(user_id or "").strip():
+            self._remember_guest_turn_text(normalized, ts=now)
 
         if self.pipeline_mode == PIPELINE_MODE_LEGACY_MQTT:
             self._latest_legacy_corr_id = corr_id

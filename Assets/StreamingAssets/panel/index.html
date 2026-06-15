@@ -107,6 +107,17 @@ section { margin: 0 0 16px; padding: 16px; }
 .primary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .primary-actions button { width: 100%; }
 .game-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; }
+.participant-panel { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-3); }
+.participant-panel.ready { border-color: rgba(74,222,128,0.7); box-shadow: 0 0 0 2px rgba(74,222,128,0.12); }
+.participant-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.participant-head strong { color: #dbeafe; }
+.participant-state { color: var(--green); font-size: 0.86rem; font-weight: 700; }
+.participant-progress { height: 7px; margin: 10px 0; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,0.08); }
+.participant-progress > span { display: block; width: 0; height: 100%; background: var(--green); transition: width 0.2s ease; }
+.participant-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; }
+.participant-actions + .participant-actions { margin-top: 8px; }
+.participant-copy { margin-top: 5px; color: var(--muted); font-size: 0.84rem; overflow-wrap: anywhere; }
+.participant-decision { margin-top: 12px; color: #dbeafe; font-size: 0.84rem; font-weight: 800; }
 #demoSpeechSlot section,
 #demoGameSlot section { margin: 10px 0 0; padding: 0; border: 0; background: transparent; }
 #demoSpeechSlot section h2,
@@ -221,7 +232,7 @@ button.danger:hover { background: #be123c; }
   .quick-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 620px) {
-  .quick-nav, .primary-actions, .game-actions { grid-template-columns: 1fr; }
+  .quick-nav, .primary-actions, .game-actions, .participant-actions { grid-template-columns: 1fr; }
   .status-pill { min-width: 0; flex: 1 1 140px; }
   .transcript-header,
   .controls { align-items: stretch; flex-direction: column; }
@@ -265,6 +276,16 @@ button.danger:hover { background: #be123c; }
 <section class="demo-panel">
 <h2>Demo Controls</h2>
 <p class="section-note">Use these during a live demo. Advanced tuning is folded below.</p>
+<div class="control-group">
+<span class="control-label">Participant</span>
+<div class="participant-panel">
+  <div class="participant-head"><strong id="participantTitle">Guest</strong><span id="participantState" class="participant-state">Learning voice</span></div>
+  <div id="participantCopy" class="participant-copy">Talk naturally. Rachel will learn the participant's voice during the conversation.</div>
+  <div class="participant-progress"><span id="participantProgress"></span></div>
+  <div id="participantDecision" class="participant-decision">Rachel will recognize known participants or ask a new participant's name automatically.</div>
+  <div class="participant-copy">Identity corrections and profile maintenance are available on the <a href="/memory.html">Memory</a> page.</div>
+</div>
+</div>
 <div class="control-group">
 <span class="control-label">Listening</span>
 <div class="primary-actions">
@@ -542,6 +563,15 @@ const asrActiveUserTextEl = document.getElementById('asrActiveUserText');
 const asrLastMatchTextEl = document.getElementById('asrLastMatchText');
 const asrLiveCaptureTextEl = document.getElementById('asrLiveCaptureText');
 const asrLiveCaptionsStatusTextEl = document.getElementById('asrLiveCaptionsStatusText');
+const participantTitleEl = document.getElementById('participantTitle');
+const participantStateEl = document.getElementById('participantState');
+const participantCopyEl = document.getElementById('participantCopy');
+const participantProgressEl = document.getElementById('participantProgress');
+const participantDecisionEl = document.getElementById('participantDecision');
+const participantExistingUserEl = document.getElementById('participantExistingUser');
+const participantConfirmButtonEl = document.getElementById('participantConfirmButton');
+const participantNameEl = document.getElementById('participantName');
+const participantCreateButtonEl = document.getElementById('participantCreateButton');
 const llmPromptEl = document.getElementById('llmPromptText');
 const llmModelSelect = document.getElementById('llmModelSelect');
 const llmModelStatusEl = document.getElementById('llmModelStatus');
@@ -555,6 +585,8 @@ let liveLogEventSource = null;
 let liveLogPollTimer = null;
 let cachedVoiceOptions = null;
 let activeAsrMode = '';
+let participantReadyToConfirm = false;
+let participantLastCapturedTs = 0;
 const DEFAULT_LOCAL_QWEN_MODELS = ['qwen3.5:0.8b', 'qwen3.5:2b', 'qwen3.5:4b', 'qwen3.5:9b'];
 const ASR_PROVIDER_OPTIONS = [
   { value:'live-captions', label:'Windows Captions' },
@@ -1136,6 +1168,123 @@ function setBadge(el, text, live){
   el.classList.toggle('live', !!live);
   el.classList.toggle('warn', !live);
 }
+function updateParticipantButtons(){
+  if(participantConfirmButtonEl){
+    participantConfirmButtonEl.disabled = !participantReadyToConfirm || !String(participantExistingUserEl && participantExistingUserEl.value || '').trim();
+  }
+  if(participantCreateButtonEl){
+    participantCreateButtonEl.disabled = !participantReadyToConfirm || !String(participantNameEl && participantNameEl.value || '').trim();
+  }
+}
+function renderParticipantStatus(participant){
+  const item = (participant && typeof participant === 'object') ? participant : {};
+  const state = String(item.state || 'guest_learning');
+  const activeUser = String(item.active_user_id || '');
+  const possibleUser = String(item.possible_user_id || '');
+  const clips = Number(item.learning_clip_count || 0);
+  const required = Math.max(1, Number(item.required_clip_count || 3));
+  const lastCapturedTs = Number(item.last_captured_ts || 0);
+  participantReadyToConfirm = !!item.ready_to_confirm;
+  const participantPanel = participantTitleEl ? participantTitleEl.closest('.participant-panel') : null;
+  if(participantPanel){ participantPanel.classList.toggle('ready', participantReadyToConfirm); }
+  if(lastCapturedTs > participantLastCapturedTs && participantLastCapturedTs > 0 && statusEl){
+    statusEl.textContent = participantReadyToConfirm
+      ? 'Voice learning ready: confirm this participant or create a new profile.'
+      : `Voice sample captured: ${clips}/${required}`;
+  }
+  participantLastCapturedTs = Math.max(participantLastCapturedTs, lastCapturedTs);
+  if(participantProgressEl){ participantProgressEl.style.width = Math.min(100, (clips / required) * 100).toFixed(1) + '%'; }
+  if(state === 'identified' && activeUser){
+    if(participantTitleEl){ participantTitleEl.textContent = activeUser; }
+    if(participantStateEl){ participantStateEl.textContent = 'Identified'; }
+    if(participantCopyEl){ participantCopyEl.textContent = 'Rachel is using this participant profile and its independent memory.'; }
+    if(participantDecisionEl){ participantDecisionEl.textContent = 'Known participant profile selected automatically.'; }
+  }else if(state === 'guest'){
+    if(participantTitleEl){ participantTitleEl.textContent = 'Guest'; }
+    if(participantStateEl){ participantStateEl.textContent = 'Guest session'; }
+    if(participantCopyEl){ participantCopyEl.textContent = 'This session stays anonymous. Voice samples and independent memory are not saved.'; }
+    if(participantDecisionEl){ participantDecisionEl.textContent = 'This session stays anonymous until a new session starts.'; }
+  }else if(state === 'awaiting_name'){
+    if(participantTitleEl){ participantTitleEl.textContent = 'New participant'; }
+    if(participantStateEl){ participantStateEl.textContent = 'Waiting for name'; }
+    if(participantCopyEl){ participantCopyEl.textContent = 'Rachel asked for the participant name and will create or connect the profile automatically.'; }
+    if(participantDecisionEl){ participantDecisionEl.textContent = 'The next clear name response will complete identity setup.'; }
+  }else if(state === 'possible_match' && possibleUser){
+    if(participantTitleEl){ participantTitleEl.textContent = 'Guest'; }
+    if(participantStateEl){ participantStateEl.textContent = 'Possible match'; }
+    if(participantCopyEl){ participantCopyEl.textContent = `This may be ${possibleUser}. Voice learning ${clips}/${required}; confirm when ready.`; }
+    if(participantDecisionEl){ participantDecisionEl.textContent = 'Rachel is checking this voice against known participant profiles.'; }
+    if(participantExistingUserEl && !participantExistingUserEl.value){
+      participantExistingUserEl.value = possibleUser;
+    }
+  }else{
+    if(participantTitleEl){ participantTitleEl.textContent = 'Guest'; }
+    if(participantStateEl){ participantStateEl.textContent = participantReadyToConfirm ? 'Ready to confirm' : 'Learning voice'; }
+    if(participantCopyEl){
+      participantCopyEl.textContent = participantReadyToConfirm
+        ? 'Voice learning is ready. Confirm an existing participant or create a new profile.'
+        : `Talk naturally. Voice learning ${clips}/${required}; no separate sample recording is needed.`;
+    }
+    if(participantDecisionEl){
+      participantDecisionEl.textContent = participantReadyToConfirm
+        ? "Rachel will ask the participant's name and connect or create the profile automatically."
+        : 'Rachel is learning enough of the voice to identify the participant.';
+    }
+  }
+  updateParticipantButtons();
+}
+async function loadParticipantUsers(){
+  if(!participantExistingUserEl) return;
+  try {
+    const resp = await fetch('/api/memory');
+    const data = await parseApiResponse(resp);
+    if(!resp.ok || data.status !== 'ok') return;
+    const selected = String(participantExistingUserEl.value || '');
+    const users = Array.isArray(data.users) ? data.users : [];
+    const unlinked = Array.isArray(data.unlinked_speaker_profiles) ? data.unlinked_speaker_profiles : [];
+    participantExistingUserEl.innerHTML = '<option value="">Confirm as existing participant...</option>' + users.map(item => {
+      const userId = escapeHtml(String(item.user_id || ''));
+      const displayName = escapeHtml(String(item.display_name || item.user_id || ''));
+      return `<option value="${userId}">${displayName} (${userId})</option>`;
+    }).join('') + unlinked.map(item => {
+      const userId = escapeHtml(String(item.user_id || ''));
+      return `<option value="${userId}">${userId} (voice profile only; restore memory)</option>`;
+    }).join('');
+    if([...users, ...unlinked].some(item => String(item.user_id || '') === selected)){ participantExistingUserEl.value = selected; }
+    updateParticipantButtons();
+  } catch(err) {
+    console.warn('participant users failed', err);
+  }
+}
+async function confirmParticipant(){
+  const userId = String(participantExistingUserEl && participantExistingUserEl.value || '').trim();
+  if(!userId) return;
+  const data = await send('/api/speaker-profiles',{action:'confirm_participant',user_id:userId});
+  if(data && data.status === 'ok'){ renderParticipantStatus(data.participant); }
+}
+async function createParticipant(){
+  const displayName = String(participantNameEl && participantNameEl.value || '').trim();
+  if(!displayName) return;
+  const data = await send('/api/speaker-profiles',{action:'create_participant',display_name:displayName});
+  if(data && data.status === 'ok'){
+    participantNameEl.value = '';
+    await loadParticipantUsers();
+    renderParticipantStatus(data.participant);
+  }
+}
+async function keepGuestParticipant(){
+  const data = await send('/api/speaker-profiles',{action:'keep_guest'});
+  if(data && data.status === 'ok'){ renderParticipantStatus(data.participant); }
+}
+async function startFreshGuestParticipant(){
+  const data = await send('/api/speaker-profiles',{action:'start_fresh_guest'});
+  if(data && data.status === 'ok'){
+    if(participantExistingUserEl){ participantExistingUserEl.value = ''; }
+    if(participantNameEl){ participantNameEl.value = ''; }
+    participantLastCapturedTs = 0;
+    renderParticipantStatus(data.participant);
+  }
+}
 function renderAsrStatus(data){
   if(!data) return;
   const mode = (typeof data.mode === 'string' && data.mode) ? data.mode : 'live-captions';
@@ -1145,6 +1294,7 @@ function renderAsrStatus(data){
   const apiReady = !!serverCfg.openai_configured;
   const lcMissing = (mode === 'live-captions' && !data.live_captions_available);
   const match = (data && typeof data.last_speaker_match === 'object' && data.last_speaker_match) ? data.last_speaker_match : {};
+  renderParticipantStatus(data.participant);
   if(asrStateEl){
     asrStateEl.textContent = `${listening ? 'Listening is on' : 'Listening is paused'} | Provider: ${asrProviderLabel(mode)}`;
   }
@@ -1186,9 +1336,14 @@ function renderAsrStatus(data){
   if(asrActiveUserTextEl){ asrActiveUserTextEl.textContent = String(data.active_user_id || '--'); }
   if(asrLastMatchTextEl){
     if(match && match.matched && match.user_id){
-      asrLastMatchTextEl.textContent = `${String(match.user_id)} (${Number(match.score || 0).toFixed(2)})`;
+      asrLastMatchTextEl.textContent = `${String(match.user_id)} | score ${Number(match.score || 0).toFixed(2)} | margin ${Number(match.margin || 0).toFixed(2)}`;
     }else if(match && match.reason){
-      asrLastMatchTextEl.textContent = String(match.reason);
+      const candidate = String(match.top1_user_id || 'unknown');
+      const score = Number(match.top1_score || match.score || 0).toFixed(2);
+      const threshold = Number(match.match_threshold || 0).toFixed(2);
+      const margin = Number(match.margin || 0).toFixed(2);
+      const marginThreshold = Number(match.match_margin_threshold || 0).toFixed(2);
+      asrLastMatchTextEl.textContent = `${String(match.reason)} | ${candidate} score ${score}/${threshold} | margin ${margin}/${marginThreshold}`;
     }else{
       asrLastMatchTextEl.textContent = '--';
     }
@@ -1309,12 +1464,15 @@ async function loadKokoroOptions(){
 }
 placeOperatorSections();
 if(asrModeSelect){ asrModeSelect.addEventListener('change', updateAsrApplyState); }
+if(participantExistingUserEl){ participantExistingUserEl.addEventListener('change', updateParticipantButtons); }
+if(participantNameEl){ participantNameEl.addEventListener('input', updateParticipantButtons); }
 if(logContainer){ renderLog([]); }
 refreshLog();
 connectLiveLogStream();
 loadVoiceOptions();
 loadKokoroOptions();
 refreshAsrStatus();
+loadParticipantUsers();
 setInterval(refreshAsrStatus, 5000);
 loadRuntimeModelOptions();
 let cameraPolling = false;

@@ -1318,6 +1318,12 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
         if not doc_model_dir.is_absolute():
             doc_model_dir = (defaults.repo_root / doc_model_dir).resolve()
         env["DOC_RAG_EMBEDDING_MODEL_DIR"] = str(doc_model_dir)
+    doc_cache_dir_raw = _normalize_string(env.get("DOC_RAG_EMBEDDING_CACHE_DIR"))
+    if doc_cache_dir_raw:
+        doc_cache_dir = Path(doc_cache_dir_raw).expanduser()
+        if not doc_cache_dir.is_absolute():
+            doc_cache_dir = (defaults.repo_root / doc_cache_dir).resolve()
+        env["DOC_RAG_EMBEDDING_CACHE_DIR"] = str(doc_cache_dir)
     if docs_dir and not _has_general_docs(doc_root):
         print(
             "[voice-agent] warning: DOC_RAG_ROOT is configured but no general docs were found in "

@@ -6311,6 +6311,52 @@ async def conversation_local_knowledge_query(payload: LocalKnowledgeQueryRequest
     )
 
 
+@app.post("/conversation/participant-history/query")
+async def conversation_participant_history_query(request: Request) -> Dict[str, Any]:
+    payload = await request.json()
+    user_id = str(payload.get("user_id") or "").strip()
+    text = " ".join(str(payload.get("text") or "").strip().split())[:300]
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    runtime = await _get_unified_conversation_runtime()
+    runtime.ensure_ready()
+    helper = runtime.dialog_helper
+    if helper is None or helper.user_memory is None:
+        raise HTTPException(status_code=503, detail="participant history is unavailable")
+    profile = helper.user_memory.profile_snapshot(user_id)
+    if not profile:
+        return {"status": "ok", "matched": False, "display_name": user_id, "history_turns": [], "spoken_text": ""}
+    turns = helper.user_memory.search_dialog_history(user_id, text, limit=8)
+    return {
+        "status": "ok",
+        "matched": bool(turns),
+        "display_name": str(profile.get("display_name") or user_id),
+        "history_turns": turns,
+        "spoken_text": (
+            "I found relevant parts of our saved conversation history."
+            if turns
+            else "I could not find that in our saved conversation history."
+        ),
+    }
+
+
+@app.post("/conversation/participant-history/append")
+async def conversation_participant_history_append(request: Request) -> Dict[str, Any]:
+    payload = await request.json()
+    user_id = str(payload.get("user_id") or "").strip()
+    role = str(payload.get("role") or "user").strip().lower()
+    text = str(payload.get("text") or "").strip()
+    if not user_id or not text:
+        raise HTTPException(status_code=400, detail="user_id and text are required")
+    runtime = await _get_unified_conversation_runtime()
+    runtime.ensure_ready()
+    helper = runtime.dialog_helper
+    if helper is None or helper.user_memory is None:
+        raise HTTPException(status_code=503, detail="participant history is unavailable")
+    helper.user_memory.remember_dialog_turn(user_id, role, text, max_turns=500, summary_max_chars=0)
+    return {"status": "ok", "message": "participant history appended"}
+
+
 @app.post("/conversation/turn/stream")
 async def conversation_turn_stream(payload: ConversationTurnRequest):
     runtime = await _get_unified_conversation_runtime()

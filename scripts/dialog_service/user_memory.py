@@ -568,7 +568,14 @@ class UserMemoryStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             temp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
-            serialized = json.dumps(self._db, ensure_ascii=False, indent=2)
+            compact_db = dict(self._db)
+            profiles = self._db.get("profiles", {})
+            compact_db["profiles"] = {
+                str(user_id): self._compact_profile(str(user_id), profile)
+                for user_id, profile in profiles.items()
+                if str(user_id).strip() and isinstance(profile, dict)
+            } if isinstance(profiles, dict) else {}
+            serialized = json.dumps(compact_db, ensure_ascii=False, indent=2)
             temp_path.write_text(
                 serialized,
                 encoding="utf-8",
@@ -578,6 +585,27 @@ class UserMemoryStore:
             self._update_file_stamp_unlocked()
         except Exception as exc:
             print(f"[dialog] user memory save failed: {exc}")
+
+    @staticmethod
+    def _compact_profile(user_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+        turns: List[Dict[str, Any]] = []
+        for item in profile.get("dialog_turns", []) if isinstance(profile.get("dialog_turns"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            text = normalize_dialog_text(str(item.get("text") or ""), max_len=500)
+            if not text:
+                continue
+            turns.append(
+                {
+                    "role": _normalize_dialog_role(str(item.get("role") or "user")),
+                    "text": text,
+                    "ts": float(item.get("ts") or time.time()),
+                }
+            )
+        return {
+            "display_name": str(profile.get("display_name") or profile.get("name") or user_id).strip() or user_id,
+            "dialog_turns": turns[-500:],
+        }
 
     @staticmethod
     def _hash_text(text: str) -> str:
@@ -1320,7 +1348,6 @@ class UserMemoryStore:
         with self._lock:
             reload_ok = self._reload_if_external_change_unlocked()
             if not reload_ok:
-                # Avoid writing stale in-memory data back to disk when external file is transiently unreadable.
                 return {
                     "explicit_memory": False,
                     "facts_written": [],
@@ -1332,83 +1359,20 @@ class UserMemoryStore:
             profile = self._ensure_profile(user_id, now_ts)
             profile["last_seen_ts"] = now_ts
             profile["utterance_count"] = int(profile.get("utterance_count", 0) or 0) + 1
-            explicit_memory = _looks_like_explicit_memory_write(text)
-            added_facts, removed_facts = self._extract_fact_candidates(utterance)
-            written_records: List[Dict[str, Any]] = []
-            removed_records: List[Dict[str, Any]] = []
-            for removal in removed_facts:
-                field = str(removal.get("field") or "").strip()
-                value = str(removal.get("value") or "").strip()
-                if field and value and self._deactivate_fact(
-                    profile,
-                    field=field,
-                    value=value,
-                    now_ts=now_ts,
-                    reason="user_update",
-                ):
-                    removed_records.append({"field": field, "value": value})
-            for addition in added_facts:
-                field = str(addition.get("field") or "").strip()
-                value = str(addition.get("value") or "").strip()
-                if not field or not value:
-                    continue
-                record = self._upsert_fact(
-                    profile,
-                    field=field,
-                    value=value,
-                    now_ts=now_ts,
-                    source_text=utterance,
-                    explicit=explicit_memory,
-                )
-                if record is not None:
-                    written_records.append({"field": field, "value": str(record.get("value") or value)})
-
-            notes = profile.get("recent_notes")
-            if not isinstance(notes, list):
-                notes = []
-                profile["recent_notes"] = notes
-            if self.max_notes > 0 and len(utterance) >= 8:
-                _append_unique_casefold(notes, utterance, max_items=max(0, self.max_notes))
-
-            memories = profile.get("memory_items")
-            if not isinstance(memories, list):
-                memories = []
-                profile["memory_items"] = memories
-            if self.max_notes > 0 and len(utterance) >= 8 and self.embedder is not None and self.embedder.ready:
-                vector = self.embedder.doc_embedding(utterance)
-                if vector is not None:
-                    has_duplicate = False
-                    for item in memories:
-                        if not isinstance(item, dict):
-                            continue
-                        text_value = normalize_memory_value(str(item.get("text") or ""), max_len=180)
-                        if text_value and text_value.casefold() == utterance.casefold():
-                            has_duplicate = True
-                            break
-                    if not has_duplicate:
-                        memories.append(
-                            {
-                                "text": utterance,
-                                "embedding": [round(float(x), 6) for x in vector.tolist()],
-                                "ts": time.time(),
-                            }
-                        )
-                        if len(memories) > self.max_notes:
-                            del memories[:-self.max_notes]
-
-            self._record_episode(profile, utterance, role="user", now_ts=now_ts)
-            self._sync_legacy_profile_fields(profile)
+            turns = profile.get("dialog_turns")
+            if not isinstance(turns, list):
+                turns = []
+                profile["dialog_turns"] = turns
+            if not turns or str(turns[-1].get("text") or "").strip() != utterance:
+                turns.append({"role": "user", "text": utterance, "ts": now_ts})
+            if len(turns) > 500:
+                del turns[:-500]
             self._save()
-            ack_text = ""
-            if explicit_memory:
-                ack_text = self._summarize_memory_write(text, written_records)
-            elif written_records:
-                ack_text = self._summarize_implicit_fact_ack(text, written_records)
             return {
-                "explicit_memory": explicit_memory,
-                "facts_written": written_records,
-                "facts_removed": removed_records,
-                "ack_text": ack_text,
+                "explicit_memory": False,
+                "facts_written": [],
+                "facts_removed": [],
+                "ack_text": "",
                 "utterance": utterance,
             }
 
@@ -1451,8 +1415,7 @@ class UserMemoryStore:
             return
 
         normalized_role = _normalize_dialog_role(role)
-        max_turns = max(2, int(max_turns))
-        summary_max_chars = max(120, int(summary_max_chars))
+        max_turns = max(500, int(max_turns))
 
         with self._lock:
             reload_ok = self._reload_if_external_change_unlocked()
@@ -1467,35 +1430,20 @@ class UserMemoryStore:
             if not isinstance(turns, list):
                 turns = []
                 profile["dialog_turns"] = turns
-            turns.append(
-                {
-                    "role": normalized_role,
-                    "text": utterance,
-                    "ts": time.time(),
-                }
-            )
+            if not turns or not (
+                str(turns[-1].get("role") or "user") == normalized_role
+                and str(turns[-1].get("text") or "").strip() == utterance
+            ):
+                turns.append(
+                    {
+                        "role": normalized_role,
+                        "text": utterance,
+                        "ts": time.time(),
+                    }
+                )
 
-            overflow = len(turns) - max_turns
-            if overflow > 0:
-                dropped = [item for item in turns[:overflow] if isinstance(item, dict)]
-                del turns[:overflow]
-
-                chunk_summary = self._summarize_dialog_chunk(dropped, max_chars=max(120, summary_max_chars // 2))
-                if chunk_summary:
-                    existing = normalize_dialog_text(
-                        str(profile.get("dialog_summary") or ""),
-                        max_len=max(summary_max_chars * 2, summary_max_chars),
-                    )
-                    merged = f"{existing} {chunk_summary}".strip() if existing else chunk_summary
-                    if len(merged) > summary_max_chars:
-                        merged = merged[-summary_max_chars:].lstrip()
-                        if merged and not merged.startswith("..."):
-                            if len(merged) > max(12, summary_max_chars - 4):
-                                merged = merged[-(summary_max_chars - 4) :].lstrip()
-                            merged = f"... {merged}"
-                    profile["dialog_summary"] = merged
-
-            self._record_episode(profile, utterance, role=normalized_role, now_ts=now_ts)
+            if len(turns) > max_turns:
+                del turns[:-max_turns]
             self._save()
 
     def update_dialog_slots(
@@ -1698,6 +1646,17 @@ class UserMemoryStore:
         return out
 
     def build_memory_context(self, user_id: str, query_text: str = "") -> str:
+        matches = self.search_dialog_history(user_id, query_text, limit=self.retrieve_top_k)
+        if not matches:
+            return ""
+        lines = [
+            f"{'User' if str(item.get('role') or 'user') == 'user' else 'Rachel'}: {str(item.get('text') or '').strip()}"
+            for item in reversed(matches)
+            if str(item.get("text") or "").strip()
+        ]
+        context = "Relevant saved conversation history:\n" + "\n".join(lines)
+        return context[: self.prompt_max_chars].rstrip()
+
         with self._lock:
             self._reload_if_external_change_unlocked()
             profiles = self._db.get("profiles")
@@ -1864,6 +1823,76 @@ class UserMemoryStore:
                 facts.append(f"you are from {origin}")
             return "; ".join(facts)
 
+    @staticmethod
+    def _history_query_tokens(text: str) -> set[str]:
+        return {
+            token
+            for token in re.findall(r"[a-z0-9']+", str(text or "").casefold())
+            if len(token) >= 3
+            and token not in {
+                "what", "when", "where", "which", "about", "remember", "know",
+                "have", "with", "that", "this", "your", "you", "did", "does",
+                "from", "tell", "told", "said", "name",
+            }
+        }
+
+    def search_dialog_history(self, user_id: str, query_text: str, *, limit: int = 6) -> List[Dict[str, Any]]:
+        with self._lock:
+            self._reload_if_external_change_unlocked()
+            profiles = self._db.get("profiles")
+            profile = profiles.get(user_id) if isinstance(profiles, dict) else None
+            if not isinstance(profile, dict):
+                return []
+            query_tokens = self._history_query_tokens(query_text)
+            candidates: List[tuple[float, int, Dict[str, Any]]] = []
+            turns = profile.get("dialog_turns")
+            if not isinstance(turns, list):
+                return []
+            for index, item in enumerate(turns):
+                if not isinstance(item, dict):
+                    continue
+                text = normalize_dialog_text(str(item.get("text") or ""), max_len=500)
+                if not text or text.casefold() == str(query_text or "").strip().casefold():
+                    continue
+                turn_tokens = self._history_query_tokens(text)
+                overlap = len(query_tokens & turn_tokens)
+                if query_tokens and overlap <= 0:
+                    continue
+                score = float(overlap * 10) + (index / max(1, len(turns)))
+                if not query_tokens:
+                    score = index / max(1, len(turns))
+                candidates.append(
+                    (
+                        score,
+                        index,
+                        {
+                            "role": _normalize_dialog_role(str(item.get("role") or "user")),
+                            "text": text,
+                            "ts": float(item.get("ts") or 0.0),
+                        },
+                    )
+                )
+            if not candidates and query_tokens:
+                for index, item in enumerate(turns[-max(1, int(limit)) :]):
+                    if not isinstance(item, dict):
+                        continue
+                    text = normalize_dialog_text(str(item.get("text") or ""), max_len=500)
+                    if not text or text.casefold() == str(query_text or "").strip().casefold():
+                        continue
+                    candidates.append(
+                        (
+                            float(index),
+                            index,
+                            {
+                                "role": _normalize_dialog_role(str(item.get("role") or "user")),
+                                "text": text,
+                                "ts": float(item.get("ts") or 0.0),
+                            },
+                        )
+                    )
+            candidates.sort(key=lambda row: (row[0], row[1]), reverse=True)
+            return [item for _score, _index, item in candidates[: max(1, int(limit))]]
+
     def profile_snapshot(self, user_id: str) -> Dict[str, Any]:
         with self._lock:
             self._reload_if_external_change_unlocked()
@@ -1873,6 +1902,11 @@ class UserMemoryStore:
             profile = profiles.get(user_id)
             if not isinstance(profile, dict):
                 return {}
+            turns = profile.get("dialog_turns")
+            return {
+                "display_name": str(profile.get("display_name") or profile.get("name") or user_id).strip() or user_id,
+                "dialog_turns": list(turns[-100:]) if isinstance(turns, list) else [],
+            }
 
             self._sync_legacy_profile_fields(profile)
             facts_out: List[Dict[str, Any]] = []
@@ -2084,6 +2118,52 @@ class UserMemoryStore:
         return normalize_dialog_text(str(payload.get("text") or ""), max_len=240)
 
     def answer_memory_query_payload(self, user_id: str, query_text: str) -> Dict[str, Any]:
+        with self._lock:
+            self._reload_if_external_change_unlocked()
+            profiles = self._db.get("profiles")
+            profile = profiles.get(user_id) if isinstance(profiles, dict) else None
+            if not isinstance(profile, dict):
+                return {
+                    "type": "memory_query",
+                    "query_kind": "history",
+                    "result_kind": "no_saved_profile",
+                    "binding_state": "bound_profile",
+                    "facts": [],
+                    "notes": [],
+                    "required_terms": [],
+                    "text": "I do not have any saved conversation history for you yet.",
+                }
+            display_name = str(profile.get("display_name") or profile.get("name") or user_id).strip() or user_id
+        normalized = " ".join((query_text or "").strip().casefold().split())
+        if "name" in normalized or "who am i" in normalized:
+            return {
+                "type": "memory_query",
+                "query_kind": "identity",
+                "result_kind": "known_specific_fact",
+                "binding_state": "bound_profile",
+                "facts": [{"field": "name", "value": display_name, "spoken_text": f"your name is {display_name}"}],
+                "notes": [],
+                "required_terms": [display_name],
+                "text": f"Your name is {display_name}.",
+            }
+        matches = self.search_dialog_history(user_id, query_text, limit=6)
+        notes = [str(item.get("text") or "").strip() for item in matches if str(item.get("text") or "").strip()]
+        return {
+            "type": "memory_query",
+            "query_kind": "history",
+            "result_kind": "known_recent_notes" if notes else "no_saved_profile",
+            "binding_state": "bound_profile",
+            "facts": [],
+            "notes": notes,
+            "history_turns": matches,
+            "required_terms": [],
+            "text": (
+                "From our saved conversation history: " + " | ".join(notes[:3])
+                if notes
+                else "I do not have a matching saved conversation for that yet."
+            ),
+        }
+
         with self._lock:
             self._reload_if_external_change_unlocked()
             profiles = self._db.get("profiles")
