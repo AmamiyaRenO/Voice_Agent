@@ -1305,10 +1305,10 @@ def _build_runtime_env(args: argparse.Namespace, defaults: LauncherDefaults) -> 
         or str(defaults.script_dir / "intent_service" / "manifest.json"),
     )
 
-    doc_root_raw = _normalize_string(env.get("DOC_RAG_ROOT"))
-    doc_root = Path(doc_root_raw).expanduser() if doc_root_raw else Path()
-    if doc_root_raw and not doc_root.is_absolute():
-        doc_root = (defaults.repo_root / doc_root).resolve()
+    doc_root = _resolve_doc_rag_root(
+        Path(str(env.get("DOC_RAG_ROOT", "") or "")),
+        repo_root=defaults.repo_root,
+    )
     docs_dir = _resolve_general_docs_dir(doc_root) if str(doc_root) else Path()
     if str(doc_root):
         env["DOC_RAG_ROOT"] = str(doc_root)
@@ -1369,6 +1369,13 @@ def _resolve_general_docs_dir(doc_root: Path) -> Path:
     if nested.exists():
         return nested
     return root
+
+
+def _resolve_doc_rag_root(doc_root: Path, *, repo_root: Path) -> Path:
+    root = Path(str(doc_root or "")).expanduser()
+    if root.is_absolute():
+        return root
+    return (repo_root / root).resolve(strict=False)
 
 
 def _has_general_docs(doc_root: Path) -> bool:
@@ -1569,7 +1576,10 @@ def _probe_doc_rag_embedder(defaults: LauncherDefaults, env: Dict[str, str]) -> 
 def _run_doc_rag_preflight(defaults: LauncherDefaults, env: Dict[str, str]) -> Tuple[bool, str]:
     if (env.get("DOC_RAG_ENABLE", "1") or "1").strip().lower() not in {"1", "true", "yes", "on"}:
         return True, ""
-    doc_root = Path(str(env.get("DOC_RAG_ROOT", "") or "")).expanduser()
+    doc_root = _resolve_doc_rag_root(
+        Path(str(env.get("DOC_RAG_ROOT", "") or "")),
+        repo_root=defaults.repo_root,
+    )
     docs_dir = _resolve_general_docs_dir(doc_root) if str(doc_root) else Path()
     if not docs_dir.exists():
         return True, ""
