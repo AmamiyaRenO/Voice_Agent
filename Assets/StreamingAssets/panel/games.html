@@ -1,217 +1,42 @@
-﻿<html lang="en">
+<!doctype html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Game Config</title>
-<style>
-body{margin:0;padding:1rem 1.1rem;background:#0f1117;color:#f5f7ff;font-family:'Segoe UI',sans-serif;}
-h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}
-a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}
-small{opacity:.75;}
-.card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:.9rem;margin-top:.7rem;}
-.toolbar{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin:.6rem 0;}
-button{cursor:pointer;border:none;border-radius:8px;padding:.55rem .9rem;background:#3b82f6;color:#fff;font-weight:600;}
-button.secondary{background:#334155;}
-button.warn{background:#dc2626;}
-input{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#f5f7ff;padding:.44rem .58rem;}
-.pathRow{display:flex;gap:.4rem;align-items:center;}
-.pathRow input{flex:1;}
-.tinyBtn{padding:.42rem .55rem;font-size:.78rem;white-space:nowrap;background:#334155;}
-table{width:100%;border-collapse:collapse;font-size:.9rem;}
-th,td{border-bottom:1px solid rgba(255,255,255,.1);padding:.42rem .35rem;vertical-align:top;}
-th{text-align:left;font-size:.78rem;opacity:.85;text-transform:uppercase;letter-spacing:.04em;}
-#status{margin-top:.6rem;opacity:.9;}
-#manifestPath{font-family:Consolas,monospace;font-size:.8rem;opacity:.8;word-break:break-all;}
-@media(max-width:900px){table,thead,tbody,tr,th,td{display:block;} th{display:none;} tr{border:1px solid rgba(255,255,255,.12);border-radius:10px;margin:.6rem 0;padding:.45rem;} td{border:none;padding:.28rem 0;} td::before{display:block;font-size:.72rem;opacity:.7;margin-bottom:.15rem;}}
-</style>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Game Library | Rachel Console</title>
+  <script src="/panel-assets/theme.js?v=2"></script>
+  <link rel="stylesheet" href="/panel-assets/app.css?v=2">
+  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=2"></script><script defer src="/panel-assets/activities.js?v=2"></script>
 </head>
-<body>
-<h1>Game Config</h1>
-<p><a href="/index.html">Back to User Panel</a></p>
-<div class="card">
-<small>
-Edit the local game manifest here: game name, launch keywords, executable path, workdir, and grounded game-card fields used for explanation and recommendation.
-Use Browse to pick files on the host machine; paths are normalized to absolute paths.
-</small>
-<div id="manifestPath"></div>
-<div class="toolbar">
-<button onclick="addRow()">Add Game</button>
-<button class="secondary" onclick="reloadGames()">Reload</button>
-<button onclick="saveGames()">Save</button>
-<button class="secondary" onclick="exportQmd()">Export QMD</button>
-<button class="secondary" onclick="importQmd()">Import QMD</button>
-</div>
-<table>
-<thead><tr><th>ID</th><th>Game Name</th><th>Keywords</th><th>Description</th><th>How To Play</th><th>Players</th><th>Tags</th><th>Level</th><th>Weight</th><th>Executable Path</th><th>Workdir</th><th>Action</th></tr></thead>
-<tbody id="rows"></tbody>
-</table>
-<div id="status">Ready.</div>
-</div>
-<script>
-const rowsEl = document.getElementById('rows');
-const statusEl = document.getElementById('status');
-const manifestPathEl = document.getElementById('manifestPath');
-let gameRows = [];
-function esc(v){ return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
-function splitKeywords(text){
-  return String(text||'').split(',').map(s=>s.trim()).filter(Boolean);
-}
-function render(){
-  if(!rowsEl) return;
-  if(!gameRows.length){ rowsEl.innerHTML = '<tr><td colspan="12">No games configured.</td></tr>'; return; }
-  rowsEl.innerHTML = gameRows.map((g,i)=>`
-    <tr>
-      <td data-label="ID"><input value="${esc(g.id)}" oninput="updateField(${i},'id',this.value)" placeholder="disc_golf"></td>
-      <td data-label="Game Name"><input value="${esc(g.name)}" oninput="updateField(${i},'name',this.value)" placeholder="Disc Golf"></td>
-      <td data-label="Keywords"><input value="${esc(g.keywords_text)}" oninput="updateField(${i},'keywords_text',this.value)" placeholder="disc golf,discgolf,frisbee golf"></td>
-      <td data-label="Description"><input value="${esc(g.description)}" oninput="updateField(${i},'description',this.value)" placeholder="Short grounded description"></td>
-      <td data-label="How To Play"><input value="${esc(g.how_to_play)}" oninput="updateField(${i},'how_to_play',this.value)" placeholder="How the game is played"></td>
-      <td data-label="Players"><input value="${esc(g.players_text)}" oninput="updateField(${i},'players_text',this.value)" placeholder="1-4"></td>
-      <td data-label="Tags"><input value="${esc(g.tags_text)}" oninput="updateField(${i},'tags_text',this.value)" placeholder="casual,throwing"></td>
-      <td data-label="Level"><input value="${esc(g.activity_level)}" oninput="updateField(${i},'activity_level',this.value)" placeholder="low"></td>
-      <td data-label="Weight"><input value="${esc(g.recommendation_weight)}" oninput="updateField(${i},'recommendation_weight',this.value)" placeholder="0.85"></td>
-      <td data-label="Executable Path"><div class="pathRow"><input value="${esc(g.exec)}" oninput="updateField(${i},'exec',this.value)" placeholder="D:\\Games\\DiscGolf\\DiscGolf.exe"><button type="button" class="tinyBtn" onclick="browseExec(${i})">Browse</button></div></td>
-      <td data-label="Workdir"><input value="${esc(g.workdir)}" oninput="updateField(${i},'workdir',this.value)" placeholder="D:\\Games\\DiscGolf"></td>
-      <td data-label="Action"><button class="warn" onclick="removeRow(${i})">Delete</button></td>
-    </tr>`).join('');
-}
-function updateField(i,key,val){ if(!gameRows[i]) return; gameRows[i][key]=val; }
-function addRow(){ gameRows.push({id:'',name:'',keywords_text:'',description:'',how_to_play:'',players_text:'1-4',tags_text:'',activity_level:'',recommendation_weight:'0.5',exec:'',workdir:''}); render(); }
-function removeRow(i){ gameRows.splice(i,1); render(); }
-function parsePlayers(text){
-  const value = String(text || '').trim();
-  const match = value.match(/^\s*(\d+)\s*-\s*(\d+)\s*$/);
-  if(match){
-    return {min: Math.max(1, Number(match[1]) || 1), max: Math.max(1, Number(match[2]) || 4)};
-  }
-  const single = Number(value);
-  if(Number.isFinite(single) && single > 0){
-    return {min: Math.max(1, Math.trunc(single)), max: Math.max(1, Math.trunc(single))};
-  }
-  return {min:1,max:4};
-}
-async function browseExec(i){
-  if(!gameRows[i]) return;
-  statusEl.textContent = 'Opening file picker on host...';
-  const payload = {
-    title: 'Select Game Executable',
-    filter: 'Executable Files (*.exe)|*.exe|All Files (*.*)|*.*',
-    initial_dir: String(gameRows[i].workdir || ''),
-    initial_filename: String(gameRows[i].exec || '')
-  };
-  try {
-    const resp = await fetch('/api/file/pick', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    });
-    const data = await resp.json();
-    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }
-    if(data.cancelled){ statusEl.textContent = 'Browse cancelled.'; return; }
-    const path = String(data.path || '').trim();
-    const dir = String(data.directory || '').trim();
-    if(path){ gameRows[i].exec = path; }
-    if(dir){ gameRows[i].workdir = dir; }
-    render();
-    statusEl.textContent = 'Selected: ' + (path || 'no file');
-  } catch(err){
-    statusEl.textContent = 'error: ' + err;
-  }
-}
-async function reloadGames(){
-  statusEl.textContent = 'Loading...';
-  try {
-    const resp = await fetch('/api/game/manifest');
-    const data = await resp.json();
-    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }
-    const list = Array.isArray(data.games) ? data.games : [];
-    gameRows = list.map(g=>({
-      id: String(g.id||''),
-      name: String(g.name||''),
-      exec: String(g.exec||''),
-      workdir: String(g.workdir||''),
-      keywords_text: Array.isArray(g.keywords) ? g.keywords.join(', ') : '',
-      description: String(g.description||''),
-      how_to_play: String(g.how_to_play||''),
-      players_text: String((g.players_min||1)) + '-' + String((g.players_max||4)),
-      tags_text: Array.isArray(g.tags) ? g.tags.join(', ') : '',
-      activity_level: String(g.activity_level||''),
-      recommendation_weight: String(g.recommendation_weight ?? '0.5')
-    }));
-    if(manifestPathEl){ manifestPathEl.textContent = 'Manifest: ' + String(data.path||''); }
-    render();
-    const unresolved = Number(data.unresolved_count || 0);
-    statusEl.textContent = unresolved > 0
-      ? ('Loaded with warnings: ' + unresolved + ' unresolved path fields. Please fill absolute paths and save.')
-      : 'Loaded.';
-  } catch(err){
-    statusEl.textContent = 'error: ' + err;
-  }
-}
-async function saveGames(){
-  const payload = {
-    games: gameRows.map(g=>({
-      id: String(g.id||'').trim(),
-      name: String(g.name||'').trim(),
-      keywords: splitKeywords(g.keywords_text),
-      description: String(g.description||'').trim(),
-      how_to_play: String(g.how_to_play||'').trim(),
-      players_min: parsePlayers(g.players_text).min,
-      players_max: parsePlayers(g.players_text).max,
-      tags: splitKeywords(g.tags_text),
-      activity_level: String(g.activity_level||'').trim(),
-      recommendation_weight: Number(g.recommendation_weight || 0.5) || 0.5,
-      exec: String(g.exec||'').trim(),
-      workdir: String(g.workdir||'').trim()
-    }))
-  };
-  statusEl.textContent = 'Saving...';
-  try {
-    const resp = await fetch('/api/game/manifest', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    });
-    const data = await resp.json();
-    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }
-    statusEl.textContent = 'Saved. ' + (data.message || 'Restart intent_service and game_launcher to apply immediately.');
-    await reloadGames();
-  } catch(err){
-    statusEl.textContent = 'error: ' + err;
-  }
-}
-async function exportQmd(){
-  statusEl.textContent = 'Exporting QMD...';
-  try {
-    const resp = await fetch('/api/qmd', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({action:'export'})
-    });
-    const data = await resp.json();
-    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }
-    statusEl.textContent = data.message || 'QMD exported.';
-  } catch(err){
-    statusEl.textContent = 'error: ' + err;
-  }
-}
-async function importQmd(){
-  statusEl.textContent = 'Importing QMD...';
-  try {
-    const resp = await fetch('/api/qmd', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({action:'import'})
-    });
-    const data = await resp.json();
-    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP '+resp.status)); }
-    statusEl.textContent = data.message || 'QMD imported.';
-    await reloadGames();
-  } catch(err){
-    statusEl.textContent = 'error: ' + err;
-  }
-}
-reloadGames();
-</script>
+<body data-page="activities">
+  <section data-page-content>
+    <header class="page-header">
+      <div class="workspace-title"><a class="icon-button" href="/index.html" aria-label="Back to Applications" title="Back"><i data-lucide="arrow-left"></i></a><div><h1>Game Library</h1><p class="page-description">Launch and configure the games available on this Rachel station.</p></div></div>
+      <div class="header-actions"><button class="secondary" id="exit-game" type="button"><i data-lucide="square"></i>Exit Game</button><button id="add-activity" type="button"><i data-lucide="plus"></i>Add Game</button></div>
+    </header>
+    <div class="library-search"><i data-lucide="search"></i><input id="activity-search" type="search" aria-label="Search games" placeholder="Search by name, ID or keyword"><span class="status-badge" id="activity-summary">Loading</span></div>
+    <div class="activity-list" id="activity-list" aria-live="polite"></div>
+    <button class="drawer-scrim" id="drawer-scrim" type="button" aria-label="Close game editor"></button>
+    <aside class="activity-drawer" id="activity-drawer" aria-label="Game configuration">
+      <form class="activity-editor hidden" id="activity-editor">
+        <div class="panel-head"><div><div class="page-kicker">Game configuration</div><h2 id="editor-title">Game</h2><p class="panel-note mono" id="manifest-path"></p></div><button class="icon-button" id="close-editor" type="button" aria-label="Close editor" title="Close"><i data-lucide="x"></i></button></div>
+        <div class="form-grid">
+          <div class="field"><label for="activity-id">Game ID</label><input id="activity-id" required placeholder="disc_golf"></div>
+          <div class="field"><label for="activity-name">Display name</label><input id="activity-name" required placeholder="Disc Golf"></div>
+          <div class="field full"><label for="activity-keywords">Launch keywords</label><input id="activity-keywords" placeholder="disc golf, discgolf, frisbee golf"><small>Comma-separated phrases recognized by the intent service.</small></div>
+          <div class="field full"><label for="activity-description">Description</label><textarea id="activity-description" rows="3"></textarea></div>
+          <div class="field full"><label for="activity-how">How to play</label><textarea id="activity-how" rows="4"></textarea></div>
+          <div class="field"><label for="activity-players">Players</label><input id="activity-players" placeholder="1-4"></div>
+          <div class="field"><label for="activity-level">Activity level</label><input id="activity-level" placeholder="low"></div>
+          <div class="field"><label for="activity-tags">Tags</label><input id="activity-tags" placeholder="casual, throwing"></div>
+          <div class="field"><label for="activity-weight">Recommendation weight</label><input id="activity-weight" type="number" min="0" step="0.05" value="0.5"></div>
+          <div class="field full"><label for="activity-exec">Executable path</label><div class="pathRow"><input id="activity-exec" placeholder="D:\Games\DiscGolf\DiscGolf.exe"><button class="secondary" id="browse-exec" type="button"><i data-lucide="folder-open"></i>Browse</button></div></div>
+          <div class="field full"><label for="activity-workdir">Working directory</label><input id="activity-workdir" placeholder="D:\Games\DiscGolf"></div>
+        </div>
+        <div class="notice" id="activity-status">Save writes these changes to the local manifest.</div>
+        <div class="toolbar"><button class="primary" id="save-activities" type="button"><i data-lucide="save"></i>Save</button><button class="secondary" id="import-qmd" type="button"><i data-lucide="file-down"></i>Import QMD</button><button class="secondary" id="export-qmd" type="button"><i data-lucide="file-up"></i>Export QMD</button><button class="danger" id="delete-activity" type="button"><i data-lucide="trash-2"></i>Delete</button></div>
+      </form>
+      <div class="editor-empty" id="activity-empty"><div><i data-lucide="gamepad-2"></i><h2>Select a game</h2></div></div>
+    </aside>
+  </section>
 </body>
 </html>

@@ -468,6 +468,45 @@ namespace RobotVoice
                     }
                     item["exec"] = resolvedExec;
                     item["workdir"] = resolvedWorkdir;
+                    var pathErrors = new List<string>();
+                    if (string.IsNullOrWhiteSpace(rawExec))
+                    {
+                        pathErrors.Add("Executable path is not configured");
+                        unresolvedCount++;
+                    }
+                    else if (string.IsNullOrWhiteSpace(resolvedExec))
+                    {
+                        pathErrors.Add($"Executable not found: {rawExec}");
+                    }
+                    if (!string.IsNullOrWhiteSpace(rawWorkdir) && string.IsNullOrWhiteSpace(resolvedWorkdir))
+                    {
+                        pathErrors.Add($"Working directory not found: {rawWorkdir}");
+                    }
+                    item["launch_ready"] = !string.IsNullOrWhiteSpace(resolvedExec)
+                        && (string.IsNullOrWhiteSpace(rawWorkdir) || !string.IsNullOrWhiteSpace(resolvedWorkdir));
+                    item["path_error"] = string.Join("; ", pathErrors);
+                    item["description"] = (obj["description"]?.Value ?? string.Empty).Trim();
+                    item["how_to_play"] = (obj["how_to_play"]?.Value ?? string.Empty).Trim();
+                    item["players_min"] = obj["players_min"]?.AsInt ?? 1;
+                    item["players_max"] = obj["players_max"]?.AsInt ?? 4;
+                    item["activity_level"] = (obj["activity_level"]?.Value ?? string.Empty).Trim();
+                    item["recommendation_weight"] = obj["recommendation_weight"]?.AsFloat ?? 0.5f;
+
+                    var tags = new JSONArray();
+                    var tagsNode = obj["tags"];
+                    if (tagsNode != null && tagsNode.IsArray)
+                    {
+                        var tagArray = tagsNode.AsArray;
+                        for (int j = 0; j < tagArray.Count; j++)
+                        {
+                            var tag = (tagArray[j]?.Value ?? string.Empty).Trim();
+                            if (!string.IsNullOrWhiteSpace(tag))
+                            {
+                                tags.Add(tag);
+                            }
+                        }
+                    }
+                    item["tags"] = tags;
 
                     var keywords = new JSONArray();
                     var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

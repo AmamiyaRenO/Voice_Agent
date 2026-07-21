@@ -1,97 +1,43 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Participant History</title>
-<style>
-:root{--bg:#0f141b;--surface:#171e27;--surface2:#111821;--line:#2a3542;--text:#edf4ff;--muted:#9db0c6;--blue:#2f6fed;--red:#b91c3c;--green:#42d985}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 "Segoe UI",sans-serif}
-button,input{font:inherit}.page{max-width:1440px;margin:auto;padding:20px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:18px}
-h1,h2{margin:0;letter-spacing:0}h1{font-size:25px}h2{font-size:18px}.muted{color:var(--muted)}a{color:#80b1ff}
-.layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:16px}.panel{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px;min-width:0}
-.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}button{border:0;border-radius:7px;padding:9px 13px;background:var(--blue);color:white;font-weight:700;cursor:pointer}
-button.secondary{background:#283545}button.danger{background:var(--red)}button:disabled{opacity:.45;cursor:not-allowed}input{width:100%;background:var(--surface2);border:1px solid var(--line);border-radius:7px;color:var(--text);padding:10px}
-.users{display:flex;flex-direction:column;gap:7px;max-height:72vh;overflow:auto;margin-top:14px}.user{padding:11px;border:1px solid var(--line);border-radius:7px;background:var(--surface2);cursor:pointer}
-.user.active{border-color:#5d91ff;background:#17294a}.user-name{font-weight:800}.user-meta{color:var(--muted);font-size:13px;margin-top:3px}
-.summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:16px 0}.stat{border:1px solid var(--line);background:var(--surface2);border-radius:7px;padding:11px}
-.stat-label{color:var(--muted);font-size:12px;text-transform:uppercase;font-weight:800}.stat-value{margin-top:4px;font-size:17px;font-weight:800;overflow-wrap:anywhere}
-.edit{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin:12px 0 18px}.history-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}
-.history{height:55vh;min-height:360px;overflow:auto;border:1px solid var(--line);border-radius:7px;background:var(--surface2);padding:0 14px}
-.turn{display:grid;grid-template-columns:88px minmax(0,1fr) auto;gap:12px;padding:13px 0;border-bottom:1px solid var(--line)}.turn:last-child{border:0}
-.role{font-weight:900;text-transform:uppercase;color:#79aaff}.role.assistant{color:var(--green)}.text{white-space:pre-wrap;overflow-wrap:anywhere}.time{color:var(--muted);font-size:12px}
-.empty{padding:30px;text-align:center;color:var(--muted)}.status{min-height:22px;margin-top:12px;color:var(--muted)}
-@media(max-width:850px){.layout{grid-template-columns:1fr}.summary{grid-template-columns:1fr}.history{height:50vh}.turn{grid-template-columns:74px minmax(0,1fr)}.time{grid-column:2}}
-</style>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Participants | Rachel Console</title>
+  <script src="/panel-assets/theme.js?v=2"></script>
+  <link rel="stylesheet" href="/panel-assets/app.css?v=2">
+  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=2"></script><script defer src="/panel-assets/participants.js"></script>
 </head>
-<body>
-<main class="page">
-  <div class="top">
-    <div><h1>Participant History</h1><div class="muted">Profiles contain a display name, voiceprint link, and saved conversation history.</div></div>
-    <a href="/index.html">Back to Demo Console</a>
-  </div>
-  <div class="layout">
-    <section class="panel">
-      <div class="toolbar"><button onclick="reloadMemory()">Refresh</button><button class="secondary" onclick="createUser()">New Participant</button></div>
-      <div id="userCount" class="muted" style="margin-top:12px"></div>
-      <div id="users" class="users"></div>
-    </section>
-    <section class="panel">
-      <div class="toolbar"><button id="deleteBtn" class="danger" onclick="deleteUser()" disabled>Delete Participant</button></div>
-      <div class="summary">
-        <div class="stat"><div class="stat-label">Participant ID</div><div id="participantId" class="stat-value">-</div></div>
-        <div class="stat"><div class="stat-label">Voiceprint</div><div id="voiceprint" class="stat-value">-</div></div>
-        <div class="stat"><div class="stat-label">Saved Turns</div><div id="turnCount" class="stat-value">0</div></div>
-      </div>
-      <label class="muted" for="displayName">Display name</label>
-      <div class="edit"><input id="displayName" placeholder="Participant name"><button id="saveBtn" onclick="saveName()" disabled>Save Name</button></div>
-      <div class="history-head"><h2>Conversation History</h2><span class="muted">Oldest to newest</span></div>
-      <div id="history" class="history"><div class="empty">Select a participant.</div></div>
-      <div id="status" class="status">Ready.</div>
-    </section>
-  </div>
-</main>
-<script>
-const usersEl=document.getElementById('users'),historyEl=document.getElementById('history'),statusEl=document.getElementById('status');
-const participantIdEl=document.getElementById('participantId'),voiceprintEl=document.getElementById('voiceprint'),turnCountEl=document.getElementById('turnCount');
-const displayNameEl=document.getElementById('displayName'),saveBtn=document.getElementById('saveBtn'),deleteBtn=document.getElementById('deleteBtn'),userCountEl=document.getElementById('userCount');
-let state={},selectedId='';
-const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const when=ts=>{const n=Number(ts||0);return n?new Date(n*1000).toLocaleString():'-'};
-function setStatus(text){statusEl.textContent=text}
-async function api(url,options){const r=await fetch(url,options);const d=await r.json();if(!r.ok||d.status!=='ok')throw new Error(d.detail||d.message||`HTTP ${r.status}`);return d}
-function renderUsers(){
-  const users=Array.isArray(state.users)?state.users:[];
-  userCountEl.textContent=`${users.length} participant${users.length===1?'':'s'}`;
-  usersEl.innerHTML=users.length?users.map(u=>`<div class="user ${u.user_id===selectedId?'active':''}" onclick="selectUser('${esc(u.user_id)}')"><div class="user-name">${esc(u.display_name||u.user_id)}</div><div class="user-meta">${esc(u.user_id)} · ${Number(u.dialog_turn_count||0)} saved turns</div></div>`).join(''):'<div class="empty">No participants yet.</div>';
-}
-function renderSelected(){
-  const p=state.selected_profile&&typeof state.selected_profile==='object'?state.selected_profile:{};
-  const turns=Array.isArray(p.dialog_turns)?p.dialog_turns:[];
-  participantIdEl.textContent=selectedId||'-';displayNameEl.value=String(p.display_name||'');
-  turnCountEl.textContent=String(turns.length);voiceprintEl.textContent=state.selected_speaker_profile&&state.selected_speaker_profile.has_profile?'Ready':'Not enrolled';
-  saveBtn.disabled=!selectedId;deleteBtn.disabled=!selectedId;
-  historyEl.innerHTML=turns.length?turns.map(t=>{const role=String(t.role||'user').toLowerCase();return `<div class="turn"><div class="role ${role==='assistant'?'assistant':''}">${role==='assistant'?'Rachel':'User'}</div><div class="text">${esc(t.text)}</div><div class="time">${esc(when(t.ts))}</div></div>`}).join(''):'<div class="empty">No saved conversation yet.</div>';
-  historyEl.scrollTop=historyEl.scrollHeight;
-}
-async function reloadMemory(){
-  try{state=await api('/api/memory?user_id='+encodeURIComponent(selectedId)+'&_ts='+Date.now());if(selectedId&&!state.selected_profile?.display_name)selectedId='';renderUsers();renderSelected();setStatus('History refreshed.')}catch(e){setStatus('Error: '+e.message)}
-}
-async function selectUser(id){selectedId=id;await reloadMemory()}
-async function createUser(){
-  const name=prompt('Participant name');if(!name)return;
-  try{let d=await api('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'create_user'})});selectedId=d.selected_user_id;d=await api('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'update_user_raw',user_id:selectedId,profile:{display_name:name,dialog_turns:[]}})});state=d;renderUsers();renderSelected();setStatus('Participant created.')}catch(e){setStatus('Error: '+e.message)}
-}
-async function saveName(){
-  if(!selectedId)return;
-  const turns=Array.isArray(state.selected_profile?.dialog_turns)?state.selected_profile.dialog_turns:[];
-  try{state=await api('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'update_user_raw',user_id:selectedId,profile:{display_name:displayNameEl.value.trim()||selectedId,dialog_turns:turns}})});renderUsers();renderSelected();setStatus('Name saved.')}catch(e){setStatus('Error: '+e.message)}
-}
-async function deleteUser(){
-  if(!selectedId||!confirm(`Delete ${selectedId}, its conversation history, and voiceprint?`))return;
-  try{state=await api('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete_user',user_id:selectedId})});selectedId='';renderUsers();renderSelected();setStatus('Participant deleted.')}catch(e){setStatus('Error: '+e.message)}
-}
-reloadMemory();
-</script>
+<body data-page="participants">
+  <section data-page-content>
+    <header class="page-header">
+      <div class="workspace-title"><a class="icon-button" href="/runtime.html" aria-label="Back to Settings" title="Back"><i data-lucide="arrow-left"></i></a><div><div class="page-kicker">Identity and memory</div><h1>Participants</h1><p class="page-description">Review participant identity, voice enrollment and saved conversation history.</p></div></div>
+      <div class="header-actions"><button class="secondary" id="refresh-participants" type="button"><i data-lucide="refresh-cw"></i>Refresh</button></div>
+    </header>
+    <div class="split-view">
+      <aside class="panel list-panel">
+        <div class="panel-head"><div><h2>Participant list</h2><p class="panel-note" id="participant-count">Loading...</p></div></div>
+        <form id="new-participant-form" class="field">
+          <label for="new-participant-name">New participant</label>
+          <div class="pathRow"><input id="new-participant-name" required placeholder="Display name"><button class="secondary tinyBtn" id="create-participant" type="submit"><i data-lucide="user-plus"></i>Add</button></div>
+        </form>
+        <div class="users" id="participant-list" style="margin-top:14px"></div>
+      </aside>
+      <section class="panel">
+        <div class="editor-empty" id="participant-empty"><div><i data-lucide="user-round-search"></i><h2>Select a participant</h2><p class="panel-note">Choose a profile to review identity and conversation history.</p></div></div>
+        <div id="participant-detail" hidden>
+          <div class="panel-head"><div><h2 id="participant-title">Participant</h2><p class="panel-note" id="participant-subtitle"></p></div><button class="danger" id="delete-participant" type="button"><i data-lucide="trash-2"></i>Delete</button></div>
+          <div class="summary">
+            <div class="stat"><div class="stat-label">Participant ID</div><div class="stat-value" id="participant-id">-</div></div>
+            <div class="stat"><div class="stat-label">Voiceprint</div><div class="stat-value" id="voiceprint-state">-</div></div>
+            <div class="stat"><div class="stat-label">Saved turns</div><div class="stat-value" id="turn-count">0</div></div>
+          </div>
+          <form id="participant-name-form" class="field" style="margin-bottom:18px"><label for="participant-name">Display name</label><div class="pathRow"><input id="participant-name" required><button id="save-participant-name" type="submit"><i data-lucide="save"></i>Save</button></div></form>
+          <div class="panel-head"><div><h2>Conversation history</h2><p class="panel-note">Oldest to newest</p></div></div>
+          <div class="history" id="participant-history"></div>
+          <div class="status-line" id="participant-status" aria-live="polite"></div>
+        </div>
+      </section>
+    </div>
+  </section>
 </body>
 </html>

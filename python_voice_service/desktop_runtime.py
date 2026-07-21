@@ -538,6 +538,8 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
     ).strip() or DEFAULT_GEMINI_RESPONSE_MODEL
     gemini_live_voice = str(env_obj.get("GEMINI_LIVE_VOICE") or DEFAULT_GEMINI_LIVE_VOICE).strip() or DEFAULT_GEMINI_LIVE_VOICE
     gemini_live_native_response = _read_bool(env_obj, "VOICE_GEMINI_LIVE_NATIVE_RESPONSE", False)
+    speaker_id_enabled = _read_bool(env_obj, "VOICE_SPEAKER_ID_ENABLED", False)
+    speaker_auto_learning_enabled = _read_bool(env_obj, "VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING", False)
     tts_backend = _normalize_tts_backend(env_obj.get("VOICE_AGENT_TTS_BACKEND"))
     kokoro_voice = str(env_obj.get("KOKORO_TTS_VOICE") or DEFAULT_KOKORO_VOICE).strip() or DEFAULT_KOKORO_VOICE
     kokoro_lang_code = str(env_obj.get("KOKORO_TTS_LANG_CODE") or "a").strip().lower() or "a"
@@ -569,6 +571,8 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
         "gemini_response_model": gemini_response_model,
         "gemini_live_voice": gemini_live_voice,
         "gemini_live_native_response": gemini_live_native_response,
+        "speaker_id_enabled": speaker_id_enabled,
+        "speaker_auto_learning_enabled": speaker_auto_learning_enabled,
         "cloud_response_provider": cloud_response_provider,
         "tts_backend": tts_backend,
         "kokoro_voice": kokoro_voice,
@@ -619,8 +623,23 @@ def _manifest_status_payload(path: Path) -> Dict[str, Any]:
         name = str(item.get("name") or game_id).strip() or game_id
         exec_path = str(item.get("exec") or "").strip()
         workdir = str(item.get("workdir") or "").strip()
-        if exec_path and not Path(exec_path).exists():
-            unresolved += 1
+        expanded_exec = os.path.expandvars(exec_path) if exec_path else ""
+        expanded_workdir = os.path.expandvars(workdir) if workdir else ""
+        executable_exists = bool(expanded_exec) and (
+            Path(expanded_exec).is_file()
+            if any(marker in expanded_exec for marker in ("\\", "/", ":"))
+            else bool(shutil.which(expanded_exec))
+        )
+        workdir_exists = not expanded_workdir or Path(expanded_workdir).is_dir()
+        path_errors: List[str] = []
+        if not expanded_exec:
+            path_errors.append("Executable path is not configured")
+        elif not executable_exists:
+            path_errors.append(f"Executable not found: {exec_path}")
+        if expanded_workdir and not workdir_exists:
+            path_errors.append(f"Working directory not found: {workdir}")
+        if path_errors:
+            unresolved += len(path_errors)
         games_out.append(
             {
                 "id": game_id,
@@ -628,6 +647,8 @@ def _manifest_status_payload(path: Path) -> Dict[str, Any]:
                 "keywords": [str(value).strip() for value in item.get("synonyms", []) or [] if str(value).strip()],
                 "exec": exec_path,
                 "workdir": workdir,
+                "launch_ready": bool(executable_exists and workdir_exists),
+                "path_error": "; ".join(path_errors),
                 "description": str(item.get("description") or "").strip(),
                 "how_to_play": str(item.get("how_to_play") or "").strip(),
                 "players_min": int(item.get("players_min") or 1),
@@ -1176,6 +1197,38 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="Voice Agent Desktop Runtime", lifespan=_lifespan)
 
 
+PANEL_ASSET_MEDIA_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+
+def _resolve_panel_asset_from_candidates(name: str, panel_dirs: List[Path]) -> Tuple[Path, str]:
+    normalized = str(name or "").strip()
+    if (
+        not normalized
+        or normalized.startswith(("/", "\\"))
+        or "/" in normalized
+        or "\\" in normalized
+        or "\0" in normalized
+        or normalized in {".", ".."}
+    ):
+        raise HTTPException(status_code=404, detail="panel asset not found")
+    media_type = PANEL_ASSET_MEDIA_TYPES.get(Path(normalized).suffix.lower())
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="panel asset not found")
+    for panel_dir in panel_dirs:
+        root = panel_dir.resolve()
+        candidate = (root / normalized).resolve()
+        if candidate.parent == root and candidate.is_file():
+            return candidate, media_type
+    raise HTTPException(status_code=404, detail="panel asset not found")
+
+
 def _panel_file_response_from_candidates(name: str, panel_dirs: List[Path]) -> FileResponse:
     for panel_dir in panel_dirs:
         path = panel_dir / name
@@ -1345,6 +1398,8 @@ async def _apply_runtime_live(merged: Dict[str, Any]) -> str:
     os.environ["GEMINI_RESPONSE_MODEL"] = runtime["gemini_response_model"]
     os.environ["GEMINI_LIVE_VOICE"] = runtime["gemini_live_voice"]
     os.environ["VOICE_GEMINI_LIVE_NATIVE_RESPONSE"] = "1" if runtime["gemini_live_native_response"] else "0"
+    os.environ["VOICE_SPEAKER_ID_ENABLED"] = "1" if runtime["speaker_id_enabled"] else "0"
+    os.environ["VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING"] = "1" if runtime["speaker_auto_learning_enabled"] else "0"
     request_payload = {
         "pipeline_mode": runtime["conversation_pipeline_mode"],
         "profile": runtime["conversation_profile"],
@@ -1428,6 +1483,12 @@ async def panel_index() -> FileResponse:
     return _panel_file_response("index.html")
 
 
+@app.get("/panel-assets/{asset_name:path}")
+async def panel_asset(asset_name: str) -> FileResponse:
+    path, media_type = _resolve_panel_asset_from_candidates(asset_name, PANEL_DIR_CANDIDATES)
+    return FileResponse(path, media_type=media_type)
+
+
 @app.get("/")
 @app.get("/panel.html")
 async def panel_home_redirect() -> RedirectResponse:
@@ -1438,6 +1499,12 @@ async def panel_home_redirect() -> RedirectResponse:
 @app.get("/games.html")
 async def panel_games() -> FileResponse:
     return _panel_file_response("games.html")
+
+
+@app.get("/controls")
+@app.get("/controls.html")
+async def panel_controls() -> FileResponse:
+    return _panel_file_response("controls.html")
 
 
 @app.get("/runtime")
@@ -1980,6 +2047,12 @@ async def api_runtime_config_post(request: Request) -> Dict[str, Any]:
         env_obj["GEMINI_LIVE_MODEL"] = str(payload.get("gemini_live_model") or "").strip()
     if "gemini_live_voice" in payload:
         env_obj["GEMINI_LIVE_VOICE"] = str(payload.get("gemini_live_voice") or "").strip()
+    if "gemini_live_native_response" in payload:
+        env_obj["VOICE_GEMINI_LIVE_NATIVE_RESPONSE"] = "1" if bool(payload.get("gemini_live_native_response")) else "0"
+    if "speaker_id_enabled" in payload:
+        env_obj["VOICE_SPEAKER_ID_ENABLED"] = "1" if bool(payload.get("speaker_id_enabled")) else "0"
+    if "speaker_auto_learning_enabled" in payload:
+        env_obj["VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING"] = "1" if bool(payload.get("speaker_auto_learning_enabled")) else "0"
     coerced_cloud_asr_mode, coerced_cloud_streaming_asr_mode = _coerce_cloud_pipeline_for_provider(
         profile=env_obj.get("VOICE_CONVERSATION_PROFILE"),
         cloud_response_provider=env_obj.get("VOICE_CLOUD_RESPONSE_PROVIDER"),

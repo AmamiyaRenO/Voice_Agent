@@ -62,6 +62,7 @@ namespace RobotVoice
             var pythonObj = EnsureObjectNode(root, "python");
             var pathsObj = EnsureObjectNode(root, "paths");
             var openaiObj = EnsureObjectNode(root, "openai");
+            var geminiObj = EnsureObjectNode(root, "gemini");
             var intentObj = EnsureObjectNode(root, "intent");
             var envObj = EnsureObjectNode(root, "env");
             var projectRoot = ResolveProjectRootPath();
@@ -111,6 +112,10 @@ namespace RobotVoice
             {
                 SetOrRemoveString(openaiObj, "transcribe_prompt", value);
             }
+            if (TryReadOptionalString(requestObj, "gemini_api_key", out value))
+            {
+                SetOrRemoveString(geminiObj, "api_key", value);
+            }
             if (TryReadOptionalString(requestObj, "ollama_model", out value))
             {
                 SetOrRemoveString(envObj, "OLLAMA_MODEL", value);
@@ -123,6 +128,33 @@ namespace RobotVoice
             {
                 SetOrRemoveString(envObj, "VOICE_CONVERSATION_PROFILE", NormalizeConversationProfileForConfig(value));
             }
+            if (TryReadOptionalString(requestObj, "cloud_response_provider", out value))
+            {
+                var normalizedProvider = string.Equals(value, "gemini", StringComparison.OrdinalIgnoreCase) ? "gemini" : "openai";
+                SetOrRemoveString(envObj, "VOICE_CLOUD_RESPONSE_PROVIDER", normalizedProvider);
+            }
+            if (TryReadOptionalString(requestObj, "tts_backend", out value))
+            {
+                var normalizedBackend = (value ?? string.Empty).Trim().ToLowerInvariant();
+                if (normalizedBackend != "kokoro" && normalizedBackend != "google-cloud")
+                {
+                    normalizedBackend = "piper";
+                }
+                SetOrRemoveString(envObj, "VOICE_AGENT_TTS_BACKEND", normalizedBackend);
+                activeTtsBackend = normalizedBackend == "google-cloud" ? "piper" : normalizedBackend;
+            }
+            if (TryReadOptionalString(requestObj, "kokoro_voice", out value))
+            {
+                SetOrRemoveString(envObj, "KOKORO_TTS_VOICE", value);
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    activeKokoroVoice = value.Trim();
+                }
+            }
+            if (TryReadOptionalString(requestObj, "kokoro_lang_code", out value))
+            {
+                SetOrRemoveString(envObj, "KOKORO_TTS_LANG_CODE", value.ToLowerInvariant());
+            }
             if (TryReadOptionalString(requestObj, "local_asr_mode", out value))
             {
                 var normalizedAsr = NormalizeAsrMode(value);
@@ -133,9 +165,50 @@ namespace RobotVoice
                 var normalizedAsr = NormalizeAsrMode(value);
                 SetOrRemoveString(envObj, "VOICE_CLOUD_ASR_MODE", string.IsNullOrWhiteSpace(normalizedAsr) ? string.Empty : normalizedAsr);
             }
+            if (TryReadOptionalString(requestObj, "local_streaming_asr_mode", out value))
+            {
+                var normalizedAsr = NormalizeStreamingAsrMode(value);
+                SetOrRemoveString(envObj, "VOICE_LOCAL_STREAMING_ASR_MODE", string.IsNullOrWhiteSpace(normalizedAsr) ? string.Empty : normalizedAsr);
+                localStreamingAsrMode = StreamingAsrModeFromConfig(normalizedAsr, localStreamingAsrMode);
+            }
+            if (TryReadOptionalString(requestObj, "cloud_streaming_asr_mode", out value))
+            {
+                var normalizedAsr = NormalizeStreamingAsrMode(value);
+                SetOrRemoveString(envObj, "VOICE_CLOUD_STREAMING_ASR_MODE", string.IsNullOrWhiteSpace(normalizedAsr) ? string.Empty : normalizedAsr);
+                cloudStreamingAsrMode = StreamingAsrModeFromConfig(normalizedAsr, cloudStreamingAsrMode);
+            }
             if (TryReadOptionalString(requestObj, "openai_response_model", out value))
             {
                 SetOrRemoveString(envObj, "OPENAI_RESPONSE_MODEL", value);
+            }
+            if (TryReadOptionalString(requestObj, "gemini_response_model", out value))
+            {
+                SetOrRemoveString(envObj, "GEMINI_RESPONSE_MODEL", value);
+            }
+            if (TryReadOptionalString(requestObj, "gemini_live_model", out value))
+            {
+                SetOrRemoveString(envObj, "GEMINI_LIVE_MODEL", value);
+            }
+            if (TryReadOptionalString(requestObj, "gemini_live_voice", out value))
+            {
+                SetOrRemoveString(envObj, "GEMINI_LIVE_VOICE", value);
+            }
+            if (TryReadOptionalString(requestObj, "asr_hotword_strategy", out value))
+            {
+                var normalizedHotwords = (value ?? string.Empty).Trim().ToLowerInvariant();
+                if (normalizedHotwords != "commands_games" && normalizedHotwords != "commands_only" && normalizedHotwords != "off")
+                {
+                    normalizedHotwords = "commands_games_memory";
+                }
+                SetOrRemoveString(envObj, "VOICE_ASR_HOTWORD_STRATEGY", normalizedHotwords);
+            }
+            if (TryReadOptionalString(requestObj, "asr_stable_partial_repeats", out value))
+            {
+                if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var repeats))
+                {
+                    repeats = 2;
+                }
+                SetOrRemoveString(envObj, "VOICE_ASR_STABLE_PARTIAL_REPEATS", Math.Max(1, repeats).ToString(CultureInfo.InvariantCulture));
             }
             if (TryReadOptionalString(requestObj, "launch_triggers", out value))
             {
@@ -154,6 +227,18 @@ namespace RobotVoice
             {
                 SetOrRemoveString(intentObj, "use_moonshine_intent_recognizer", boolValue ? "true" : "false");
             }
+            if (TryReadOptionalBool(requestObj, "gemini_live_native_response", out boolValue))
+            {
+                SetOrRemoveString(envObj, "VOICE_GEMINI_LIVE_NATIVE_RESPONSE", boolValue ? "true" : "false");
+            }
+            if (TryReadOptionalBool(requestObj, "speaker_id_enabled", out boolValue))
+            {
+                SetOrRemoveString(envObj, "VOICE_SPEAKER_ID_ENABLED", boolValue ? "true" : "false");
+            }
+            if (TryReadOptionalBool(requestObj, "speaker_auto_learning_enabled", out boolValue))
+            {
+                SetOrRemoveString(envObj, "VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING", boolValue ? "true" : "false");
+            }
 
             // Clean up legacy flat keys when intent rules are stored in nested intent object.
             root.Remove("launch_triggers");
@@ -167,6 +252,12 @@ namespace RobotVoice
                     Directory.CreateDirectory(parent);
                 }
                 File.WriteAllText(configPath, root.ToString(2), Encoding.UTF8);
+                Environment.SetEnvironmentVariable(
+                    "VOICE_SPEAKER_ID_ENABLED",
+                    ReadOptionalBool(envObj, "VOICE_SPEAKER_ID_ENABLED", false) ? "1" : "0");
+                Environment.SetEnvironmentVariable(
+                    "VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING",
+                    ReadOptionalBool(envObj, "VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING", false) ? "1" : "0");
             }
             catch (Exception ex)
             {
@@ -179,6 +270,8 @@ namespace RobotVoice
                 ReadEnvString(envObj, "VOICE_CONVERSATION_PROFILE", "local"),
                 ReadEnvString(envObj, "VOICE_LOCAL_ASR_MODE", "moonshine-medium"),
                 ReadEnvString(envObj, "VOICE_CLOUD_ASR_MODE", "api"),
+                ReadEnvString(envObj, "VOICE_LOCAL_STREAMING_ASR_MODE", StreamingAsrModeToConfig(localStreamingAsrMode)),
+                ReadEnvString(envObj, "VOICE_CLOUD_STREAMING_ASR_MODE", StreamingAsrModeToConfig(cloudStreamingAsrMode)),
                 (openaiObj["api_key"]?.Value ?? string.Empty).Trim(),
                 (openaiObj["base_url"]?.Value ?? string.Empty).Trim(),
                 (openaiObj["transcribe_model"]?.Value ?? string.Empty).Trim(),
@@ -204,6 +297,7 @@ namespace RobotVoice
             var pythonObj = EnsureObjectNode(root, "python");
             var pathsObj = EnsureObjectNode(root, "paths");
             var openaiObj = EnsureObjectNode(root, "openai");
+            var geminiObj = EnsureObjectNode(root, "gemini");
             var intentObj = EnsureObjectNode(root, "intent");
             var envObj = EnsureObjectNode(root, "env");
             var projectRoot = ResolveProjectRootPath();
@@ -258,6 +352,15 @@ namespace RobotVoice
             payload["openai_transcribe_model"] = (openaiObj["transcribe_model"]?.Value ?? string.Empty).Trim();
             payload["openai_base_url"] = (openaiObj["base_url"]?.Value ?? string.Empty).Trim();
             payload["openai_transcribe_prompt"] = (openaiObj["transcribe_prompt"]?.Value ?? string.Empty).Trim();
+            var geminiApiKey = (geminiObj["api_key"]?.Value ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(geminiApiKey))
+            {
+                geminiApiKey = (Environment.GetEnvironmentVariable("GEMINI_API_KEY")
+                    ?? Environment.GetEnvironmentVariable("GOOGLE_API_KEY")
+                    ?? string.Empty).Trim();
+            }
+            payload["gemini_api_key"] = geminiApiKey;
+            payload["gemini_api_key_set"] = !string.IsNullOrWhiteSpace(geminiApiKey);
             var ollamaModel = (envObj["OLLAMA_MODEL"]?.Value ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(ollamaModel))
             {
@@ -268,10 +371,24 @@ namespace RobotVoice
                 ollamaModel = VoiceAgentDefaults.DefaultVisionModel;
             }
             payload["ollama_model"] = ollamaModel;
-            payload["conversation_pipeline_mode"] = NormalizeConversationPipelineModeForConfig(
+            var conversationPipelineMode = NormalizeConversationPipelineModeForConfig(
                 ReadEnvString(envObj, "VOICE_PIPELINE_MODE", "direct_unified"));
-            payload["conversation_profile"] = NormalizeConversationProfileForConfig(
+            var conversationProfile = NormalizeConversationProfileForConfig(
                 ReadEnvString(envObj, "VOICE_CONVERSATION_PROFILE", "local"));
+            payload["conversation_pipeline_mode"] = conversationPipelineMode;
+            payload["conversation_profile"] = conversationProfile;
+            payload["cloud_response_provider"] = string.Equals(
+                ReadEnvString(envObj, "VOICE_CLOUD_RESPONSE_PROVIDER", "openai"),
+                "gemini",
+                StringComparison.OrdinalIgnoreCase) ? "gemini" : "openai";
+            var ttsBackend = ReadEnvString(envObj, "VOICE_AGENT_TTS_BACKEND", "piper").Trim().ToLowerInvariant();
+            if (ttsBackend != "kokoro" && ttsBackend != "google-cloud")
+            {
+                ttsBackend = "piper";
+            }
+            payload["tts_backend"] = ttsBackend;
+            payload["kokoro_voice"] = ReadEnvString(envObj, "KOKORO_TTS_VOICE", "af_heart");
+            payload["kokoro_lang_code"] = ReadEnvString(envObj, "KOKORO_TTS_LANG_CODE", "a");
             payload["local_asr_mode"] = ResolvePreferredConversationAsrMode(
                 "local",
                 ReadEnvString(envObj, "VOICE_LOCAL_ASR_MODE", "moonshine-medium"),
@@ -280,7 +397,37 @@ namespace RobotVoice
                 "cloud",
                 ReadEnvString(envObj, "VOICE_LOCAL_ASR_MODE", "moonshine-medium"),
                 ReadEnvString(envObj, "VOICE_CLOUD_ASR_MODE", "api"));
+            var localStreamingMode = NormalizeStreamingAsrMode(
+                ReadEnvString(envObj, "VOICE_LOCAL_STREAMING_ASR_MODE", StreamingAsrModeToConfig(localStreamingAsrMode)));
+            if (string.IsNullOrWhiteSpace(localStreamingMode))
+            {
+                localStreamingMode = StreamingAsrModeToConfig(localStreamingAsrMode);
+            }
+            var cloudStreamingMode = NormalizeStreamingAsrMode(
+                ReadEnvString(envObj, "VOICE_CLOUD_STREAMING_ASR_MODE", StreamingAsrModeToConfig(cloudStreamingAsrMode)));
+            if (string.IsNullOrWhiteSpace(cloudStreamingMode))
+            {
+                cloudStreamingMode = StreamingAsrModeToConfig(cloudStreamingAsrMode);
+            }
+            payload["local_streaming_asr_mode"] = localStreamingMode;
+            payload["cloud_streaming_asr_mode"] = cloudStreamingMode;
+            payload["preferred_streaming_asr_mode"] = ResolvePreferredConversationStreamingAsrMode(
+                conversationProfile,
+                localStreamingMode,
+                cloudStreamingMode);
             payload["openai_response_model"] = ReadEnvString(envObj, "OPENAI_RESPONSE_MODEL", "gpt-4o-mini");
+            payload["gemini_response_model"] = ReadEnvString(envObj, "GEMINI_RESPONSE_MODEL", "gemini-2.5-flash");
+            payload["gemini_live_model"] = ReadEnvString(envObj, "GEMINI_LIVE_MODEL", "models/gemini-2.5-flash-native-audio-latest");
+            payload["gemini_live_voice"] = ReadEnvString(envObj, "GEMINI_LIVE_VOICE", "Kore");
+            payload["gemini_live_native_response"] = ReadOptionalBool(envObj, "VOICE_GEMINI_LIVE_NATIVE_RESPONSE", false);
+            payload["speaker_id_enabled"] = ReadOptionalBool(envObj, "VOICE_SPEAKER_ID_ENABLED", false);
+            payload["speaker_auto_learning_enabled"] = ReadOptionalBool(envObj, "VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING", false);
+            var hotwordStrategy = ReadEnvString(envObj, "VOICE_ASR_HOTWORD_STRATEGY", "commands_games_memory").Trim().ToLowerInvariant();
+            payload["asr_hotword_strategy"] = hotwordStrategy;
+            var stableRepeatsText = ReadEnvString(envObj, "VOICE_ASR_STABLE_PARTIAL_REPEATS", "2");
+            payload["asr_stable_partial_repeats"] = int.TryParse(stableRepeatsText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var stableRepeats)
+                ? Math.Max(1, stableRepeats)
+                : 2;
             payload["launch_triggers"] = string.Join(", ", launchTriggers);
             payload["exit_keywords"] = string.Join(", ", exitKeywords);
             payload["use_llm_intent_classifier"] = useLlmIntentClassifier;

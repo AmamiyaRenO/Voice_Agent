@@ -14,6 +14,7 @@
         public const string AsrTranscribeUrl = AsrBaseUrl + "/transcribe";
         public const string ConversationConfigUrl = AsrBaseUrl + "/conversation/config";
         public const string ConversationTurnStreamUrl = AsrBaseUrl + "/conversation/turn/stream";
+        public const string RuntimeControlBaseUrl = "http://127.0.0.1:8787";
 
         public const string PiperBaseUrl = "http://127.0.0.1:5005";
         public const string PiperSpeakUrl = PiperBaseUrl + "/speak";

@@ -62,6 +62,18 @@ namespace RobotVoice
             return normalizedProfile == "cloud" ? "api" : "moonshine-medium";
         }
 
+        private static string ResolvePreferredConversationStreamingAsrMode(string profile, string localStreamingAsrMode, string cloudStreamingAsrMode)
+        {
+            var normalizedProfile = NormalizeConversationProfileForConfig(profile);
+            var preferred = normalizedProfile == "cloud" ? cloudStreamingAsrMode : localStreamingAsrMode;
+            var normalized = NormalizeStreamingAsrMode(preferred);
+            if (!string.IsNullOrWhiteSpace(normalized))
+            {
+                return normalized;
+            }
+            return normalizedProfile == "cloud" ? "gemini-live" : "live-captions";
+        }
+
         private void ApplySavedConversationRuntimeConfig()
         {
             if (voiceLauncher == null)
@@ -97,6 +109,8 @@ namespace RobotVoice
             string profile,
             string localAsrMode,
             string cloudAsrMode,
+            string localStreamingAsrMode,
+            string cloudStreamingAsrMode,
             string openaiApiKey,
             string openaiBaseUrl,
             string openaiTranscribeModel,
@@ -115,6 +129,16 @@ namespace RobotVoice
             if (string.IsNullOrWhiteSpace(normalizedCloudAsr))
             {
                 normalizedCloudAsr = "api";
+            }
+            var normalizedLocalStreamingAsr = NormalizeStreamingAsrMode(localStreamingAsrMode);
+            if (string.IsNullOrWhiteSpace(normalizedLocalStreamingAsr))
+            {
+                normalizedLocalStreamingAsr = "live-captions";
+            }
+            var normalizedCloudStreamingAsr = NormalizeStreamingAsrMode(cloudStreamingAsrMode);
+            if (string.IsNullOrWhiteSpace(normalizedCloudStreamingAsr))
+            {
+                normalizedCloudStreamingAsr = "gemini-live";
             }
 
             if (voiceLauncher != null)
@@ -151,6 +175,16 @@ namespace RobotVoice
             if (!asrResult.Success)
             {
                 notes.Add(asrResult.Error);
+            }
+
+            var preferredStreamingAsr = ResolvePreferredConversationStreamingAsrMode(
+                normalizedProfile,
+                normalizedLocalStreamingAsr,
+                normalizedCloudStreamingAsr);
+            var streamingAsrResult = await SetOperatorAsrModeAsync(preferredStreamingAsr).ConfigureAwait(false);
+            if (!streamingAsrResult.Success)
+            {
+                notes.Add(streamingAsrResult.Error);
             }
 
             if (notes.Count == 0)

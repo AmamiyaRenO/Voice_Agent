@@ -136,12 +136,12 @@
     },
     {
       "client_method": "set_asr_mode",
-      "label": "set_asr_mode(mode)",
+      "label": "set_asr_mode(mode: live-captions | api | gemini-live)",
       "endpoint": "/api/asr",
       "http_method": "POST",
       "payload": {
         "action": "set_mode",
-        "mode": "moonshine-medium"
+        "mode": "live-captions"
       }
     },
     {

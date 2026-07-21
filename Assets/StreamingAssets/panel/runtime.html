@@ -1,261 +1,34 @@
-﻿<html lang="en">
+<!doctype html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Runtime Config</title>
-<style>
-body{margin:0;padding:1rem 1.1rem;background:#0f1117;color:#f5f7ff;font-family:'Segoe UI',sans-serif;}
-h1{margin:.2rem 0 .6rem 0;font-size:1.35rem;}
-a{color:#93c5fd;text-decoration:none;border-bottom:1px dashed #93c5fd;}
-small{opacity:.75;}
-.card{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:.9rem;margin-top:.7rem;}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;}
-.field{display:flex;flex-direction:column;gap:.3rem;}
-label{font-size:.85rem;opacity:.9;}
-input,select{width:100%;box-sizing:border-box;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.07);color:#f5f7ff;padding:.44rem .58rem;}
-input[type=checkbox]{width:auto;}
-.toggle{display:flex;align-items:center;gap:.5rem;margin-top:.2rem;}
-.toolbar{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin-top:.8rem;}
-button{cursor:pointer;border:none;border-radius:8px;padding:.55rem .9rem;background:#3b82f6;color:#fff;font-weight:600;}
-button.secondary{background:#334155;}
-details{margin-top:.8rem;border:1px solid rgba(255,255,255,.16);border-radius:10px;padding:.55rem .7rem;background:rgba(255,255,255,.03);}
-summary{cursor:pointer;font-size:.9rem;opacity:.92;}
-#status{margin-top:.6rem;opacity:.9;}
-#configPath{font-family:Consolas,monospace;font-size:.8rem;opacity:.8;word-break:break-all;}
-@media(max-width:900px){.grid{grid-template-columns:1fr;}}
-</style>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Settings | Rachel Console</title>
+  <script src="/panel-assets/theme.js?v=2"></script>
+  <link rel="stylesheet" href="/panel-assets/app.css?v=2">
+  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=2"></script><script defer src="/panel-assets/runtime.js?v=2"></script>
 </head>
-<body>
-<h1>Runtime Config</h1>
-<p><a href="/index.html">Back to User Panel</a></p>
-<div class="card">
-<small>Switch the direct conversation pipeline between pure local and cloud-assisted modes. Saving also updates the live runtime when possible.</small>
-<div id="configPath"></div>
-<div class="grid">
-<div class="field">
-  <label>Speech Recognition Provider</label>
-  <select id="recognitionProvider">
-    <option value="live-captions">Windows Captions</option>
-    <option value="api">OpenAI API</option>
-    <option value="gemini-live">Google API</option>
-  </select>
-</div>
-<div class="field">
-  <label>Conversation Pipeline</label>
-  <select id="conversationPipelineMode">
-    <option value="direct_unified">Direct Unified (Recommended)</option>
-    <option value="legacy_mqtt">Legacy MQTT</option>
-  </select>
-</div>
-<div class="field">
-  <label>Conversation Profile</label>
-  <select id="conversationProfile">
-    <option value="local">Pure Local (Recommended)</option>
-    <option value="cloud">Cloud Assisted</option>
-  </select>
-</div>
-<div class="field" hidden>
-  <label>Backend Local ASR</label>
-  <select id="localAsrMode">
-    <option value="api">api</option>
-  </select>
-</div>
-<div class="field" hidden>
-  <label>Backend Cloud ASR</label>
-  <select id="cloudAsrMode">
-    <option value="api">api</option>
-  </select>
-</div>
-<div class="field" hidden>
-  <label>Desktop Local Streaming ASR</label>
-  <select id="localStreamingAsrMode">
-    <option value="live-captions">live-captions</option>
-    <option value="api">api</option>
-    <option value="gemini-live">gemini-live</option>
-  </select>
-</div>
-<div class="field" hidden>
-  <label>Desktop Cloud Streaming ASR</label>
-  <select id="cloudStreamingAsrMode">
-    <option value="live-captions">live-captions</option>
-    <option value="api">api</option>
-    <option value="gemini-live">gemini-live</option>
-  </select>
-</div>
-<div class="field">
-  <label>ASR Hotword Strategy</label>
-  <select id="asrHotwordStrategy">
-    <option value="commands_games_memory">commands + games + memory</option>
-    <option value="commands_games">commands + games</option>
-    <option value="commands_only">commands only</option>
-    <option value="off">off</option>
-  </select>
-</div>
-<div class="field">
-  <label>Stable Partial Repeats</label>
-  <input id="asrStablePartialRepeats" type="number" min="1" step="1" placeholder="2">
-</div>
-<div class="field"><label>Local Ollama Model</label><input id="ollamaModel" placeholder="qwen3.5:0.8b"></div>
-<div class="field"><label>OpenAI Response Model</label><input id="openaiResponseModel" placeholder="gpt-4o-mini"></div>
-<div class="field"><label>OpenAI API Key</label><input id="openaiKey" type="password" placeholder="sk-..."></div>
-<div class="field"><label>OpenAI Transcribe Model</label><input id="openaiTranscribeModel" placeholder="gpt-4o-mini-transcribe"></div>
-<div class="field"><label>OpenAI Base URL (Optional)</label><input id="openaiBaseUrl" placeholder="https://api.openai.com/v1"></div>
-<div class="field"><label>OpenAI ASR Prompt</label><input id="openaiPrompt" placeholder="Optional. Leave empty to avoid prompt bias/hallucination."></div>
-<div class="field"><label>Launch Triggers (comma separated)</label><input id="launchTriggers" placeholder="open, start, launch, play, begin, load"></div>
-<div class="field"><label>Exit Keywords (comma separated)</label><input id="exitKeywords" placeholder="back home, go home, quit, exit, stop, close game"></div>
-<div class="field"><label>LLM Intent Classifier</label><div class="toggle"><input id="llmIntentClassifier" type="checkbox"><span>Use LLM fallback for ambiguous command intent</span></div></div>
-</div>
-<details>
-  <summary>Advanced (optional): Manifest paths</summary>
-  <div class="grid">
-    <div class="field"><label>Intent Manifest Path</label><input id="intentManifest" placeholder="Usually leave empty (default manifest)"></div>
-    <div class="field"><label>Game Manifest Path</label><input id="gameManifest" placeholder="Usually leave empty (same as intent manifest)"></div>
-  </div>
-</details>
-<div class="toolbar">
-<button onclick="saveConfig()">Save</button>
-<button class="secondary" onclick="reloadConfig()">Reload</button>
-</div>
-<div id="status">Ready.</div>
-</div>
-<script>
-const statusEl = document.getElementById('status');
-const configPathEl = document.getElementById('configPath');
-const intentManifestEl = document.getElementById('intentManifest');
-const gameManifestEl = document.getElementById('gameManifest');
-const pipelineModeEl = document.getElementById('conversationPipelineMode');
-const profileEl = document.getElementById('conversationProfile');
-const recognitionProviderEl = document.getElementById('recognitionProvider');
-const localAsrModeEl = document.getElementById('localAsrMode');
-const cloudAsrModeEl = document.getElementById('cloudAsrMode');
-const localStreamingAsrModeEl = document.getElementById('localStreamingAsrMode');
-const cloudStreamingAsrModeEl = document.getElementById('cloudStreamingAsrMode');
-const asrHotwordStrategyEl = document.getElementById('asrHotwordStrategy');
-const asrStablePartialRepeatsEl = document.getElementById('asrStablePartialRepeats');
-const openaiKeyEl = document.getElementById('openaiKey');
-const openaiTranscribeModelEl = document.getElementById('openaiTranscribeModel');
-const openaiResponseModelEl = document.getElementById('openaiResponseModel');
-const openaiBaseUrlEl = document.getElementById('openaiBaseUrl');
-const openaiPromptEl = document.getElementById('openaiPrompt');
-const ollamaModelEl = document.getElementById('ollamaModel');
-const launchTriggersEl = document.getElementById('launchTriggers');
-const exitKeywordsEl = document.getElementById('exitKeywords');
-const llmIntentClassifierEl = document.getElementById('llmIntentClassifier');
-function setText(el, v){ if(el){ el.value = String(v || ''); } }
-function getText(el){ return el ? String(el.value || '').trim() : ''; }
-function setChecked(el, v){ if(el){ el.checked = !!v; } }
-function getChecked(el){ return !!(el && el.checked); }
-function setSelect(el, v){ if(el){ el.value = String(v || ''); } }
-function recognitionProviderFromConfig(data){
-  const localStreaming = String(data.local_streaming_asr_mode || '').trim();
-  const cloudStreaming = String(data.cloud_streaming_asr_mode || '').trim();
-  const provider = String(data.cloud_response_provider || '').trim();
-  if(localStreaming === 'gemini-live' || cloudStreaming === 'gemini-live' || provider === 'gemini'){
-    return 'gemini-live';
-  }
-  if(localStreaming === 'api' || cloudStreaming === 'api'){
-    return 'api';
-  }
-  if(localStreaming === 'live-captions' || cloudStreaming === 'live-captions'){
-    return 'live-captions';
-  }
-  if(data.local_asr_mode === 'api' || data.cloud_asr_mode === 'api'){
-    return 'api';
-  }
-  return 'live-captions';
-}
-function recognitionProviderPayload(provider){
-  if(provider === 'gemini-live'){
-    return {
-      conversation_profile: 'cloud',
-      cloud_response_provider: 'gemini',
-      local_asr_mode: 'api',
-      cloud_asr_mode: 'api',
-      local_streaming_asr_mode: 'gemini-live',
-      cloud_streaming_asr_mode: 'gemini-live'
-    };
-  }
-  if(provider === 'api'){
-    return {
-      conversation_profile: 'cloud',
-      cloud_response_provider: 'openai',
-      local_asr_mode: 'api',
-      cloud_asr_mode: 'api',
-      local_streaming_asr_mode: 'api',
-      cloud_streaming_asr_mode: 'api'
-    };
-  }
-  return {
-    local_streaming_asr_mode: 'live-captions',
-    cloud_streaming_asr_mode: 'live-captions'
-  };
-}
-async function reloadConfig(){
-  statusEl.textContent = 'Loading...';
-  try {
-    const resp = await fetch('/api/runtime/config');
-    const data = await resp.json();
-    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status)); }
-    setText(intentManifestEl, data.intent_manifest_path);
-    setText(gameManifestEl, data.game_manifest_path);
-    setSelect(recognitionProviderEl, recognitionProviderFromConfig(data));
-    setSelect(pipelineModeEl, data.conversation_pipeline_mode || 'direct_unified');
-    setSelect(profileEl, data.conversation_profile || 'local');
-    setSelect(localAsrModeEl, data.local_asr_mode || 'api');
-    setSelect(cloudAsrModeEl, data.cloud_asr_mode || 'api');
-    setSelect(localStreamingAsrModeEl, data.local_streaming_asr_mode || 'live-captions');
-    setSelect(cloudStreamingAsrModeEl, data.cloud_streaming_asr_mode || 'live-captions');
-    setSelect(asrHotwordStrategyEl, data.asr_hotword_strategy || 'commands_games_memory');
-    setText(asrStablePartialRepeatsEl, data.asr_stable_partial_repeats || '2');
-    setText(ollamaModelEl, data.ollama_model);
-    setText(openaiResponseModelEl, data.openai_response_model);
-    setText(openaiKeyEl, data.openai_api_key);
-    setText(openaiTranscribeModelEl, data.openai_transcribe_model);
-    setText(openaiBaseUrlEl, data.openai_base_url);
-    setText(openaiPromptEl, data.openai_transcribe_prompt);
-    setText(launchTriggersEl, data.launch_triggers);
-    setText(exitKeywordsEl, data.exit_keywords);
-    setChecked(llmIntentClassifierEl, !!data.use_llm_intent_classifier);
-    if(configPathEl){ configPathEl.textContent = 'Config: ' + String(data.path || ''); }
-    statusEl.textContent = data.message || 'Loaded.';
-  } catch(err){
-    statusEl.textContent = 'error: ' + err;
-  }
-}
-async function saveConfig(){
-  statusEl.textContent = 'Saving...';
-  const payload = Object.assign({
-    intent_manifest_path: getText(intentManifestEl),
-    game_manifest_path: getText(gameManifestEl),
-    conversation_pipeline_mode: getText(pipelineModeEl),
-    conversation_profile: getText(profileEl),
-    asr_hotword_strategy: getText(asrHotwordStrategyEl),
-    asr_stable_partial_repeats: getText(asrStablePartialRepeatsEl),
-    ollama_model: getText(ollamaModelEl),
-    openai_response_model: getText(openaiResponseModelEl),
-    openai_api_key: getText(openaiKeyEl),
-    openai_transcribe_model: getText(openaiTranscribeModelEl),
-    openai_base_url: getText(openaiBaseUrlEl),
-    openai_transcribe_prompt: getText(openaiPromptEl),
-    launch_triggers: getText(launchTriggersEl),
-    exit_keywords: getText(exitKeywordsEl),
-    use_llm_intent_classifier: getChecked(llmIntentClassifierEl)
-  }, recognitionProviderPayload(getText(recognitionProviderEl)));
-  try {
-    const resp = await fetch('/api/runtime/config', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    });
-    const data = await resp.json();
-    if(!resp.ok || data.status !== 'ok'){ throw new Error((data && data.message) ? data.message : ('HTTP ' + resp.status)); }
-    statusEl.textContent = data.message || 'Saved.';
-    await reloadConfig();
-  } catch(err){
-    statusEl.textContent = 'error: ' + err;
-  }
-}
-reloadConfig();
-</script>
+<body data-page="runtime">
+  <form data-page-content id="runtime-form">
+    <header class="page-header"><div class="workspace-title"><a class="icon-button" href="/index.html" aria-label="Close settings" title="Close"><i data-lucide="x"></i></a><div><h1>Settings</h1><p class="page-description">Rachel station preferences, privacy and advanced runtime configuration.</p></div></div><div class="header-actions"><button class="secondary" id="reload-runtime" type="button"><i data-lucide="refresh-cw"></i>Reload</button><button class="primary" id="save-runtime" type="submit"><i data-lucide="save"></i>Save Configuration</button></div></header>
+    <div class="settings-grid">
+      <section class="settings-card"><div class="settings-card-head"><i data-lucide="palette"></i><h2>Appearance</h2></div><label class="settings-row" for="theme-switch"><span class="settings-row-copy"><strong>Light mode</strong><span>Use a bright console theme on this browser.</span></span><input class="switch-input" id="theme-switch" type="checkbox"></label></section>
+      <section class="settings-card"><div class="settings-card-head"><i data-lucide="power"></i><h2>Runtime Control</h2></div><div class="settings-row"><span class="settings-row-copy"><strong id="listening-label">Checking runtime</strong><span id="listening-detail">Waiting for the active speech service.</span></span><button id="toggle-listening" type="button"><i data-lucide="mic"></i><span>Start Listening</span></button></div></section>
+      <section class="settings-card"><div class="settings-card-head"><i data-lucide="shield-check"></i><h2>Privacy</h2></div><label class="settings-row" for="voice-id-switch"><span class="settings-row-copy"><strong>Voice identification</strong><span>Match known speakers and automatically learn new voices. Existing profiles remain stored when off.</span></span><input class="switch-input" id="voice-id-switch" type="checkbox"></label><div class="status-line" id="privacy-status">Voice identification is off by default.</div></section>
+      <section class="settings-card"><div class="settings-card-head"><i data-lucide="wrench"></i><h2>Advanced Tools</h2></div><div class="tool-links"><a class="tool-link" href="/memory.html"><i data-lucide="users"></i><span><strong>Participants</strong><span class="muted">Profiles and history</span></span></a><a class="tool-link" href="/setup.html"><i data-lucide="list-checks"></i><span><strong>Setup</strong><span class="muted">Service checks</span></span></a><a class="tool-link" href="/sdk.html"><i data-lucide="blocks"></i><span><strong>API Tools</strong><span class="muted">Requests and flows</span></span></a><a class="tool-link" href="/telemetry.html"><i data-lucide="chart-no-axes-combined"></i><span><strong>Telemetry</strong><span class="muted">Runtime dashboard</span></span></a></div></section>
+    </div>
+
+    <details class="panel advanced-config">
+      <summary>Advanced Configuration</summary>
+      <div class="advanced-body">
+        <div class="notice mono" id="runtime-path">Loading configuration...</div>
+        <section class="panel"><div class="panel-head"><div><h2 class="panel-title"><i data-lucide="network"></i>Provider and Recognition</h2></div></div><div class="form-grid three"><div class="field"><label for="conversation-pipeline">Conversation pipeline</label><select id="conversation-pipeline"><option value="direct_unified">Direct Unified</option><option value="legacy_mqtt">Legacy MQTT</option></select></div><div class="field"><label for="conversation-profile">Conversation profile</label><select id="conversation-profile"><option value="local">Pure Local</option><option value="cloud">Cloud Assisted</option></select></div><div class="field"><label for="cloud-provider">Cloud response provider</label><select id="cloud-provider"><option value="gemini">Google Gemini</option><option value="openai">OpenAI</option></select></div><div class="field"><label for="recognition-provider">Recognition provider</label><select id="recognition-provider"><option value="live-captions">Windows Captions</option><option value="api">OpenAI API</option><option value="gemini-live">Google Gemini Live</option></select></div><div class="field"><label for="hotword-strategy">Hotword strategy</label><select id="hotword-strategy"><option value="commands_games_memory">Commands, games and memory</option><option value="commands_games">Commands and games</option><option value="commands_only">Commands only</option><option value="off">Off</option></select></div><div class="field"><label for="stable-repeats">Stable partial repeats</label><input id="stable-repeats" type="number" min="1" step="1" value="2"></div></div></section>
+        <section class="panel"><div class="panel-head"><div><h2 class="panel-title"><i data-lucide="brain-circuit"></i>Models and TTS</h2></div></div><div class="form-grid three"><div class="field"><label for="ollama-model">Local Ollama model</label><input id="ollama-model"></div><div class="field"><label for="openai-response-model">OpenAI response model</label><input id="openai-response-model"></div><div class="field"><label for="gemini-response-model">Gemini response model</label><input id="gemini-response-model"></div><div class="field"><label for="gemini-live-model">Gemini Live model</label><input id="gemini-live-model"></div><div class="field"><label for="tts-backend">Default TTS backend</label><select id="tts-backend"><option value="piper">Piper</option><option value="kokoro">Kokoro</option><option value="google-cloud">Google Cloud</option></select></div><div class="field"><label for="kokoro-voice">Kokoro voice</label><input id="kokoro-voice"></div><div class="field"><label for="kokoro-language">Kokoro language code</label><input id="kokoro-language"></div><div class="field"><label for="gemini-live-voice">Gemini Live voice</label><input id="gemini-live-voice"></div><label class="toggle"><span>Native Gemini Live audio</span><input class="switch-input" id="gemini-native-response" type="checkbox"></label></div></section>
+        <section class="panel"><div class="panel-head"><div><h2 class="panel-title"><i data-lucide="message-square-text"></i>Prompt and Intent</h2></div></div><div class="form-grid"><div class="field full"><label for="system-prompt">Conversation system prompt</label><textarea id="system-prompt" rows="6"></textarea></div><div class="field"><label for="launch-triggers">Launch triggers</label><input id="launch-triggers"></div><div class="field"><label for="exit-keywords">Exit keywords</label><input id="exit-keywords"></div><div class="field full"><label for="openai-transcribe-prompt">OpenAI transcription prompt</label><input id="openai-transcribe-prompt"></div><label class="toggle"><span>Use LLM fallback for ambiguous intent</span><input class="switch-input" id="llm-intent" type="checkbox"></label></div><div class="toolbar" style="margin-top:12px"><button class="secondary" id="reset-system-prompt" type="button"><i data-lucide="rotate-ccw"></i>Reset prompt</button></div></section>
+        <section class="panel"><div class="panel-head"><div><h2 class="panel-title"><i data-lucide="key-round"></i>Credentials</h2><p class="panel-note">Stored in local launcher configuration. Do not commit that file.</p></div></div><div class="form-grid"><div class="field"><label for="openai-key">OpenAI API key</label><input id="openai-key" type="password" autocomplete="off"></div><div class="field"><label for="gemini-key">Gemini API key</label><input id="gemini-key" type="password" autocomplete="off"></div><div class="field"><label for="openai-transcribe-model">OpenAI transcription model</label><input id="openai-transcribe-model"></div><div class="field"><label for="openai-base-url">OpenAI base URL</label><input id="openai-base-url"></div></div></section>
+        <section class="panel"><div class="panel-head"><div><h2 class="panel-title"><i data-lucide="folder-cog"></i>Manifest Paths</h2></div></div><div class="form-grid"><div class="field"><label for="intent-manifest">Intent manifest path</label><input id="intent-manifest"></div><div class="field"><label for="game-manifest">Game manifest path</label><input id="game-manifest"></div></div></section>
+      </div>
+    </details>
+    <div class="status-line" id="runtime-status" aria-live="polite"></div>
+  </form>
 </body>
 </html>

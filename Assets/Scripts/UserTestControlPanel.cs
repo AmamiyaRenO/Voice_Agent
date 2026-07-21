@@ -20,6 +20,13 @@ namespace RobotVoice
 {
     public sealed partial class UserTestControlPanel : MonoBehaviour
     {
+        private enum StreamingAsrModeOption
+        {
+            LiveCaptions,
+            Api,
+            GeminiLive
+        }
+
         [Header("Dependencies")]
         [SerializeField] private PiHub piHub;
         [SerializeField] private VoiceGameLauncher voiceLauncher;
@@ -89,6 +96,15 @@ namespace RobotVoice
 
         [SerializeField, Tooltip("Python voice service base URL used to get/set runtime LLM system prompt.")]
         private string llmServiceBaseUrl = VoiceAgentDefaults.AsrBaseUrl;
+        [Header("Streaming ASR")]
+        [SerializeField, Tooltip("Desktop runtime base URL used for operator ASR controls such as live-captions and gemini-live.")]
+        private string runtimeControlBaseUrl = VoiceAgentDefaults.RuntimeControlBaseUrl;
+        [SerializeField, Tooltip("Default operator ASR mode exposed by /api/asr when the embedded panel cannot proxy a desktop runtime.")]
+        private StreamingAsrModeOption defaultStreamingAsrMode = StreamingAsrModeOption.LiveCaptions;
+        [SerializeField, Tooltip("Streaming ASR mode saved as VOICE_LOCAL_STREAMING_ASR_MODE for the local conversation profile.")]
+        private StreamingAsrModeOption localStreamingAsrMode = StreamingAsrModeOption.LiveCaptions;
+        [SerializeField, Tooltip("Streaming ASR mode saved as VOICE_CLOUD_STREAMING_ASR_MODE for the cloud conversation profile.")]
+        private StreamingAsrModeOption cloudStreamingAsrMode = StreamingAsrModeOption.GeminiLive;
         [SerializeField, Tooltip("Ollama base URL used by /api/vision/describe.")]
         private string ollamaBaseUrl = VoiceAgentDefaults.OllamaBaseUrl;
         [SerializeField, Tooltip("Default multimodal model for camera description.")]
@@ -318,6 +334,13 @@ namespace RobotVoice
                 }
 
                 var path = context.Request.Url?.AbsolutePath ?? "/";
+                if (path.StartsWith("/panel-assets/", StringComparison.OrdinalIgnoreCase))
+                {
+                    var assetName = path.Substring("/panel-assets/".Length);
+                    await RespondWithPanelAssetAsync(context.Response, assetName).ConfigureAwait(false);
+                    return;
+                }
+
                 switch (path)
                 {
                     case "/":
@@ -334,6 +357,10 @@ namespace RobotVoice
                     case "/games":
                     case "/games.html":
                         await RespondWithGameConfigHtmlAsync(context.Response).ConfigureAwait(false);
+                        return;
+                    case "/controls":
+                    case "/controls.html":
+                        await RespondWithControlsHtmlAsync(context.Response).ConfigureAwait(false);
                         return;
                     case "/runtime":
                     case "/runtime.html":
@@ -700,6 +727,8 @@ namespace RobotVoice
             public string[] available_modes;
             public bool openai_configured;
             public string openai_model;
+            public bool listening;
+            public bool assistant_speaking;
         }
 
         [Serializable]

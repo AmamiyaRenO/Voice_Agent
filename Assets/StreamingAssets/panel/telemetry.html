@@ -1,41 +1,25 @@
-﻿<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Telemetry Dashboard</title>
-<style>
-body { margin:0; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#0f1117; color:#f4f4f4; }
-header { padding:14px 18px; border-bottom:1px solid rgba(255,255,255,0.1); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-input, select, button { border-radius:8px; border:1px solid rgba(255,255,255,0.2); background:#131c2d; color:#f4f4f4; height:34px; padding:0 10px; }
-button { cursor:pointer; background:#2a5ca6; border-color:#4278ca; }
-a { color:#93c5fd; text-decoration:none; border-bottom:1px dashed #93c5fd; }
-#frame { width:100%; height:calc(100vh - 74px); border:0; background:#0b1220; }
-</style>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Telemetry | Rachel Console</title>
+  <script src="/panel-assets/theme.js?v=2"></script>
+  <link rel="stylesheet" href="/panel-assets/app.css?v=2">
+  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=2"></script><script defer src="/panel-assets/telemetry.js"></script>
 </head>
-<body>
-<header>
-<a href="/">Back to Panel</a>
-<label>User</label><input id="userId" value="demo_user">
-<label>Days</label>
-<select id="days"><option>7</option><option selected>14</option><option>21</option><option>30</option></select>
-<button id="openBtn">Open Dashboard</button>
-</header>
-<iframe id="frame" title="telemetry dashboard"></iframe>
-<script>
-const dashboardBase = "{{TELEMETRY_DASHBOARD_URL}}";
-const frame = document.getElementById('frame');
-const userInput = document.getElementById('userId');
-const daysInput = document.getElementById('days');
-function buildUrl(){
-  const user = encodeURIComponent((userInput.value || 'demo_user').trim() || 'demo_user');
-  const days = encodeURIComponent(daysInput.value || '14');
-  return `${dashboardBase}?user_id=${user}&days=${days}`;
-}
-function openDash(){ frame.src = buildUrl(); }
-document.getElementById('openBtn').addEventListener('click', openDash);
-openDash();
-</script>
+<body data-page="telemetry">
+  <section data-page-content>
+    <header class="page-header">
+      <div class="workspace-title"><a class="icon-button" href="/runtime.html" aria-label="Back to Settings" title="Back"><i data-lucide="arrow-left"></i></a><div><div class="page-kicker">Developer</div><h1>Telemetry</h1><p class="page-description">Inspect participant trends in the existing telemetry dashboard.</p></div></div>
+      <div class="header-actions"><button class="secondary" id="open-telemetry" type="button"><i data-lucide="external-link"></i>Open separately</button><button id="refresh-telemetry" type="button"><i data-lucide="refresh-cw"></i>Refresh dashboard</button></div>
+    </header>
+    <section class="panel">
+      <div class="toolbar" style="margin-bottom:14px">
+        <div class="inline-field"><label for="telemetry-user">Participant</label><input id="telemetry-user" value="demo_user"></div>
+        <div class="inline-field"><label for="telemetry-days">Range</label><select id="telemetry-days"><option value="7">7 days</option><option value="14" selected>14 days</option><option value="21">21 days</option><option value="30">30 days</option></select></div>
+      </div>
+      <iframe class="telemetry-frame" id="telemetry-frame" title="Rachel telemetry dashboard"></iframe>
+    </section>
+  </section>
 </body>
 </html>
-<!DOCTYPE html>

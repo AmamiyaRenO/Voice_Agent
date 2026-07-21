@@ -160,6 +160,29 @@ def test_desktop_audio_agent_participant_status_exposes_guest_learning_and_possi
     assert participant["ready_to_confirm"] is False
 
 
+def test_desktop_audio_agent_participant_status_is_disabled_when_speaker_id_is_off():
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_participant_disabled_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent._active_user_id = ""
+    agent._last_speaker_match = {}
+    agent._guest_learning_last_error = ""
+    agent._speaker_id = SimpleNamespace(enabled=False, config=SimpleNamespace(enroll_min_clips=3))
+    agent._auto_identity_handler = object()
+
+    participant = agent._participant_status({"users": []})
+
+    assert participant["state"] == "disabled"
+    assert participant["confirmation_required"] is False
+    assert participant["automatic_identity_enabled"] is False
+    assert participant["auto_learning_enabled"] is False
+
+
 def test_desktop_audio_agent_extracts_participant_name_from_intro_and_short_answer():
     if str(PYTHON_VOICE_DIR) not in sys.path:
         sys.path.insert(0, str(PYTHON_VOICE_DIR))

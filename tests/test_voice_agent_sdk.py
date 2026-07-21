@@ -11,6 +11,7 @@ from voice_agent_sdk import VoiceAgentClient
 ROOT = Path(__file__).resolve().parents[1]
 SDK_MANIFEST_PATH = ROOT / "Assets" / "StreamingAssets" / "panel" / "sdk-manifest.json"
 SDK_HTML_PATH = ROOT / "Assets" / "StreamingAssets" / "panel" / "sdk.html"
+SDK_SCRIPT_PATH = ROOT / "Assets" / "StreamingAssets" / "panel" / "sdk.js"
 REMOVED_METHODS = {
     "connect_mqtt",
     "disconnect_mqtt",
@@ -105,10 +106,12 @@ def test_sdk_manifest_matches_client_public_methods():
 
 
 def test_sdk_visualizer_uses_shared_manifest():
-    source = SDK_HTML_PATH.read_text(encoding="utf-8")
-    assert "/sdk-manifest.json" in source
-    assert "const sdkMap = {" not in source
-    assert "buildSdkMap(manifest)" in source
+    html_source = SDK_HTML_PATH.read_text(encoding="utf-8")
+    script_source = SDK_SCRIPT_PATH.read_text(encoding="utf-8")
+    assert '/panel-assets/sdk.js' in html_source
+    assert "/sdk-manifest.json" in script_source
+    assert "const sdkMap = {" not in script_source
+    assert "buildSdkMap(manifest)" in script_source
 
 
 @pytest.mark.parametrize(

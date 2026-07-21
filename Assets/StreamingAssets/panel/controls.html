@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Controls | Rachel Console</title>
+  <script src="/panel-assets/theme.js?v=2"></script>
+  <link rel="stylesheet" href="/panel-assets/app.css?v=2">
+  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=2"></script><script defer src="/panel-assets/controls.js?v=2"></script>
+</head>
+<body data-page="controls">
+  <section data-page-content>
+    <header class="page-header">
+      <div class="workspace-title"><a class="icon-button" href="/index.html" aria-label="Back to Applications" title="Back"><i data-lucide="arrow-left"></i></a><div><h1 id="controls-title">Controller</h1><p class="page-description" id="controls-description">Operate the hardware and services Rachel actually supports.</p></div></div>
+      <nav class="control-nav" aria-label="Control views"><a href="#expressions" data-control-view="expressions"><i data-lucide="smile-plus"></i>Expressions</a><a href="#controller" data-control-view="controller"><i data-lucide="gamepad-2"></i>Controller</a></nav>
+    </header>
+
+    <div id="expressions-view" hidden>
+      <div class="form-grid" style="margin-bottom:22px"><div class="field"><label for="face-seconds">Expression duration (seconds)</label><input id="face-seconds" type="number" min="0" step="0.5" value="3"></div><div class="field"><label for="face-custom">Custom preset</label><div class="pathRow"><input id="face-custom" type="text" placeholder="Preset name"><button id="send-custom-face" type="button"><i data-lucide="send"></i>Send</button></div></div></div>
+      <div class="expression-groups" id="expression-groups"><div class="empty-state">Loading expression presets...</div></div>
+    </div>
+
+    <div class="controller-stack" id="controller-view">
+      <section class="panel controller-section" aria-labelledby="voice-heading">
+        <div class="panel-head"><div><h2 class="panel-title" id="voice-heading"><i data-lucide="audio-lines"></i>Voice and TTS</h2><p class="panel-note">Select the active synthesis backend and audition a phrase.</p></div><div class="header-actions"><span class="status-badge" id="voice-status">Loading</span><button class="icon-button" id="refresh-controls" type="button" aria-label="Refresh voice options" title="Refresh voices"><i data-lucide="refresh-cw"></i></button></div></div>
+        <div class="form-grid three"><div class="field"><label for="tts-backend">Backend</label><select id="tts-backend"></select></div><div class="field"><label for="tts-voice">Voice</label><select id="tts-voice"></select></div><div class="field"><label for="tts-model">Piper model</label><select id="tts-model"></select></div><div class="field"><label for="voice-speed">Speed</label><input id="voice-speed" type="number" min="0.5" max="2" step="0.1" value="1"></div><div class="field"><label for="voice-volume">Volume</label><input id="voice-volume" type="number" min="0.2" max="1.5" step="0.1" value="1"></div><div class="field full"><label for="speak-text">Speak text</label><textarea id="speak-text" rows="3">Good morning. It is time for your program.</textarea></div></div>
+        <div class="toolbar" style="margin-top:14px"><button class="primary" id="speak-now" type="button"><i data-lucide="volume-2"></i>Speak</button></div>
+      </section>
+      <section class="panel controller-section" aria-labelledby="camera-heading">
+        <div class="panel-head"><div><h2 class="panel-title" id="camera-heading"><i data-lucide="camera"></i>Camera Vision</h2><p class="panel-note">Preview is opt-in and stops when this page closes.</p></div><span class="status-badge" id="camera-state">Camera off</span></div>
+        <div class="camera-control-view"><img id="control-camera" alt="Rachel camera preview" hidden><div class="camera-placeholder" id="control-camera-placeholder"><i data-lucide="camera-off"></i><span>Camera Off</span></div></div>
+        <div class="toolbar" style="margin-top:12px"><button id="start-camera" type="button"><i data-lucide="video"></i>Start preview</button><button class="secondary" id="stop-camera" type="button" disabled><i data-lucide="video-off"></i>Stop preview</button></div>
+        <div class="form-grid" style="margin-top:14px"><div class="field"><label for="vision-model">Vision model</label><input id="vision-model" type="text" value="qwen3.5:0.8b"></div><div class="field full"><label for="vision-prompt">Prompt</label><textarea id="vision-prompt" rows="3">Describe what you see and call out anything important for the current exercise.</textarea></div></div>
+        <div class="toolbar" style="margin-top:12px"><button id="describe-camera" type="button" disabled><i data-lucide="scan-eye"></i>Describe current frame</button></div><pre class="notice mono" id="vision-result">Result will appear here.</pre>
+      </section>
+      <div class="form-grid">
+        <section class="panel controller-section" aria-labelledby="led-heading"><div class="panel-head"><div><h2 class="panel-title" id="led-heading"><i data-lucide="lightbulb"></i>LED Lighting</h2></div></div><div class="form-grid"><div class="field"><label for="led-color">Color</label><input id="led-color" type="color" value="#00bfff"></div><div class="field"><label for="led-brightness">Brightness</label><input id="led-brightness" type="number" min="0.1" max="1" step="0.1" value="0.8"></div><div class="field"><label for="led-period">Period</label><input id="led-period" type="number" min="0.5" step="0.1" value="2"></div><div class="field"><label for="led-duration">Duration</label><input id="led-duration" type="number" min="0" step="0.1" value="0"></div></div><div class="toolbar" style="margin-top:14px"><button data-led="breathe" type="button">Breathe</button><button class="secondary" data-led="solid" type="button">Solid</button><button class="secondary" data-led="random" type="button">Random</button><button class="ghost" data-led="off" type="button">Off</button></div></section>
+        <section class="panel controller-section" aria-labelledby="flower-heading"><div class="panel-head"><div><h2 class="panel-title" id="flower-heading"><i data-lucide="flower-2"></i>Flower Servo</h2><p class="panel-note">Move or stop Rachel's flower mechanism.</p></div></div><div class="toolbar"><button data-flower="open" type="button"><i data-lucide="chevrons-up"></i>Open</button><button class="secondary" data-flower="close" type="button"><i data-lucide="chevrons-down"></i>Close</button><button class="secondary" data-flower="open_slow" type="button">Slow open</button><button class="secondary" data-flower="close_slow" type="button">Slow close</button><button class="danger" data-flower="stop" type="button"><i data-lucide="square"></i>Stop</button></div></section>
+      </div>
+    </div>
+  </section>
+</body>
+</html>

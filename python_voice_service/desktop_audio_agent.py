@@ -2052,7 +2052,7 @@ class DesktopAudioAgent:
         return normalize_streaming_asr_mode(mode)
 
     def _speaker_id_enabled(self) -> bool:
-        return bool(self._speaker_id.enabled)
+        return bool(getattr(getattr(self, "_speaker_id", None), "enabled", True))
 
     def _speaker_capture_enabled(self) -> bool:
         if self.current_asr_mode != STREAMING_ASR_MODE_LIVE_CAPTIONS:
@@ -2466,7 +2466,7 @@ class DesktopAudioAgent:
         return True, ""
 
     def _update_speaker_capture(self, audio: np.ndarray, *, speech_active: bool) -> None:
-        if not self._speaker_capture_enabled():
+        if not self._speaker_id_enabled() or not self._speaker_capture_enabled():
             return
         frame_copy = np.asarray(audio, dtype=np.float32).reshape(-1).copy()
         if frame_copy.size <= 0:
@@ -4091,6 +4091,7 @@ class DesktopAudioAgent:
 
     def _participant_status(self, speaker_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = speaker_payload or {}
+        speaker_id_enabled = bool(getattr(self._speaker_id, "enabled", True))
         users = list(payload.get("users") or [])
         guest_summary = next(
             (item for item in users if str(item.get("user_id") or "") == GUEST_SPEAKER_ID),
@@ -4116,15 +4117,19 @@ class DesktopAudioAgent:
         ready_to_confirm = bool(pending.get("can_commit"))
         continue_as_guest = bool(getattr(self, "_participant_continue_as_guest", False))
         state = (
-            "identified"
-            if active_user_id
+            "disabled"
+            if not speaker_id_enabled
             else (
-                "guest"
-                if continue_as_guest
+                "identified"
+                if active_user_id
                 else (
-                    "awaiting_name"
-                    if bool(getattr(self, "_identity_awaiting_name", False))
-                    else ("possible_match" if possible_user_id else ("ready_to_confirm" if ready_to_confirm else "guest_learning"))
+                    "guest"
+                    if continue_as_guest
+                    else (
+                        "awaiting_name"
+                        if bool(getattr(self, "_identity_awaiting_name", False))
+                        else ("possible_match" if possible_user_id else ("ready_to_confirm" if ready_to_confirm else "guest_learning"))
+                    )
                 )
             )
         )
@@ -4136,9 +4141,9 @@ class DesktopAudioAgent:
             "learning_clip_count": clip_count,
             "required_clip_count": required_clip_count,
             "ready_to_confirm": ready_to_confirm,
-            "confirmation_required": bool(not active_user_id and not continue_as_guest),
+            "confirmation_required": bool(speaker_id_enabled and not active_user_id and not continue_as_guest),
             "continue_as_guest": continue_as_guest,
-            "automatic_identity_enabled": bool(getattr(self, "_auto_identity_handler", None) is not None),
+            "automatic_identity_enabled": bool(speaker_id_enabled and getattr(self, "_auto_identity_handler", None) is not None),
             "awaiting_name": bool(getattr(self, "_identity_awaiting_name", False)),
             "automatic_match_candidate": str(getattr(self, "_auto_identity_candidate_id", "") or ""),
             "automatic_match_evidence_count": int(getattr(self, "_auto_identity_candidate_count", 0) or 0),
@@ -4146,7 +4151,7 @@ class DesktopAudioAgent:
             "current_user_mismatch_count": int(getattr(self, "_confirmed_user_mismatch_count", 0) or 0),
             "current_user_mismatch_required_count": max(1, DEFAULT_SPEAKER_ID_AUTO_SWITCH_MISMATCH_REPEATS),
             "last_captured_ts": float(pending.get("last_captured_ts") or 0.0),
-            "auto_learning_enabled": bool(DEFAULT_SPEAKER_ID_AUTO_GUEST_LEARNING),
+            "auto_learning_enabled": bool(speaker_id_enabled and DEFAULT_SPEAKER_ID_AUTO_GUEST_LEARNING),
             "last_error": str(getattr(self, "_guest_learning_last_error", "") or ""),
         }
 

@@ -16,6 +16,45 @@ namespace RobotVoice
 {
     public sealed partial class UserTestControlPanel
     {
+        public void ApplyConfiguredStreamingAsrModeForTester()
+        {
+            ApplyStreamingAsrModeForTester(StreamingAsrModeToConfig(defaultStreamingAsrMode));
+        }
+
+        public void ApplyLiveCaptionsStreamingAsrModeForTester()
+        {
+            ApplyStreamingAsrModeForTester("live-captions");
+        }
+
+        public void ApplyApiStreamingAsrModeForTester()
+        {
+            ApplyStreamingAsrModeForTester("api");
+        }
+
+        public void ApplyGeminiLiveStreamingAsrModeForTester()
+        {
+            ApplyStreamingAsrModeForTester("gemini-live");
+        }
+
+        public async void ApplyStreamingAsrModeForTester(string mode)
+        {
+            var normalized = NormalizeStreamingAsrMode(mode);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                Debug.LogWarning($"[UserTestPanel] Invalid streaming ASR mode: {mode}");
+                return;
+            }
+
+            var result = await SetOperatorAsrModeAsync(normalized);
+            if (result.Success)
+            {
+                Debug.Log($"[UserTestPanel] Streaming ASR mode set to {normalized}");
+                return;
+            }
+
+            Debug.LogWarning($"[UserTestPanel] Failed to set streaming ASR mode: {result.Error}");
+        }
+
         private async Task HandleAsrAsync(HttpListenerContext context)
         {
             var method = (context.Request.HttpMethod ?? string.Empty).Trim().ToUpperInvariant();
@@ -47,19 +86,19 @@ namespace RobotVoice
                 case "mode":
                 {
                     var modeRaw = string.IsNullOrWhiteSpace(request.mode) ? request.value : request.mode;
-                    var normalizedMode = NormalizeAsrMode(modeRaw);
+                    var normalizedMode = NormalizeStreamingAsrMode(modeRaw);
                     if (string.IsNullOrWhiteSpace(normalizedMode))
                     {
                         await WriteJsonAsync(
                             context.Response,
                             400,
                             "error",
-                            "mode must be whisper-large-v3, moonshine-small, moonshine-medium, or api"
+                            "mode must be live-captions, api, or gemini-live"
                         ).ConfigureAwait(false);
                         return;
                     }
 
-                    var setResult = await SetAsrModeAsync(normalizedMode).ConfigureAwait(false);
+                    var setResult = await SetOperatorAsrModeAsync(normalizedMode).ConfigureAwait(false);
                     if (!setResult.Success)
                     {
                         await WriteJsonAsync(context.Response, setResult.StatusCode, "error", setResult.Error).ConfigureAwait(false);
@@ -72,10 +111,10 @@ namespace RobotVoice
                 case "start_listening":
                 case "resume_listening":
                 {
-                    var ok = await SetAgentListeningAsync(true).ConfigureAwait(false);
-                    if (!ok)
+                    var setResult = await SetOperatorListeningAsync(true).ConfigureAwait(false);
+                    if (!setResult.Success)
                     {
-                        await WriteJsonAsync(context.Response, 503, "error", "VoiceGameLauncher not assigned").ConfigureAwait(false);
+                        await WriteJsonAsync(context.Response, setResult.StatusCode, "error", setResult.Error).ConfigureAwait(false);
                         return;
                     }
                     await WriteAsrStatusAsync(context.Response, "agent listening started").ConfigureAwait(false);
@@ -84,10 +123,10 @@ namespace RobotVoice
                 case "pause_listening":
                 case "stop_listening":
                 {
-                    var ok = await SetAgentListeningAsync(false).ConfigureAwait(false);
-                    if (!ok)
+                    var setResult = await SetOperatorListeningAsync(false).ConfigureAwait(false);
+                    if (!setResult.Success)
                     {
-                        await WriteJsonAsync(context.Response, 503, "error", "VoiceGameLauncher not assigned").ConfigureAwait(false);
+                        await WriteJsonAsync(context.Response, setResult.StatusCode, "error", setResult.Error).ConfigureAwait(false);
                         return;
                     }
                     await WriteAsrStatusAsync(context.Response, "agent listening paused").ConfigureAwait(false);
@@ -102,10 +141,10 @@ namespace RobotVoice
                         target = request.listening;
                     }
 
-                    var ok = await SetAgentListeningAsync(target).ConfigureAwait(false);
-                    if (!ok)
+                    var setResult = await SetOperatorListeningAsync(target).ConfigureAwait(false);
+                    if (!setResult.Success)
                     {
-                        await WriteJsonAsync(context.Response, 503, "error", "VoiceGameLauncher not assigned").ConfigureAwait(false);
+                        await WriteJsonAsync(context.Response, setResult.StatusCode, "error", setResult.Error).ConfigureAwait(false);
                         return;
                     }
 
@@ -176,18 +215,17 @@ namespace RobotVoice
 
         private async Task WriteAsrStatusAsync(HttpListenerResponse response, string message)
         {
-            var config = await LoadAsrConfigAsync().ConfigureAwait(false);
+            var config = await LoadOperatorAsrConfigAsync().ConfigureAwait(false);
             if (!config.Success)
             {
                 await WriteJsonAsync(response, config.StatusCode, "error", config.Error).ConfigureAwait(false);
                 return;
             }
 
-            var listening = await GetAgentListeningAsync().ConfigureAwait(false);
             var modes = config.Config.available_modes;
             if (modes == null || modes.Length == 0)
             {
-                modes = new[] { "whisper-large-v3", "moonshine-small", "moonshine-medium", "api" };
+                modes = new[] { "live-captions", "api", "gemini-live" };
             }
 
             var payload = new StringBuilder(256);
@@ -196,7 +234,9 @@ namespace RobotVoice
                 .Append("\",\"mode\":\"")
                 .Append(EscapeJson(config.Config.mode))
                 .Append("\",\"listening\":")
-                .Append(listening ? "true" : "false")
+                .Append(config.Config.listening ? "true" : "false")
+                .Append(",\"assistant_speaking\":")
+                .Append(config.Config.assistant_speaking ? "true" : "false")
                 .Append(",\"openai_configured\":")
                 .Append(config.Config.openai_configured ? "true" : "false")
                 .Append(",\"openai_model\":\"")
@@ -261,6 +301,31 @@ namespace RobotVoice
             return ResolveLlmServiceBaseUrl();
         }
 
+        private string ResolveRuntimeControlBaseUrl()
+        {
+            var configured = (runtimeControlBaseUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(configured))
+            {
+                configured = VoiceAgentDefaults.RuntimeControlBaseUrl;
+            }
+            return configured.TrimEnd('/');
+        }
+
+        private bool IsRuntimeControlSelfReference()
+        {
+            try
+            {
+                var uri = new Uri(ResolveRuntimeControlBaseUrl());
+                var host = (uri.Host ?? string.Empty).Trim().ToLowerInvariant();
+                var isLoopback = host == "127.0.0.1" || host == "localhost" || host == "::1";
+                return enableEmbeddedHttpServer && isLoopback && uri.Port == httpPort;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         private static string NormalizeAsrMode(string mode)
         {
             var normalized = (mode ?? string.Empty).Trim().ToLowerInvariant();
@@ -286,6 +351,64 @@ namespace RobotVoice
                 case "openai":
                 case "online":
                     return "api";
+                default:
+                    return string.Empty;
+            }
+        }
+
+        private static string StreamingAsrModeToConfig(StreamingAsrModeOption mode)
+        {
+            switch (mode)
+            {
+                case StreamingAsrModeOption.Api:
+                    return "api";
+                case StreamingAsrModeOption.GeminiLive:
+                    return "gemini-live";
+                case StreamingAsrModeOption.LiveCaptions:
+                default:
+                    return "live-captions";
+            }
+        }
+
+        private static StreamingAsrModeOption StreamingAsrModeFromConfig(string mode, StreamingAsrModeOption fallback)
+        {
+            switch (NormalizeStreamingAsrMode(mode))
+            {
+                case "api":
+                    return StreamingAsrModeOption.Api;
+                case "gemini-live":
+                    return StreamingAsrModeOption.GeminiLive;
+                case "live-captions":
+                    return StreamingAsrModeOption.LiveCaptions;
+                default:
+                    return fallback;
+            }
+        }
+
+        private static string NormalizeStreamingAsrMode(string mode)
+        {
+            var normalized = (mode ?? string.Empty).Trim().ToLowerInvariant();
+            switch (normalized)
+            {
+                case "live-captions":
+                case "live_captions":
+                case "windows-live-captions":
+                case "windows_live_captions":
+                case "windows-captions":
+                case "caption":
+                case "captions":
+                    return "live-captions";
+                case "api":
+                case "openai":
+                case "online":
+                    return "api";
+                case "gemini-live":
+                case "gemini_live":
+                case "gemini":
+                case "google":
+                case "google-live":
+                case "gemini-live-native-audio":
+                    return "gemini-live";
                 default:
                     return string.Empty;
             }
@@ -337,6 +460,50 @@ namespace RobotVoice
             }
 
             return raw.Trim();
+        }
+
+        private async Task<(bool Success, int StatusCode, AsrConfigResponse Config, string Error)> LoadOperatorAsrConfigAsync()
+        {
+            var fallbackMode = StreamingAsrModeToConfig(defaultStreamingAsrMode);
+            var empty = new AsrConfigResponse
+            {
+                mode = fallbackMode,
+                available_modes = new[] { "live-captions", "api", "gemini-live" },
+                openai_model = string.Empty,
+                listening = false,
+                assistant_speaking = false
+            };
+
+            if (IsRuntimeControlSelfReference())
+            {
+                return (true, 200, empty, string.Empty);
+            }
+
+            try
+            {
+                var response = await SharedHttpClient.GetAsync(ResolveRuntimeControlBaseUrl() + "/api/asr").ConfigureAwait(false);
+                var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return (false, (int)response.StatusCode, empty, ParseAsrErrorMessage(body));
+                }
+
+                var parsed = JsonUtility.FromJson<AsrConfigResponse>(body);
+                parsed.mode = NormalizeStreamingAsrMode(parsed.mode);
+                if (string.IsNullOrWhiteSpace(parsed.mode))
+                {
+                    parsed.mode = fallbackMode;
+                }
+                if (parsed.available_modes == null || parsed.available_modes.Length == 0)
+                {
+                    parsed.available_modes = new[] { "live-captions", "api", "gemini-live" };
+                }
+                return (true, 200, parsed, string.Empty);
+            }
+            catch (Exception ex)
+            {
+                return (false, 502, empty, $"failed to load streaming asr status: {ex.Message}");
+            }
         }
 
         private async Task<(bool Success, int StatusCode, AsrConfigResponse Config, string Error)> LoadAsrConfigAsync()
@@ -400,6 +567,75 @@ namespace RobotVoice
             catch (Exception ex)
             {
                 return (false, 502, $"failed to set asr mode: {ex.Message}");
+            }
+        }
+
+        private async Task<(bool Success, int StatusCode, string Error)> SetOperatorAsrModeAsync(string mode)
+        {
+            try
+            {
+                var normalized = NormalizeStreamingAsrMode(mode);
+                if (string.IsNullOrWhiteSpace(normalized))
+                {
+                    return (false, 400, "mode must be live-captions, api, or gemini-live");
+                }
+
+                if (IsRuntimeControlSelfReference())
+                {
+                    defaultStreamingAsrMode = StreamingAsrModeFromConfig(normalized, defaultStreamingAsrMode);
+                    return (true, 200, string.Empty);
+                }
+
+                var payload = "{\"action\":\"set_mode\",\"mode\":\"" + EscapeJson(normalized) + "\"}";
+                using (var content = new StringContent(payload, Encoding.UTF8, "application/json"))
+                {
+                    var response = await SharedHttpClient.PostAsync(ResolveRuntimeControlBaseUrl() + "/api/asr", content).ConfigureAwait(false);
+                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        return (false, (int)response.StatusCode, ParseAsrErrorMessage(body));
+                    }
+                }
+
+                return (true, 200, string.Empty);
+            }
+            catch (Exception ex)
+            {
+                return (false, 502, $"failed to set streaming asr mode: {ex.Message}");
+            }
+        }
+
+        private async Task<(bool Success, int StatusCode, string Error)> SetOperatorListeningAsync(bool listening)
+        {
+            if (IsRuntimeControlSelfReference())
+            {
+                var ok = await SetAgentListeningAsync(listening).ConfigureAwait(false);
+                if (ok)
+                {
+                    return (true, 200, string.Empty);
+                }
+                return (false, 503, "VoiceGameLauncher not assigned");
+            }
+
+            try
+            {
+                var action = listening ? "start_listening" : "pause_listening";
+                var payload = "{\"action\":\"" + action + "\"}";
+                using (var content = new StringContent(payload, Encoding.UTF8, "application/json"))
+                {
+                    var response = await SharedHttpClient.PostAsync(ResolveRuntimeControlBaseUrl() + "/api/asr", content).ConfigureAwait(false);
+                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        return (false, (int)response.StatusCode, ParseAsrErrorMessage(body));
+                    }
+                }
+
+                return (true, 200, string.Empty);
+            }
+            catch (Exception ex)
+            {
+                return (false, 502, $"failed to set streaming asr listening: {ex.Message}");
             }
         }
 
@@ -1059,9 +1295,20 @@ namespace RobotVoice
             response.Close();
         }
 
+        private static async Task RespondWithControlsHtmlAsync(HttpListenerResponse response)
+        {
+            var html = BuildControlsHtml();
+            var buffer = Encoding.UTF8.GetBytes(html);
+            response.StatusCode = 200;
+            response.ContentType = "text/html; charset=utf-8";
+            response.ContentLength64 = buffer.Length;
+            await response.OutputStream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            response.Close();
+        }
+
         private static async Task RespondWithSdkManifestAsync(HttpListenerResponse response)
         {
-            await RespondWithPanelAssetAsync(response, "sdk-manifest.json", "application/json; charset=utf-8").ConfigureAwait(false);
+            await RespondWithPanelAssetAsync(response, "sdk-manifest.json").ConfigureAwait(false);
         }
 
         private static async Task RespondWithMemoryHtmlAsync(HttpListenerResponse response)
@@ -1106,6 +1353,11 @@ namespace RobotVoice
             return LoadPanelTemplateOrFallback("games.html");
         }
 
+        private static string BuildControlsHtml()
+        {
+            return LoadPanelTemplateOrFallback("controls.html");
+        }
+
         private static string BuildRuntimeConfigHtml()
         {
             return LoadPanelTemplateOrFallback("runtime.html");
@@ -1131,22 +1383,88 @@ namespace RobotVoice
             return LoadPanelTemplateOrFallback("sdk.html");
         }
 
-        private static async Task RespondWithPanelAssetAsync(HttpListenerResponse response, string fileName, string contentType)
+        private static async Task RespondWithPanelAssetAsync(HttpListenerResponse response, string fileName)
         {
-            var content = LoadPanelTemplate(fileName);
-            if (string.IsNullOrEmpty(content))
+            if (!TryResolvePanelAssetPath(fileName, out var fullPath, out var contentType))
             {
                 response.StatusCode = 404;
                 response.Close();
                 return;
             }
 
-            var buffer = Encoding.UTF8.GetBytes(content);
+            byte[] buffer;
+            try
+            {
+                buffer = File.ReadAllBytes(fullPath);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[UserTestPanel] Failed to read panel asset '{fileName}': {ex.Message}");
+                response.StatusCode = 404;
+                response.Close();
+                return;
+            }
+
             response.StatusCode = 200;
             response.ContentType = contentType;
             response.ContentLength64 = buffer.Length;
             await response.OutputStream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
             response.Close();
+        }
+
+        private static bool TryResolvePanelAssetPath(string fileName, out string fullPath, out string contentType)
+        {
+            fullPath = string.Empty;
+            contentType = string.Empty;
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                return false;
+            }
+
+            string decoded;
+            try
+            {
+                decoded = Uri.UnescapeDataString(fileName.Trim());
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (decoded == "." || decoded == ".." || decoded.IndexOf('\0') >= 0
+                || decoded.IndexOf('/') >= 0 || decoded.IndexOf('\\') >= 0 || Path.IsPathRooted(decoded))
+            {
+                return false;
+            }
+
+            switch (Path.GetExtension(decoded).ToLowerInvariant())
+            {
+                case ".css": contentType = "text/css; charset=utf-8"; break;
+                case ".js": contentType = "application/javascript; charset=utf-8"; break;
+                case ".json": contentType = "application/json; charset=utf-8"; break;
+                case ".png": contentType = "image/png"; break;
+                case ".webp": contentType = "image/webp"; break;
+                case ".txt": contentType = "text/plain; charset=utf-8"; break;
+                default: return false;
+            }
+
+            try
+            {
+                var root = Path.GetFullPath(Path.Combine(Application.streamingAssetsPath, "panel"));
+                var candidate = Path.GetFullPath(Path.Combine(root, decoded));
+                if (!string.Equals(Path.GetDirectoryName(candidate), root, StringComparison.OrdinalIgnoreCase)
+                    || !File.Exists(candidate))
+                {
+                    return false;
+                }
+
+                fullPath = candidate;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static string LoadPanelTemplateOrFallback(string fileName)

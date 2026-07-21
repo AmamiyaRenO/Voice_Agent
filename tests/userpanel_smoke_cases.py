@@ -22,6 +22,8 @@ USERPANEL_SMOKE_CASES: Dict[str, List[PanelOp]] = {
     "/panel.html": [PanelOp(method="GET", expected_statuses=(200,))],
     "/games": [PanelOp(method="GET", expected_statuses=(200,))],
     "/games.html": [PanelOp(method="GET", expected_statuses=(200,))],
+    "/controls": [PanelOp(method="GET", expected_statuses=(200,))],
+    "/controls.html": [PanelOp(method="GET", expected_statuses=(200,))],
     "/runtime": [PanelOp(method="GET", expected_statuses=(200,))],
     "/runtime.html": [PanelOp(method="GET", expected_statuses=(200,))],
     "/memory": [PanelOp(method="GET", expected_statuses=(200,))],
