@@ -4,8 +4,8 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Participants | Rachel Console</title>
   <script src="/panel-assets/theme.js?v=2"></script>
-  <link rel="stylesheet" href="/panel-assets/app.css?v=2">
-  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=2"></script><script defer src="/panel-assets/participants.js"></script>
+  <link rel="stylesheet" href="/panel-assets/app.css?v=4">
+  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=4"></script><script defer src="/panel-assets/participants.js?v=2"></script>
 </head>
 <body data-page="participants">
   <section data-page-content>
@@ -13,6 +13,7 @@
       <div class="workspace-title"><a class="icon-button" href="/runtime.html" aria-label="Back to Settings" title="Back"><i data-lucide="arrow-left"></i></a><div><div class="page-kicker">Identity and memory</div><h1>Participants</h1><p class="page-description">Review participant identity, voice enrollment and saved conversation history.</p></div></div>
       <div class="header-actions"><button class="secondary" id="refresh-participants" type="button"><i data-lucide="refresh-cw"></i>Refresh</button></div>
     </header>
+    <div class="help-panel participant-help"><i data-lucide="circle-help"></i><div><strong>How participant profiles work</strong><ol class="help-steps"><li>Add a display name to create a memory profile.</li><li>Rachel saves future conversation turns to the selected profile.</li><li>Voice enrollment is separate and only runs when Voice identification is enabled in Settings.</li></ol></div></div>
     <div class="split-view">
       <aside class="panel list-panel">
         <div class="panel-head"><div><h2>Participant list</h2><p class="panel-note" id="participant-count">Loading...</p></div></div>
@@ -28,7 +29,7 @@
           <div class="panel-head"><div><h2 id="participant-title">Participant</h2><p class="panel-note" id="participant-subtitle"></p></div><button class="danger" id="delete-participant" type="button"><i data-lucide="trash-2"></i>Delete</button></div>
           <div class="summary">
             <div class="stat"><div class="stat-label">Participant ID</div><div class="stat-value" id="participant-id">-</div></div>
-            <div class="stat"><div class="stat-label">Voiceprint</div><div class="stat-value" id="voiceprint-state">-</div></div>
+            <div class="stat"><div class="stat-label">Voice enrollment</div><div class="stat-value" id="voiceprint-state">-</div><div class="stat-help" id="voiceprint-help">Controlled by Settings privacy.</div></div>
             <div class="stat"><div class="stat-label">Saved turns</div><div class="stat-value" id="turn-count">0</div></div>
           </div>
           <form id="participant-name-form" class="field" style="margin-bottom:18px"><label for="participant-name">Display name</label><div class="pathRow"><input id="participant-name" required><button id="save-participant-name" type="submit"><i data-lucide="save"></i>Save</button></div></form>

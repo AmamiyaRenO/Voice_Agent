@@ -6,7 +6,7 @@
     "intent-manifest": "intent_manifest_path", "game-manifest": "game_manifest_path", "ollama-model": "ollama_model",
     "openai-response-model": "openai_response_model", "gemini-response-model": "gemini_response_model", "gemini-live-model": "gemini_live_model",
     "gemini-live-voice": "gemini_live_voice", "kokoro-voice": "kokoro_voice", "kokoro-language": "kokoro_lang_code",
-    "openai-key": "openai_api_key", "gemini-key": "gemini_api_key", "openai-transcribe-model": "openai_transcribe_model",
+    "openai-key": "openai_api_key", "gemini-key": "gemini_api_key", "google-cloud-tts-key": "google_cloud_tts_api_key", "openai-transcribe-model": "openai_transcribe_model",
     "openai-base-url": "openai_base_url", "openai-transcribe-prompt": "openai_transcribe_prompt", "launch-triggers": "launch_triggers", "exit-keywords": "exit_keywords"
   };
   const selectFields = {
@@ -35,7 +35,7 @@
     $("gemini-native-response").checked = Boolean(data.gemini_live_native_response);
     $("llm-intent").checked = Boolean(data.use_llm_intent_classifier);
     $("voice-id-switch").checked = Boolean(data.speaker_id_enabled && data.speaker_auto_learning_enabled);
-    $("privacy-status").textContent = $("voice-id-switch").checked ? "Voice matching and automatic learning are enabled." : "Voice matching and automatic learning are disabled.";
+    $("privacy-status").textContent = $("voice-id-switch").checked ? "On: voice matching and automatic learning are enabled." : "Off: voice matching and automatic learning are disabled.";
     $("runtime-path").textContent = `Config: ${data.path || "unknown"}`;
   }
 
@@ -96,7 +96,7 @@
     $("privacy-status").textContent = "Applying privacy setting...";
     try {
       await ui.api("/api/runtime/config", { method: "POST", body: { speaker_id_enabled: enabled, speaker_auto_learning_enabled: enabled } });
-      $("privacy-status").textContent = enabled ? "Voice matching and automatic learning are enabled." : "Voice matching and automatic learning are disabled. Existing profiles were kept.";
+      $("privacy-status").textContent = enabled ? "On: voice matching and automatic learning are enabled." : "Off: voice matching and automatic learning are disabled. Existing profiles were kept.";
       ui.toast(enabled ? "Voice identification enabled" : "Voice identification disabled", "success");
     } catch (error) {
       $("voice-id-switch").checked = !enabled;

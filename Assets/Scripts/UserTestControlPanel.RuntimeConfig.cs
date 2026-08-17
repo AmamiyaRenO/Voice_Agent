@@ -116,6 +116,10 @@ namespace RobotVoice
             {
                 SetOrRemoveString(geminiObj, "api_key", value);
             }
+            if (TryReadOptionalString(requestObj, "google_cloud_tts_api_key", out value))
+            {
+                SetOrRemoveString(envObj, "GOOGLE_CLOUD_TTS_API_KEY", value);
+            }
             if (TryReadOptionalString(requestObj, "ollama_model", out value))
             {
                 SetOrRemoveString(envObj, "OLLAMA_MODEL", value);
@@ -258,6 +262,9 @@ namespace RobotVoice
                 Environment.SetEnvironmentVariable(
                     "VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING",
                     ReadOptionalBool(envObj, "VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING", false) ? "1" : "0");
+                Environment.SetEnvironmentVariable(
+                    "GOOGLE_CLOUD_TTS_API_KEY",
+                    ReadEnvString(envObj, "GOOGLE_CLOUD_TTS_API_KEY", string.Empty));
             }
             catch (Exception ex)
             {
@@ -361,6 +368,12 @@ namespace RobotVoice
             }
             payload["gemini_api_key"] = geminiApiKey;
             payload["gemini_api_key_set"] = !string.IsNullOrWhiteSpace(geminiApiKey);
+            var googleCloudTtsApiKey = ReadEnvString(
+                envObj,
+                "GOOGLE_CLOUD_TTS_API_KEY",
+                Environment.GetEnvironmentVariable("GOOGLE_CLOUD_TTS_API_KEY") ?? string.Empty);
+            payload["google_cloud_tts_api_key"] = googleCloudTtsApiKey;
+            payload["google_cloud_tts_api_key_set"] = !string.IsNullOrWhiteSpace(googleCloudTtsApiKey);
             var ollamaModel = (envObj["OLLAMA_MODEL"]?.Value ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(ollamaModel))
             {

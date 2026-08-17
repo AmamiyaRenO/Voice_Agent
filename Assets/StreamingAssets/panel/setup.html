@@ -4,8 +4,8 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Setup | Rachel Console</title>
   <script src="/panel-assets/theme.js?v=2"></script>
-  <link rel="stylesheet" href="/panel-assets/app.css?v=2">
-  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=2"></script><script defer src="/panel-assets/setup.js"></script>
+  <link rel="stylesheet" href="/panel-assets/app.css?v=4">
+  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=4"></script><script defer src="/panel-assets/setup.js"></script>
 </head>
 <body data-page="setup">
   <section data-page-content>
@@ -13,6 +13,7 @@
       <div class="workspace-title"><a class="icon-button" href="/runtime.html" aria-label="Back to Settings" title="Back"><i data-lucide="arrow-left"></i></a><div><div class="page-kicker">Readiness check</div><h1>Setup</h1><p class="page-description">Verify local dependencies, configure speech recognition and save the first-run settings.</p></div></div>
       <div class="header-actions"><span class="status-badge" id="setup-summary">Checking</span><button class="secondary" id="reload-setup" type="button"><i data-lucide="refresh-cw"></i>Run checks</button></div>
     </header>
+    <div class="help-panel"><i data-lucide="circle-help"></i><div><strong>Setup guide</strong><span>Work from step 1 to step 5. Resolve any red status before saving; optional cloud fields may remain blank when Rachel uses local services.</span></div></div>
     <div class="panel">
       <div class="panel-head"><div><h2>Setup progress</h2><p class="panel-note" id="setup-progress-label">Checking system readiness...</p></div></div>
       <div class="mini-meter setup-progress"><span id="setup-progress"></span></div>

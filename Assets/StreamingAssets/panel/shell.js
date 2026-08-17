@@ -105,7 +105,14 @@
     return `<aside class="device-cockpit" aria-label="Rachel device cockpit">
       <div class="device-stage">
         <div class="stage-floor"></div>
-        <img class="device-image" src="/panel-assets/rachel-device.png" alt="Rachel assistive robot">
+        <div class="device-visual">
+          <img class="device-image" src="/panel-assets/rachel-device.png" alt="Rachel assistive robot">
+          <img class="device-face-preview" id="device-face-preview" src="/panel-assets/face-neutral.png" alt="Rachel neutral expression">
+          <span class="device-led-preview led-off" id="device-led-preview" aria-hidden="true"></span>
+          <span class="device-flower-preview flower-open" id="device-flower-preview" aria-hidden="true">
+            <span class="flower-petal petal-one"></span><span class="flower-petal petal-two"></span><span class="flower-petal petal-three"></span><span class="flower-petal petal-four"></span>
+          </span>
+        </div>
         <button class="icon-button device-power" id="device-power" type="button" aria-label="Start listening" title="Start or pause listening"><i data-lucide="power"></i></button>
         <a class="icon-button device-settings" href="/runtime.html" aria-label="Open settings" title="Settings"><i data-lucide="settings"></i></a>
         <span class="device-state checking" id="device-state">Checking</span>
@@ -162,11 +169,11 @@
 
   function asrState(asr, healthy) {
     if (!healthy) return { label: "Offline", className: "offline" };
-    if (asr && asr.assistant_speaking) return { label: "Speaking", className: "" };
+    if (asr && asr.assistant_speaking) return { label: "Speaking", className: "speaking" };
     const mode = String(asr && (asr.mode || asr.streaming_backend) || "").toLowerCase();
     if (asr && asr.listening && asr.live_capture_enabled === false && mode !== "live-captions") return { label: "Mic Offline", className: "offline" };
-    if (asr && asr.listening) return { label: "Listening", className: "" };
-    return { label: "Ready", className: "" };
+    if (asr && asr.listening) return { label: "Listening", className: "listening" };
+    return { label: "Paused", className: "paused" };
   }
 
   function renderStatus(health, asr) {
@@ -179,6 +186,8 @@
       button.disabled = !healthy;
       button.classList.toggle("active", Boolean(asr && asr.listening));
       button.setAttribute("aria-label", asr && asr.listening ? "Pause listening" : "Start listening");
+      button.setAttribute("title", asr && asr.listening ? "Pause listening" : "Start listening");
+      button.setAttribute("aria-pressed", String(Boolean(asr && asr.listening)));
     }
     const mode = asr && (asr.mode || asr.streaming_backend);
     const runtime = document.getElementById("runtime-label");

@@ -528,6 +528,7 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
     openai_transcribe_model = str(openai_obj.get("transcribe_model") or _env("OPENAI_TRANSCRIBE_MODEL", "")).strip()
     openai_transcribe_prompt = str(openai_obj.get("transcribe_prompt") or _env("OPENAI_TRANSCRIBE_PROMPT", "")).strip()
     gemini_api_key = str(gemini_obj.get("api_key") or _gemini_api_key_from_env()).strip()
+    google_cloud_tts_api_key = str(env_obj.get("GOOGLE_CLOUD_TTS_API_KEY") or _env("GOOGLE_CLOUD_TTS_API_KEY", "")).strip()
     gemini_live_model = str(
         env_obj.get("GEMINI_LIVE_MODEL")
         or DEFAULT_GEMINI_LIVE_MODEL
@@ -567,6 +568,8 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
         "openai_transcribe_prompt": openai_transcribe_prompt,
         "gemini_api_key": gemini_api_key,
         "gemini_api_key_set": bool(gemini_api_key),
+        "google_cloud_tts_api_key": google_cloud_tts_api_key,
+        "google_cloud_tts_api_key_set": bool(google_cloud_tts_api_key),
         "gemini_live_model": gemini_live_model,
         "gemini_response_model": gemini_response_model,
         "gemini_live_voice": gemini_live_voice,
@@ -1394,6 +1397,10 @@ async def _apply_runtime_live(merged: Dict[str, Any]) -> str:
         os.environ["GEMINI_API_KEY"] = runtime["gemini_api_key"]
     else:
         os.environ.pop("GEMINI_API_KEY", None)
+    if runtime["google_cloud_tts_api_key"]:
+        os.environ["GOOGLE_CLOUD_TTS_API_KEY"] = runtime["google_cloud_tts_api_key"]
+    else:
+        os.environ.pop("GOOGLE_CLOUD_TTS_API_KEY", None)
     os.environ["GEMINI_LIVE_MODEL"] = runtime["gemini_live_model"]
     os.environ["GEMINI_RESPONSE_MODEL"] = runtime["gemini_response_model"]
     os.environ["GEMINI_LIVE_VOICE"] = runtime["gemini_live_voice"]
@@ -2009,6 +2016,8 @@ async def api_runtime_config_post(request: Request) -> Dict[str, Any]:
         openai_obj["transcribe_prompt"] = str(payload.get("openai_transcribe_prompt") or "").strip()
     if "gemini_api_key" in payload:
         gemini_obj["api_key"] = str(payload.get("gemini_api_key") or "").strip()
+    if "google_cloud_tts_api_key" in payload:
+        env_obj["GOOGLE_CLOUD_TTS_API_KEY"] = str(payload.get("google_cloud_tts_api_key") or "").strip()
     if "ollama_model" in payload:
         env_obj["OLLAMA_MODEL"] = str(payload.get("ollama_model") or "").strip()
     if "conversation_pipeline_mode" in payload:

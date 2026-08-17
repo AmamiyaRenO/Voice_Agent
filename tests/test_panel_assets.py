@@ -25,6 +25,11 @@ def _runtime_module():
         ("shell.js", "application/javascript; charset=utf-8"),
         ("theme.js", "application/javascript; charset=utf-8"),
         ("rachel-device.png", "image/png"),
+        ("face-neutral.png", "image/png"),
+        ("face-happy.png", "image/png"),
+        ("face-excited.png", "image/png"),
+        ("face-sad.png", "image/png"),
+        ("face-verysad.png", "image/png"),
         ("sdk-manifest.json", "application/json; charset=utf-8"),
         ("lucide.LICENSE.txt", "text/plain; charset=utf-8"),
     ],
@@ -86,6 +91,11 @@ def test_python_panel_routes_serve_all_pages_and_shared_assets():
                 "/panel-assets/shell.js": "application/javascript",
                 "/panel-assets/theme.js": "application/javascript",
                 "/panel-assets/rachel-device.png": "image/png",
+                "/panel-assets/face-neutral.png": "image/png",
+                "/panel-assets/face-happy.png": "image/png",
+                "/panel-assets/face-excited.png": "image/png",
+                "/panel-assets/face-sad.png": "image/png",
+                "/panel-assets/face-verysad.png": "image/png",
                 "/panel-assets/lucide.LICENSE.txt": "text/plain",
             }
             for route, expected_type in expected_types.items():
@@ -111,6 +121,7 @@ def test_runtime_payload_exposes_voice_identification_flags(tmp_path: Path):
             "env": {
                 "VOICE_SPEAKER_ID_ENABLED": "1",
                 "VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING": "0",
+                "GOOGLE_CLOUD_TTS_API_KEY": "local-google-key",
             }
         },
         user_path=tmp_path / "user.json",
@@ -120,6 +131,23 @@ def test_runtime_payload_exposes_voice_identification_flags(tmp_path: Path):
 
     assert payload["speaker_id_enabled"] is True
     assert payload["speaker_auto_learning_enabled"] is False
+    assert payload["google_cloud_tts_api_key"] == "local-google-key"
+    assert payload["google_cloud_tts_api_key_set"] is True
+
+
+def test_figma_console_suggestions_are_present_in_shared_pages():
+    panel = Path(__file__).resolve().parents[1] / "Assets" / "StreamingAssets" / "panel"
+    dashboard = (panel / "dashboard.js").read_text(encoding="utf-8")
+    controls = (panel / "controls.html").read_text(encoding="utf-8")
+    settings = (panel / "runtime.html").read_text(encoding="utf-8")
+    participants = (panel / "memory.html").read_text(encoding="utf-8")
+
+    assert ">Configure</a>" in dashboard
+    assert 'id="voice-volume" type="range"' in controls
+    assert 'id="face-custom-avatar"' in controls
+    assert 'id="google-cloud-tts-key"' in settings
+    assert "When off, speech recognition still works" in settings
+    assert "How participant profiles work" in participants
 
 
 def test_manifest_status_reports_launch_readiness_and_path_error(tmp_path: Path):

@@ -35,7 +35,9 @@
     $("participant-id").textContent = selectedId;
     $("participant-name").value = displayName;
     $("turn-count").textContent = String(turns.length);
-    $("voiceprint-state").textContent = state.selected_speaker_profile && state.selected_speaker_profile.has_profile ? "Enrolled" : "Not enrolled";
+    const enrolled = Boolean(state.selected_speaker_profile && state.selected_speaker_profile.has_profile);
+    $("voiceprint-state").textContent = enrolled ? "Enrolled" : "Not enrolled";
+    $("voiceprint-help").textContent = enrolled ? "Rachel can match this voice when identification is enabled." : "This memory profile does not yet have a saved voiceprint.";
     $("participant-history").innerHTML = turns.length ? turns.map((turn) => {
       const assistant = String(turn.role || "user").toLowerCase() === "assistant";
       return `<article class="turn"><div class="role ${assistant ? "assistant" : ""}">${assistant ? "Rachel" : "Participant"}</div><div>${ui.escapeHtml(turn.text || "")}</div><div class="time">${ui.escapeHtml(formatTime(turn.ts))}</div></article>`;
