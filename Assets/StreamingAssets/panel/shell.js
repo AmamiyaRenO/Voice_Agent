@@ -108,10 +108,6 @@
         <div class="device-visual">
           <img class="device-image" src="/panel-assets/rachel-device.png" alt="Rachel assistive robot">
           <img class="device-face-preview" id="device-face-preview" src="/panel-assets/face-neutral.png" alt="Rachel neutral expression">
-          <span class="device-led-preview led-off" id="device-led-preview" aria-hidden="true"></span>
-          <span class="device-flower-preview flower-open" id="device-flower-preview" aria-hidden="true">
-            <span class="flower-petal petal-one"></span><span class="flower-petal petal-two"></span><span class="flower-petal petal-three"></span><span class="flower-petal petal-four"></span>
-          </span>
         </div>
         <button class="icon-button device-power" id="device-power" type="button" aria-label="Start listening" title="Start or pause listening"><i data-lucide="power"></i></button>
         <a class="icon-button device-settings" href="/runtime.html" aria-label="Open settings" title="Settings"><i data-lucide="settings"></i></a>

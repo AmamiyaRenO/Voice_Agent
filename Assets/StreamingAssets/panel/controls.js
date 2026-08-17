@@ -6,7 +6,6 @@
   let cameraActive = false;
   let cameraTimer = 0;
   let faceResetTimer = 0;
-  let ledResetTimer = 0;
   const facePreviewAssets = {
     neutral: "/panel-assets/face-neutral.png",
     happy: "/panel-assets/face-happy.png",
@@ -255,23 +254,6 @@
     }
   }
 
-  function showLedPreview(settings) {
-    const preview = $("device-led-preview");
-    if (!preview) return;
-    window.clearTimeout(ledResetTimer);
-    ledResetTimer = 0;
-    const mode = String(settings.mode || "off").toLowerCase();
-    const brightness = Math.max(0, Math.min(1, Number(settings.brightness) || 0));
-    preview.style.setProperty("--led-color", settings.color || "#00bfff");
-    preview.style.setProperty("--led-brightness", String(brightness));
-    preview.style.setProperty("--led-low", String(Math.max(.05, brightness * .16)));
-    preview.style.setProperty("--led-period", `${Math.max(.3, Number(settings.period) || 2)}s`);
-    preview.className = `device-led-preview led-${["breathe", "random", "solid"].includes(mode) ? mode : "off"}`;
-    document.querySelectorAll("[data-led]").forEach((item) => item.classList.toggle("active", item.dataset.led === mode));
-    const duration = Number(settings.duration) || 0;
-    if (mode !== "off" && duration > 0) ledResetTimer = window.setTimeout(() => showLedPreview({ mode: "off" }), duration * 1000);
-  }
-
   async function sendLed(button) {
     const settings = {
       mode: button.dataset.led,
@@ -280,26 +262,12 @@
       period: Number($("led-period").value) || 2,
       duration: Number($("led-duration").value) || 0
     };
-    if (await sendCommand("/api/led", settings, button, "LED command sent")) showLedPreview(settings);
-  }
-
-  function showFlowerPreview(action) {
-    const preview = $("device-flower-preview");
-    if (!preview) return;
-    document.querySelectorAll("[data-flower]").forEach((item) => item.classList.toggle("active", item.dataset.flower === action));
-    if (action === "stop") {
-      preview.querySelectorAll(".flower-petal").forEach((petal) => { petal.style.transform = getComputedStyle(petal).transform; });
-      preview.classList.add("flower-stopped");
-      return;
-    }
-    preview.querySelectorAll(".flower-petal").forEach((petal) => { petal.style.transform = ""; });
-    preview.className = `device-flower-preview ${action.includes("close") ? "flower-closed" : "flower-open"}`;
-    preview.style.setProperty("--flower-duration", action.includes("slow") ? "2s" : ".45s");
+    await sendCommand("/api/led", settings, button, "LED command sent");
   }
 
   async function sendFlower(button) {
     const action = button.dataset.flower;
-    if (await sendCommand("/api/flower", { action }, button, "Flower command sent")) showFlowerPreview(action);
+    await sendCommand("/api/flower", { action }, button, "Flower command sent");
   }
 
   function customFaceValue() {
@@ -323,7 +291,6 @@
   window.addEventListener("pagehide", () => {
     stopCamera();
     window.clearTimeout(faceResetTimer);
-    window.clearTimeout(ledResetTimer);
   });
   setView();
   updateVolumeOutput();

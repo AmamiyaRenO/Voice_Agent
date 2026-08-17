@@ -99,28 +99,6 @@ button.danger:hover, button.warn:hover, .button.danger:hover { background: var(-
 .device-visual { position: absolute; z-index: 2; top: 51%; left: 50%; width: 84%; aspect-ratio: 3/2; transform: translate(-50%,-50%); filter: drop-shadow(0 22px 22px rgba(0,0,0,.42)); }
 .device-image { display: block; width: 100%; height: 100%; object-fit: contain; }
 .device-face-preview { position: absolute; z-index: 3; top: 49.3%; left: 39.8%; width: 20.1%; height: 19.1%; border-radius: 5%; object-fit: fill; }
-.device-led-preview { position: absolute; z-index: 2; top: 47%; left: 49.8%; width: 30%; aspect-ratio: 1; border-radius: 50%; pointer-events: none; transform: translate(-50%,-50%); }
-.device-led-preview.led-solid { background: radial-gradient(circle, color-mix(in srgb, var(--led-color) 28%, transparent) 0 18%, transparent 66%); box-shadow: 0 0 44px 12px color-mix(in srgb, var(--led-color) 52%, transparent); opacity: var(--led-brightness); }
-.device-led-preview.led-breathe { background: radial-gradient(circle, color-mix(in srgb, var(--led-color) 34%, transparent) 0 16%, transparent 68%); animation: led-breathe var(--led-period) ease-in-out infinite; }
-.device-led-preview.led-random { background: radial-gradient(circle, color-mix(in srgb, var(--led-color) 32%, transparent) 0 16%, transparent 68%); animation: led-random calc(var(--led-period) * .45) steps(2,end) infinite; }
-.device-led-preview.led-off { opacity: 0; }
-.device-flower-preview { --flower-duration: .45s; position: absolute; z-index: 4; top: 20%; left: 50%; width: 16%; height: 19%; pointer-events: none; transform: translate(-50%,-50%); }
-.flower-petal { position: absolute; bottom: 8%; left: 50%; width: 31%; height: 78%; border: 2px solid rgba(245,245,240,.66); border-radius: 48% 48% 42% 42%; background: linear-gradient(#ed8d67,#bc573c); box-shadow: 0 2px 5px rgba(0,0,0,.35); transform-origin: 50% 92%; transition: transform var(--flower-duration) ease-in-out; }
-.petal-one { background: linear-gradient(#e88961,#b94e36); }
-.petal-two { background: linear-gradient(#f0a76b,#d26f3f); }
-.petal-three { background: linear-gradient(#f3c170,#d99140); }
-.petal-four { background: linear-gradient(#ef8666,#bd4e3d); }
-.flower-open .petal-one { transform: translateX(-50%) rotate(-52deg) translateY(-5%); }
-.flower-open .petal-two { transform: translateX(-50%) rotate(-20deg) translateY(-10%); }
-.flower-open .petal-three { transform: translateX(-50%) rotate(20deg) translateY(-10%); }
-.flower-open .petal-four { transform: translateX(-50%) rotate(52deg) translateY(-5%); }
-.flower-closed .petal-one { transform: translateX(-50%) rotate(-13deg); }
-.flower-closed .petal-two { transform: translateX(-50%) rotate(-5deg); }
-.flower-closed .petal-three { transform: translateX(-50%) rotate(5deg); }
-.flower-closed .petal-four { transform: translateX(-50%) rotate(13deg); }
-.flower-stopped .flower-petal { transition: none; }
-@keyframes led-breathe { 0%,100% { opacity: var(--led-low); transform: translate(-50%,-50%) scale(.78); } 50% { opacity: var(--led-brightness); transform: translate(-50%,-50%) scale(1.12); } }
-@keyframes led-random { 0% { opacity: var(--led-low); filter: hue-rotate(0deg); } 35% { opacity: var(--led-brightness); filter: hue-rotate(70deg); } 70% { opacity: .42; filter: hue-rotate(190deg); } 100% { opacity: var(--led-brightness); filter: hue-rotate(300deg); } }
 .device-power { position: absolute; z-index: 5; top: 16px; left: 16px; border-color: #875100; color: var(--accent); box-shadow: 0 7px 16px rgba(255,152,0,.1); }
 .device-power.active { border-color: var(--green); background: var(--green-soft); color: var(--green); box-shadow: 0 0 0 3px rgba(32,204,112,.09), 0 7px 16px rgba(32,204,112,.1); }
 .device-settings { position: absolute; z-index: 5; top: 16px; right: 16px; }
@@ -258,7 +236,6 @@ body.drawer-open .drawer-scrim { display: block; }
 .expression-image { width: 48px; height: 36px; border-radius: 4px; object-fit: fill; }
 .expression-label { max-width: 100%; overflow: hidden; color: var(--text-soft); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
 .custom-preset-row { display: grid; grid-template-columns: 140px minmax(0,1fr) auto; gap: 8px; }
-[data-led].active, [data-flower].active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .controller-stack { display: grid; gap: 18px; }
 .controller-section { border-top: 1px solid var(--line); padding-top: 18px; }
 .controller-section:first-child { border-top: 0; padding-top: 0; }
