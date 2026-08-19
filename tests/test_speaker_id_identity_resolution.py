@@ -2734,6 +2734,8 @@ def test_local_service_templates_default_to_live_captions_streaming_modes():
     assert default_payload["env"]["VOICE_CLOUD_STREAMING_ASR_MODE"] == "live-captions"
     assert sample_payload["env"]["VOICE_LOCAL_STREAMING_ASR_MODE"] == "live-captions"
     assert sample_payload["env"]["VOICE_CLOUD_STREAMING_ASR_MODE"] == "live-captions"
+    assert sample_payload["env"]["VOICE_SPEAKER_ID_ENABLED"] == "0"
+    assert sample_payload["env"]["VOICE_SPEAKER_ID_AUTO_GUEST_LEARNING"] == "0"
 
 
 def test_desktop_runtime_clear_speaker_profile_for_user(tmp_path: Path):

@@ -1,9 +1,9 @@
 # Live Captions Bridge for Unity Voice Agent
 
-This guide documents a complete workflow for harvesting Windows 11 Live Captions output and
-forwarding finalized sentences to the Unity voice agent experience. The approach mirrors the
-reference implementation that accompanies this repository and is ready to compile and run on a
-Windows workstation.
+This guide documents the Windows 11 Live Captions integration used by Voice Agent. The listener is
+a separate deployment artifact and is **not built or included in this repository**. A working
+station needs a supplied `EnableLcMic.exe` (older builds may be named
+`LiveCaptionsListener.exe`), or it should use another recognition mode such as Gemini Live.
 
 ## 1. Overview
 
@@ -18,24 +18,26 @@ The workflow requires **Windows 11 22H2+** with the Live Captions feature enable
 floating above Unity. Unity should run in `MaximizedWindow` mode rather than exclusive fullscreen so
 that Desktop Window Manager can expose the caption surface to UI Automation.
 
-## 2. Building the listener
+## 2. Supplying the listener
 
-Compile `scripts/live_captions/LiveCaptionsListener.cs` as a .NET 6 console application (or .NET
-Framework 4.8 if preferred). The entry point waits for the Live Captions window, subscribes to
-`TextPattern.TextChangedEvent`, buffers incremental text, and emits finalized sentences whenever a
-newline is observed or 1.2 seconds of silence pass without changes.
+Obtain the listener executable from the team that maintains the separate Live Captions Listener
+project. Do not look for `scripts/live_captions/LiveCaptionsListener.cs` in this repository; that
+source file is not checked in here.
 
-```bash
-# Example build command (requires .NET SDK)
-dotnet new console -n LiveCaptionsBridge --framework net6.0
-# Replace the generated Program.cs with scripts/live_captions/LiveCaptionsListener.cs
-# Then build:
-dotnet publish -c Release -r win-x64 --self-contained false
+Set `LIVE_CAPTIONS_LISTENER_EXE` to the executable's absolute path through Rachel Settings or the
+`env` object in `scripts/local_services.user.json`, for example:
+
+```json
+{
+  "env": {
+    "LIVE_CAPTIONS_LISTENER_EXE": "D:\\unityproject\\LiveCaptionsListener\\temp_build\\win-x64-single\\EnableLcMic.exe"
+  }
+}
 ```
 
-When running, the console writes each completed sentence in the format `[Sentence] hello world`. The
-`FinalizeSentence` method is the appropriate place to forward utterances to Unity through MQTT,
-Named Pipes, stdin/stdout relays, or any other integration point that suits your deployment.
+Restart `helper.bat` after changing the path. If the executable is missing, the launcher reports
+`Live Captions listener not found`; use Gemini Live or install the external listener before
+continuing.
 
 ## 3. Unity side ingestion
 
@@ -75,9 +77,9 @@ Named Pipes, create a companion Windows service that forwards the listener outpu
 
 ## 4. Automating Live Captions startup
 
-Include `scripts/live_captions/StartLiveCaptions.bat` in the Windows Startup folder (`shell:startup`)
-so that the Live Captions application launches automatically at login. Alternatively, have the
-listener trigger this script when it cannot locate the caption window.
+The Voice Agent launcher starts the configured listener when Live Captions recognition is selected.
+There is no `scripts/live_captions/StartLiveCaptions.bat` in this repository. Windows Live Captions
+itself can be opened with `Win + Ctrl + L`.
 
 ## 5. Operational tips
 

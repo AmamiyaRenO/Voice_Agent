@@ -54,7 +54,7 @@ The recommended direct Ethernet topology is:
 - Windows PC / MQTT broker: `10.0.0.1/24`, port `1883`
 - Raspberry Pi: `10.0.0.2/24`
 
-The checked-in `face_agent.env` still mirrors the older live-Pi port `1884`. Update the deployed environment to `BROKER_PORT=1883` when using the default Voice Agent launcher.
+The checked-in `face_agent.env` uses the default Voice Agent MQTT port `1883`.
 
 Copy the scripts and face assets:
 

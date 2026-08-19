@@ -17,6 +17,8 @@ The repository also includes:
 | Keep Unity in the loop for avatar/gameplay/camera UI | Start services first, then open the Unity project | Unity acts as an optional shell around the desktop runtime and MQTT actions |
 | Work on Raspberry Pi display / LED / servo control | [`Firmware/README.md`](Firmware/README.md) | Live Pi-synced scripts, MQTT topics, and current hardware runtime notes |
 
+**Deploying a new Rachel station?** Follow the linear [Windows mini PC + Raspberry Pi setup checklist](docs/FRESH_MACHINE_SETUP.md). It is the recommended handoff document for a fresh machine.
+
 ### Default runtime ports
 
 | Component | Port | Notes |
@@ -480,7 +482,7 @@ If the PC and Pi connect through an existing router instead, leave both on DHCP 
    journalctl -u face-agent.service -u face-neutral.service -n 100 --no-pager
    ```
 
-The checked-in `Firmware/face_agent.env` mirrors an older live-Pi configuration using port `1884`. Change it or the service definitions to `1883` before using the default desktop launcher. The PC broker and every Pi subscriber must use the same port.
+The checked-in `Firmware/face_agent.env` uses the desktop launcher's default MQTT port `1883`. The PC broker and every Pi subscriber must use the same port.
 
 ### Verify PC/Pi communication
 
