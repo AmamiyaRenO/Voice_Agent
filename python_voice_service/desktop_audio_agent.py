@@ -291,6 +291,7 @@ DEFAULT_GEMINI_LIVE_MODEL = (
     or "models/gemini-2.5-flash-native-audio-latest"
 )
 DEFAULT_GEMINI_LIVE_VOICE = os.getenv("GEMINI_LIVE_VOICE", "Kore") or "Kore"
+DEFAULT_GOOGLE_CLOUD_GEMINI_TTS_MODEL = "gemini-2.5-flash-tts"
 DEFAULT_GEMINI_LIVE_LANGUAGE_CODE = os.getenv("GEMINI_LIVE_LANGUAGE_CODE", "en-US") or "en-US"
 DEFAULT_GEMINI_LIVE_FORCE_ENGLISH_TRANSCRIPTS = str(
     os.getenv("VOICE_GEMINI_LIVE_FORCE_ENGLISH_TRANSCRIPTS", "1") or "1"
@@ -448,6 +449,14 @@ def _normalize_tts_backend(value: Optional[str]) -> str:
     if normalized in {TTS_BACKEND_GOOGLE_CLOUD, "google", "google-cloud-tts", "cloud-tts"}:
         return TTS_BACKEND_GOOGLE_CLOUD
     return TTS_BACKEND_PIPER
+
+
+def _google_cloud_model_for_voice(voice: Optional[str]) -> str:
+    """Gemini-TTS voices use standalone names and require an explicit model."""
+    normalized_voice = str(voice or "").strip()
+    if not normalized_voice or "-" in normalized_voice:
+        return ""
+    return _env("GOOGLE_CLOUD_TTS_MODEL", DEFAULT_GOOGLE_CLOUD_GEMINI_TTS_MODEL)
 
 
 def _normalize_pipeline_mode(value: Optional[str]) -> str:
@@ -5948,9 +5957,20 @@ class DesktopAudioAgent:
         voice_params: Dict[str, str] = {"language_code": self.google_cloud_tts_language_code}
         if voice:
             voice_params["name"] = str(voice).strip()
+        model_name = _google_cloud_model_for_voice(voice)
+        if model_name:
+            voice_params["model_name"] = model_name
+        try:
+            voice_selection = texttospeech.VoiceSelectionParams(**voice_params)
+        except (TypeError, ValueError) as exc:
+            if model_name:
+                raise RuntimeError(
+                    "This Gemini-TTS voice requires google-cloud-texttospeech 2.29.0 or newer."
+                ) from exc
+            raise
         response = client.synthesize_speech(
             input=texttospeech.SynthesisInput(text=text),
-            voice=texttospeech.VoiceSelectionParams(**voice_params),
+            voice=voice_selection,
             audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16),
         )
         if not response.audio_content:

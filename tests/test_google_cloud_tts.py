@@ -62,6 +62,20 @@ def test_google_cloud_backend_normalization():
     assert desktop_runtime._normalize_tts_backend("cloud-tts") == "google-cloud"
 
 
+def test_google_cloud_model_is_inferred_only_for_gemini_tts_voice(monkeypatch):
+    monkeypatch.delenv("GOOGLE_CLOUD_TTS_MODEL", raising=False)
+
+    assert desktop_audio_agent._google_cloud_model_for_voice("Achernar") == "gemini-2.5-flash-tts"
+    assert desktop_audio_agent._google_cloud_model_for_voice("en-US-Neural2-F") == ""
+    assert desktop_audio_agent._google_cloud_model_for_voice("en-US-Chirp3-HD-Achernar") == ""
+
+
+def test_google_cloud_gemini_tts_model_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_TTS_MODEL", "gemini-2.5-pro-tts")
+
+    assert desktop_audio_agent._google_cloud_model_for_voice("Kore") == "gemini-2.5-pro-tts"
+
+
 def test_google_cloud_voice_options_exposes_error_without_failing():
     agent = _agent()
 
@@ -140,6 +154,74 @@ def test_google_cloud_client_prefers_api_key(monkeypatch):
     agent._google_cloud_tts_client("inspector-key")
 
     assert captured["client_options"] == {"api_key": "inspector-key"}
+
+
+def test_google_cloud_synthesis_adds_model_for_gemini_tts_voice(monkeypatch):
+    agent = _agent()
+    captured = {}
+
+    class _TextToSpeech:
+        class AudioEncoding:
+            LINEAR16 = "LINEAR16"
+
+        @staticmethod
+        def SynthesisInput(**kwargs):
+            return kwargs
+
+        @staticmethod
+        def VoiceSelectionParams(**kwargs):
+            captured["voice"] = kwargs
+            return kwargs
+
+        @staticmethod
+        def AudioConfig(**kwargs):
+            return kwargs
+
+    class _Client:
+        @staticmethod
+        def synthesize_speech(**kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(audio_content=b"wav")
+
+    monkeypatch.delenv("GOOGLE_CLOUD_TTS_MODEL", raising=False)
+    monkeypatch.setattr(agent, "_google_cloud_tts_module", lambda: _TextToSpeech)
+    monkeypatch.setattr(agent, "_google_cloud_tts_client", lambda api_key=None: _Client())
+
+    result = agent._synthesize_google_cloud_text_sync("Hello", "Achernar")
+
+    assert result == b"wav"
+    assert captured["voice"] == {
+        "language_code": "en-US",
+        "name": "Achernar",
+        "model_name": "gemini-2.5-flash-tts",
+    }
+
+
+def test_google_cloud_synthesis_does_not_add_model_for_classic_voice(monkeypatch):
+    agent = _agent()
+    captured = {}
+
+    class _TextToSpeech:
+        class AudioEncoding:
+            LINEAR16 = "LINEAR16"
+
+        SynthesisInput = staticmethod(lambda **kwargs: kwargs)
+        AudioConfig = staticmethod(lambda **kwargs: kwargs)
+
+        @staticmethod
+        def VoiceSelectionParams(**kwargs):
+            captured.update(kwargs)
+            return kwargs
+
+    class _Client:
+        synthesize_speech = staticmethod(lambda **kwargs: SimpleNamespace(audio_content=b"wav"))
+
+    monkeypatch.setattr(agent, "_google_cloud_tts_module", lambda: _TextToSpeech)
+    monkeypatch.setattr(agent, "_google_cloud_tts_client", lambda api_key=None: _Client())
+
+    agent._synthesize_google_cloud_text_sync("Hello", "en-US-Neural2-F")
+
+    assert "model_name" not in captured
 
 
 def test_google_cloud_api_speak_exposes_provider_error(monkeypatch):
