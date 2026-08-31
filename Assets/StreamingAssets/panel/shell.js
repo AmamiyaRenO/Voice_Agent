@@ -168,6 +168,9 @@
     if (asr && asr.assistant_speaking) return { label: "Speaking", className: "speaking" };
     const mode = String(asr && (asr.mode || asr.streaming_backend) || "").toLowerCase();
     if (asr && asr.listening && asr.live_capture_enabled === false && mode !== "live-captions") return { label: "Mic Offline", className: "offline" };
+    if (asr && asr.listening && mode === "gemini-live" && asr.gemini_live_connected === false) {
+      return asr.last_error ? { label: "Gemini Offline", className: "offline" } : { label: "Gemini Connecting", className: "paused" };
+    }
     if (asr && asr.listening) return { label: "Listening", className: "listening" };
     return { label: "Paused", className: "paused" };
   }
@@ -187,10 +190,11 @@
     }
     const mode = asr && (asr.mode || asr.streaming_backend);
     const runtime = document.getElementById("runtime-label");
-    if (runtime) runtime.textContent = healthy ? `Runtime online${mode ? ` / ${mode}` : ""}` : "Runtime offline";
+    if (runtime) runtime.textContent = healthy ? `Runtime online${mode ? ` / ${mode}` : ""}${mode === "gemini-live" ? asr && asr.gemini_live_connected ? " / connected" : " / not connected" : ""}` : "Runtime offline";
     const provider = asr && (asr.tts_backend || asr.streaming_backend || asr.mode);
     const badge = document.getElementById("provider-badge");
-    if (badge) { badge.textContent = provider || "Provider"; badge.className = `status-badge ${healthy ? "ok" : "error"}`; }
+    const providerReady = healthy && !(mode === "gemini-live" && asr && asr.gemini_live_connected === false);
+    if (badge) { badge.textContent = provider || "Provider"; badge.className = `status-badge ${providerReady ? "ok" : "error"}`; }
     const dbfs = Number(asr && asr.input_level_dbfs);
     const level = Number.isFinite(dbfs) ? Math.max(0, Math.min(100, ((dbfs + 72) / 66) * 100)) : 0;
     const micMeter = document.getElementById("microphone-meter");
@@ -198,7 +202,8 @@
     const mic = document.getElementById("microphone-value");
     if (mic) {
       mic.textContent = !healthy ? "Unavailable" : asr && asr.input_device_name ? asr.input_device_name : asr && asr.listening ? "Listening" : "Paused";
-      mic.title = Number.isFinite(dbfs) ? `${dbfs.toFixed(1)} dBFS` : "Input level unavailable";
+      const connection = mode === "gemini-live" ? asr && asr.gemini_live_connected ? "; Gemini connected" : "; Gemini not connected" : "";
+      mic.title = Number.isFinite(dbfs) ? `${dbfs.toFixed(1)} dBFS${connection}` : `Input level unavailable${connection}`;
     }
     const speaking = Boolean(asr && asr.assistant_speaking);
     const voice = document.getElementById("voice-value");

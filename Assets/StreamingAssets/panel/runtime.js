@@ -25,7 +25,8 @@
     select.value = configured || "";
     const mode = String(asr && asr.mode || "");
     const error = mode === "live-captions" ? String(asr && (asr.live_captions_error || (!asr.live_captions_available ? "Live Captions listener is not installed." : "")) || "") : String(asr && asr.last_error || "");
-    $("microphone-detail").textContent = error || (asr && asr.input_device_name ? `Active: ${asr.input_device_name}; level ${Number(asr.input_level_dbfs || -96).toFixed(1)} dBFS` : mode === "live-captions" ? "Windows Captions supplies transcripts through the external listener." : "Choose the microphone Rachel should capture.");
+    const geminiState = mode === "gemini-live" ? asr && asr.gemini_live_connected ? " Gemini Live connected." : " Gemini Live is not connected." : "";
+    $("microphone-detail").textContent = error || (asr && asr.input_device_name ? `Active: ${asr.input_device_name}; level ${Number(asr.input_level_dbfs || -96).toFixed(1)} dBFS.${geminiState}` : mode === "live-captions" ? "Windows Captions supplies transcripts through the external listener." : `Choose the microphone Rachel should capture.${geminiState}`);
   }
 
   function recognitionProvider(data) {

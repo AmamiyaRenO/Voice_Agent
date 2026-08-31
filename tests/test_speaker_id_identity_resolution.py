@@ -2469,6 +2469,42 @@ def test_desktop_audio_agent_resolve_preferred_input_device_prefers_windows_wasa
     assert source == "windows_default_wasapi"
 
 
+def test_desktop_audio_agent_missing_preferred_input_falls_back_to_windows_default(monkeypatch: pytest.MonkeyPatch):
+    if str(PYTHON_VOICE_DIR) not in sys.path:
+        sys.path.insert(0, str(PYTHON_VOICE_DIR))
+
+    audio_agent_module = _load_module(
+        "desktop_audio_agent_stale_preferred_input_module",
+        PYTHON_VOICE_DIR / "desktop_audio_agent.py",
+    )
+    agent = audio_agent_module.DesktopAudioAgent.__new__(audio_agent_module.DesktopAudioAgent)
+    agent.preferred_input_device_name = "Microphone from another computer"
+    agent.preferred_input_device_index = ""
+
+    hostapis = [
+        {"name": "MME", "default_input_device": 0},
+        {"name": "Windows WASAPI", "default_input_device": 1},
+    ]
+    devices = [
+        {"name": "Laptop Mic", "hostapi": 0, "max_input_channels": 1},
+        {"name": "Logitech C920", "hostapi": 1, "max_input_channels": 1},
+    ]
+    fake_sd = SimpleNamespace(
+        query_devices=lambda index=None: devices[index] if index is not None else devices,
+        query_hostapis=lambda index=None: hostapis[index] if index is not None else hostapis,
+        default=SimpleNamespace(device=(0, 2)),
+    )
+    monkeypatch.setattr(audio_agent_module, "sd", fake_sd)
+    monkeypatch.setattr(audio_agent_module.os, "name", "nt", raising=False)
+
+    index, name, hostapi, source = agent._resolve_preferred_input_device()
+
+    assert index == 1
+    assert name == "Logitech C920"
+    assert hostapi == "Windows WASAPI"
+    assert source == "windows_default_wasapi"
+
+
 def test_desktop_audio_agent_preferred_input_stream_config_uses_device_sample_rate(monkeypatch: pytest.MonkeyPatch):
     if str(PYTHON_VOICE_DIR) not in sys.path:
         sys.path.insert(0, str(PYTHON_VOICE_DIR))

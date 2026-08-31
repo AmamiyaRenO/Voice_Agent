@@ -1606,6 +1606,9 @@ class AudioAgentStatus:
     command_asr_status: str = ""
     gemini_live_command_tools_enabled: bool = False
     gemini_live_local_knowledge_enabled: bool = False
+    gemini_live_connected: bool = False
+    gemini_live_session_active: bool = False
+    gemini_live_audio_queue_depth: int = 0
     current_partial: str = ""
     stable_partial: str = ""
     final_transcript: str = ""
@@ -2272,6 +2275,8 @@ class DesktopAudioAgent:
                     name_rank = 1
                 elif normalized_name in env_name:
                     name_rank = 2
+                if name_rank == 99:
+                    continue
                 hostapi_name = self._sounddevice_hostapi_name(device_info.get("hostapi"))
                 api_rank = 0 if "wasapi" in hostapi_name.casefold() else 1
                 rank = (name_rank * 10) + api_rank
@@ -4077,6 +4082,16 @@ class DesktopAudioAgent:
             gemini_live_local_knowledge_enabled=bool(
                 self.gemini_live_local_knowledge_enabled
                 and self.current_asr_mode == STREAMING_ASR_MODE_GEMINI_LIVE
+            ),
+            gemini_live_connected=bool(self._gemini_live_connected),
+            gemini_live_session_active=bool(
+                self._gemini_live_session_task is not None
+                and not self._gemini_live_session_task.done()
+            ),
+            gemini_live_audio_queue_depth=(
+                int(self._gemini_live_send_queue.qsize())
+                if self._gemini_live_send_queue is not None
+                else 0
             ),
             current_partial=self._last_partial_text,
             stable_partial=self._last_stable_partial_text,

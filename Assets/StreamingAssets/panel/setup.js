@@ -15,6 +15,7 @@
     if (mode === "live-captions" && !asr.live_captions_available) return asr.live_captions_error || "Live Captions listener is not installed. Choose Gemini Live or install EnableLcMic.exe.";
     if (mode !== "live-captions" && !asr.sounddevice_available) return "Python sounddevice is not installed.";
     if (mode !== "live-captions" && !asr.live_capture_enabled) return asr.last_error || "The selected microphone could not be opened.";
+    if (mode === "gemini-live" && !asr.gemini_live_connected) return asr.last_error || "Gemini Live is connecting or unavailable. Check the Gemini key, model and network connection.";
     return "";
   }
 
