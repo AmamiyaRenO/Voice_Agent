@@ -15,6 +15,19 @@
   };
   let latestAsr = null;
 
+  function loadMicrophones(asr, configured) {
+    const select = $("microphone-input");
+    const devices = Array.isArray(asr && asr.input_devices) ? asr.input_devices : [];
+    const names = new Set(devices.map((device) => String(device.name || "")).filter(Boolean));
+    const options = [{ value: "", label: "Windows default microphone" }].concat(devices.map((device) => ({ value: String(device.name || ""), label: `${device.name || "Input"}${device.hostapi ? ` (${device.hostapi})` : ""}` })));
+    if (configured && !names.has(configured)) options.push({ value: configured, label: `${configured} (not currently detected)` });
+    select.innerHTML = options.map((option) => `<option value="${ui.escapeHtml(option.value)}">${ui.escapeHtml(option.label)}</option>`).join("");
+    select.value = configured || "";
+    const mode = String(asr && asr.mode || "");
+    const error = mode === "live-captions" ? String(asr && (asr.live_captions_error || (!asr.live_captions_available ? "Live Captions listener is not installed." : "")) || "") : String(asr && asr.last_error || "");
+    $("microphone-detail").textContent = error || (asr && asr.input_device_name ? `Active: ${asr.input_device_name}; level ${Number(asr.input_level_dbfs || -96).toFixed(1)} dBFS` : mode === "live-captions" ? "Windows Captions supplies transcripts through the external listener." : "Choose the microphone Rachel should capture.");
+  }
+
   function recognitionProvider(data) {
     const values = [data.local_streaming_asr_mode, data.cloud_streaming_asr_mode];
     if (values.includes("gemini-live") || data.cloud_response_provider === "gemini" && data.conversation_profile === "cloud") return "gemini-live";
@@ -37,6 +50,7 @@
     $("voice-id-switch").checked = Boolean(data.speaker_id_enabled && data.speaker_auto_learning_enabled);
     $("privacy-status").textContent = $("voice-id-switch").checked ? "On: voice matching and automatic learning are enabled." : "Off: voice matching and automatic learning are disabled.";
     $("runtime-path").textContent = `Config: ${data.path || "unknown"}`;
+    loadMicrophones(latestAsr || {}, data.input_device_name || "");
   }
 
   async function loadPrompt() {
@@ -50,7 +64,8 @@
 
   async function loadConfig(showFeedback) {
     try {
-      const data = await ui.api("/api/runtime/config");
+      const [data, asr] = await Promise.all([ui.api("/api/runtime/config"), ui.api("/api/asr")]);
+      latestAsr = asr;
       applyConfig(data);
       await loadPrompt();
       $("runtime-status").textContent = data.message || "Configuration loaded.";
@@ -66,6 +81,7 @@
     payload.use_llm_intent_classifier = $("llm-intent").checked;
     payload.speaker_id_enabled = $("voice-id-switch").checked;
     payload.speaker_auto_learning_enabled = $("voice-id-switch").checked;
+    payload.input_device_name = $("microphone-input").value;
     return Object.assign(payload, recognitionPayload($("recognition-provider").value));
   }
 

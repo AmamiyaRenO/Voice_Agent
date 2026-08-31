@@ -9,10 +9,22 @@
   function setBadge(id, label, kind) { const element = $(id); element.textContent = label; element.className = `status-badge ${kind || ""}`; }
   function setStep(id, done) { $(id).classList.toggle("done", Boolean(done)); }
 
+  function recognitionProblem() {
+    const mode = $("setup-asr-mode").value || String(asr && asr.mode || "");
+    if (!asr) return "Speech runtime is unavailable.";
+    if (mode === "live-captions" && !asr.live_captions_available) return asr.live_captions_error || "Live Captions listener is not installed. Choose Gemini Live or install EnableLcMic.exe.";
+    if (mode !== "live-captions" && !asr.sounddevice_available) return "Python sounddevice is not installed.";
+    if (mode !== "live-captions" && !asr.live_capture_enabled) return asr.last_error || "The selected microphone could not be opened.";
+    return "";
+  }
+
   function renderReadiness() {
     const piperReady = Boolean(prereq && prereq.piper_ready);
     const ollamaReady = Boolean(prereq && prereq.ollama_running && prereq.ollama_model_available);
-    const recognitionReady = Boolean(asr && asr.status === "ok");
+    const problem = recognitionProblem();
+    const recognitionReady = Boolean(asr && asr.status === "ok" && !problem);
+    $("setup-microphone-status").textContent = problem || `Active input: ${asr.input_device_name || "Windows default"}; level ${Number(asr.input_level_dbfs || -96).toFixed(1)} dBFS.`;
+    $("setup-microphone-status").className = `notice full${problem ? " error" : ""}`;
     $("piper-status").textContent = piperReady ? "Ready" : "Needs setup";
     $("piper-model-path").value = String(prereq && prereq.piper_model_path || "");
     $("ollama-status").textContent = prereq && prereq.ollama_running ? "Running" : prereq && prereq.ollama_installed ? "Installed" : "Not installed";
@@ -36,6 +48,11 @@
     $("setup-asr-mode").innerHTML = modes.map((mode) => `<option value="${ui.escapeHtml(mode)}">${ui.escapeHtml(mode)}</option>`).join("");
     $("setup-asr-mode").value = asr.mode || modes[0] || "api";
     $("setup-listening").checked = Boolean(asr.listening);
+    const devices = Array.isArray(asr.input_devices) ? asr.input_devices : [];
+    const configuredInput = String(runtime.input_device_name || "");
+    $("setup-microphone").innerHTML = `<option value="">Windows default microphone</option>` + devices.map((device) => `<option value="${ui.escapeHtml(device.name || "")}">${ui.escapeHtml(device.name || "Input")}${device.hostapi ? ` (${ui.escapeHtml(device.hostapi)})` : ""}</option>`).join("");
+    if (configuredInput && !devices.some((device) => String(device.name || "") === configuredInput)) $("setup-microphone").insertAdjacentHTML("beforeend", `<option value="${ui.escapeHtml(configuredInput)}">${ui.escapeHtml(configuredInput)} (not currently detected)</option>`);
+    $("setup-microphone").value = configuredInput;
     $("setup-openai-key").value = runtime.openai_api_key || "";
     $("setup-openai-model").value = runtime.openai_transcribe_model || "";
     $("setup-openai-url").value = runtime.openai_base_url || "";
@@ -80,7 +97,7 @@
     try {
       await ui.api("/api/runtime/config", { method: "POST", body: {
         openai_api_key: $("setup-openai-key").value.trim(), openai_transcribe_model: $("setup-openai-model").value.trim(), openai_base_url: $("setup-openai-url").value.trim(), openai_transcribe_prompt: $("setup-openai-prompt").value.trim(),
-        ollama_model: $("ollama-model").value.trim(), launch_triggers: $("setup-launch-triggers").value.trim(), exit_keywords: $("setup-exit-keywords").value.trim(),
+        ollama_model: $("ollama-model").value.trim(), input_device_name: $("setup-microphone").value, launch_triggers: $("setup-launch-triggers").value.trim(), exit_keywords: $("setup-exit-keywords").value.trim(),
         use_llm_intent_classifier: $("setup-llm-intent").checked, use_moonshine_intent_recognizer: $("setup-moonshine-intent").checked,
         intent_manifest_path: $("setup-intent-manifest").value.trim(), game_manifest_path: $("setup-game-manifest").value.trim()
       } });
@@ -100,6 +117,7 @@
   $("pull-model").addEventListener("click", () => ollamaAction("pull_model"));
   $("open-ollama").addEventListener("click", () => ollamaAction("open_download"));
   $("setup-asr-mode").addEventListener("change", () => { setBadge("cloud-status", $("setup-asr-mode").value === "api" ? ($("setup-openai-key").value ? "Configured" : "Required") : "Optional", $("setup-asr-mode").value === "api" ? ($("setup-openai-key").value ? "ok" : "warn") : ""); renderReadiness(); });
+  $("setup-microphone").addEventListener("change", renderReadiness);
   $("setup-openai-key").addEventListener("input", renderReadiness);
   $("setup-form").addEventListener("submit", save);
   reload(false);

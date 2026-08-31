@@ -170,3 +170,41 @@ def test_manifest_status_reports_launch_readiness_and_path_error(tmp_path: Path)
     assert ready["path_error"] == ""
     assert missing["launch_ready"] is False
     assert "Executable not found" in missing["path_error"]
+
+
+def test_manifest_status_validates_unity_data_folder_and_effective_workdir(tmp_path: Path):
+    runtime = _runtime_module()
+    executable = tmp_path / "Story Game.exe"
+    executable.write_bytes(b"")
+    (tmp_path / "UnityPlayer.dll").write_bytes(b"")
+    manifest = tmp_path / "games.json"
+    escaped_executable = str(executable).replace(chr(92), chr(92) * 2)
+    manifest.write_text(
+        f'{{"games": [{{"id": "story", "exec": "{escaped_executable}", "workdir": ""}}]}}',
+        encoding="utf-8",
+    )
+
+    missing = runtime._manifest_status_payload(manifest)["games"][0]
+    assert missing["launch_ready"] is False
+    assert "Story Game_Data" in missing["path_error"]
+    assert missing["effective_workdir"] == str(tmp_path)
+
+    (tmp_path / "Story Game_Data").mkdir()
+    ready = runtime._manifest_status_payload(manifest)["games"][0]
+    assert ready["launch_ready"] is True
+    assert ready["path_error"] == ""
+    assert ready["unity_data_path"] == str(tmp_path / "Story Game_Data")
+
+
+def test_runtime_payload_can_clear_a_previously_selected_microphone(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    runtime = _runtime_module()
+    monkeypatch.setenv("VOICE_AGENT_INPUT_DEVICE_NAME", "Old microphone")
+
+    payload = runtime._build_runtime_payload(
+        {"env": {"VOICE_AGENT_INPUT_DEVICE_NAME": ""}},
+        user_path=tmp_path / "user.json",
+        default_path=tmp_path / "default.json",
+        message="test",
+    )
+
+    assert payload["input_device_name"] == ""

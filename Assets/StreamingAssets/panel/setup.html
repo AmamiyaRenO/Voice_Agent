@@ -5,7 +5,7 @@
   <title>Setup | Rachel Console</title>
   <script src="/panel-assets/theme.js?v=2"></script>
   <link rel="stylesheet" href="/panel-assets/app.css?v=4">
-  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=4"></script><script defer src="/panel-assets/setup.js"></script>
+  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=4"></script><script defer src="/panel-assets/setup.js?v=2"></script>
 </head>
 <body data-page="setup">
   <section data-page-content>
@@ -37,7 +37,7 @@
       <section class="step" id="step-recognition">
         <div class="step-number">2</div><div class="step-content">
           <div class="panel-head"><div><h2>Speech recognition</h2><p class="panel-note">Select the active ASR mode and initial listening state.</p></div><span class="status-badge" id="recognition-status">Checking</span></div>
-          <div class="form-grid"><div class="field"><label for="setup-asr-mode">ASR mode</label><select id="setup-asr-mode"></select></div><label class="toggle"><input id="setup-listening" type="checkbox"><span>Enable microphone listening after setup</span></label></div>
+          <div class="form-grid"><div class="field"><label for="setup-asr-mode">ASR mode</label><select id="setup-asr-mode"></select></div><div class="field"><label for="setup-microphone">Microphone input</label><select id="setup-microphone"><option value="">Windows default microphone</option></select></div><label class="toggle"><input id="setup-listening" type="checkbox"><span>Enable microphone listening after setup</span></label><div class="notice full" id="setup-microphone-status">Checking microphone capture.</div></div>
         </div>
       </section>
 

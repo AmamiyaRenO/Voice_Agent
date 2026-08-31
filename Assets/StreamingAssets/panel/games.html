@@ -5,7 +5,7 @@
   <title>Game Library | Rachel Console</title>
   <script src="/panel-assets/theme.js?v=2"></script>
   <link rel="stylesheet" href="/panel-assets/app.css?v=2">
-  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=2"></script><script defer src="/panel-assets/activities.js?v=2"></script>
+  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=2"></script><script defer src="/panel-assets/activities.js?v=3"></script>
 </head>
 <body data-page="activities">
   <section data-page-content>
@@ -30,7 +30,7 @@
           <div class="field"><label for="activity-tags">Tags</label><input id="activity-tags" placeholder="casual, throwing"></div>
           <div class="field"><label for="activity-weight">Recommendation weight</label><input id="activity-weight" type="number" min="0" step="0.05" value="0.5"></div>
           <div class="field full"><label for="activity-exec">Executable path</label><div class="pathRow"><input id="activity-exec" placeholder="D:\Games\DiscGolf\DiscGolf.exe"><button class="secondary" id="browse-exec" type="button"><i data-lucide="folder-open"></i>Browse</button></div></div>
-          <div class="field full"><label for="activity-workdir">Working directory</label><input id="activity-workdir" placeholder="D:\Games\DiscGolf"></div>
+          <div class="field full"><label for="activity-workdir">Working directory <span class="muted">(optional)</span></label><input id="activity-workdir" placeholder="Leave blank to use the executable folder"><small>Use Extract All first; do not browse to an executable inside a ZIP. Unity's matching &lt;GameName&gt;_Data folder and UnityPlayer.dll must stay beside the selected executable.</small></div>
         </div>
         <div class="notice" id="activity-status">Save writes these changes to the local manifest.</div>
         <div class="toolbar"><button class="primary" id="save-activities" type="button"><i data-lucide="save"></i>Save</button><button class="secondary" id="import-qmd" type="button"><i data-lucide="file-down"></i>Import QMD</button><button class="secondary" id="export-qmd" type="button"><i data-lucide="file-up"></i>Export QMD</button><button class="danger" id="delete-activity" type="button"><i data-lucide="trash-2"></i>Delete</button></div>

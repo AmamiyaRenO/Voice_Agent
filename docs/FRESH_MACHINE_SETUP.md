@@ -58,13 +58,15 @@ Choose one option explicitly in **Settings > Advanced Configuration**:
 1. Select the cloud/Gemini conversation profile.
 2. Select Gemini Live as the streaming recognition mode.
 3. Enter the Gemini API key in Credentials and save.
-4. Restart `helper.bat` if the page says the managed services need a restart.
+4. Select the intended microphone (for example, `Logitech C920`) instead of relying on the Windows default, then confirm the input level changes while speaking.
+5. Restart `helper.bat` if the page says the managed services need a restart.
 
 **Option B: Windows Live Captions**
 
 This requires the separate `EnableLcMic.exe` listener; its source/build is not included in this repository. Set `LIVE_CAPTIONS_LISTENER_EXE` to the full path of that executable, enable Windows Live Captions with microphone audio (`Win + Ctrl + L`), and restart the services. See [LIVE_CAPTIONS_BRIDGE.md](LIVE_CAPTIONS_BRIDGE.md).
 
 If the listener executable has not been supplied, use Gemini Live instead. Do not leave the default on Live Captions and expect microphone input to appear without the listener.
+The Rachel microphone selector applies to direct API/Gemini capture, not to Live Captions; choose the microphone in Windows when using Live Captions. A working camera preview only verifies the video path and does not verify speech input.
 
 ### 2.4 Configure speech output
 
@@ -199,7 +201,7 @@ Success means the Pi terminal sees the command and the Rachel display changes ex
 ## 6. Optional Unity or Game Setup
 
 - For the Unity shell/package, keep `enableEmbeddedHttpServer` disabled and point the client at `127.0.0.1:8787`.
-- Add games through **Game Library**. Select the built `.exe`; the accompanying Unity `<GameName>_Data` folder must remain beside it.
+- Add games through **Game Library**. Use **Extract All** on the complete game ZIP first, then select the built `.exe` from the extracted folder. Never select or run the executable while browsing inside a ZIP. The accompanying Unity `<GameName>_Data` folder and `UnityPlayer.dll` must remain beside it.
 - The game Working directory may be left blank. Rachel will use the executable's folder automatically.
 
 ## 7. What to Send Back When Setup Fails

@@ -1664,6 +1664,8 @@ class DesktopAudioAgent:
         self.capture_sample_rate = DEFAULT_CAPTURE_SAMPLE_RATE
         self.output_sample_rate = DEFAULT_OUTPUT_SAMPLE_RATE
         self.input_blocksize = DEFAULT_INPUT_BLOCKSIZE
+        self.preferred_input_device_name = _env("VOICE_AGENT_INPUT_DEVICE_NAME", DEFAULT_INPUT_DEVICE_NAME)
+        self.preferred_input_device_index = _env("VOICE_AGENT_INPUT_DEVICE_INDEX", DEFAULT_INPUT_DEVICE_INDEX)
         self.pipeline_mode = _normalize_pipeline_mode(_env("VOICE_PIPELINE_MODE", PIPELINE_MODE_DIRECT_UNIFIED))
         self.profile = _normalize_profile(_env("VOICE_CONVERSATION_PROFILE", CONVERSATION_PROFILE_LOCAL))
         self.cloud_response_provider = _normalize_cloud_response_provider(
@@ -2234,7 +2236,7 @@ class DesktopAudioAgent:
     def _resolve_preferred_input_device(self) -> Tuple[int, str, str, str]:
         if sd is None:
             return -1, "", "", ""
-        env_index_raw = str(DEFAULT_INPUT_DEVICE_INDEX or "").strip()
+        env_index_raw = str(getattr(self, "preferred_input_device_index", DEFAULT_INPUT_DEVICE_INDEX) or "").strip()
         if env_index_raw:
             try:
                 env_index = int(env_index_raw)
@@ -2245,13 +2247,15 @@ class DesktopAudioAgent:
                 if resolved_index >= 0:
                     return resolved_index, name, hostapi, "env_index"
 
-        env_name = self._normalize_audio_device_name(DEFAULT_INPUT_DEVICE_NAME)
+        env_name = self._normalize_audio_device_name(
+            getattr(self, "preferred_input_device_name", DEFAULT_INPUT_DEVICE_NAME)
+        )
         if env_name:
             try:
                 devices = list(sd.query_devices() or [])
             except Exception:
                 devices = []
-            best_match: Tuple[int, str, str, int] = (-1, "", "", 99)
+            best_match: Tuple[int, str, str, int] = (-1, "", "", 999)
             for index, device_info in enumerate(devices):
                 if not isinstance(device_info, dict):
                     continue
@@ -2261,16 +2265,19 @@ class DesktopAudioAgent:
                 normalized_name = self._normalize_audio_device_name(device_name)
                 if not normalized_name:
                     continue
-                rank = 99
+                name_rank = 99
                 if normalized_name == env_name:
-                    rank = 0
+                    name_rank = 0
                 elif env_name in normalized_name:
-                    rank = 1
+                    name_rank = 1
                 elif normalized_name in env_name:
-                    rank = 2
+                    name_rank = 2
+                hostapi_name = self._sounddevice_hostapi_name(device_info.get("hostapi"))
+                api_rank = 0 if "wasapi" in hostapi_name.casefold() else 1
+                rank = (name_rank * 10) + api_rank
                 if rank >= best_match[3]:
                     continue
-                best_match = (index, device_name, self._sounddevice_hostapi_name(device_info.get("hostapi")), rank)
+                best_match = (index, device_name, hostapi_name, rank)
             if best_match[0] >= 0:
                 return best_match[0], best_match[1], best_match[2], "env_name"
 
@@ -2303,6 +2310,31 @@ class DesktopAudioAgent:
         except Exception:
             pass
         return -1, "", "", ""
+
+    def input_device_options(self) -> List[Dict[str, Any]]:
+        if sd is None:
+            return []
+        try:
+            devices = list(sd.query_devices() or [])
+        except Exception:
+            return []
+        choices: Dict[str, Dict[str, Any]] = {}
+        for index, device_info in enumerate(devices):
+            if not isinstance(device_info, dict) or int(device_info.get("max_input_channels") or 0) <= 0:
+                continue
+            name = str(device_info.get("name") or f"Input {index}")
+            hostapi = self._sounddevice_hostapi_name(device_info.get("hostapi"))
+            option = {
+                "index": index,
+                "name": name,
+                "hostapi": hostapi,
+                "sample_rate": float(device_info.get("default_samplerate") or 0.0),
+            }
+            key = self._normalize_audio_device_name(name)
+            current = choices.get(key)
+            if current is None or ("wasapi" in hostapi.casefold() and "wasapi" not in str(current.get("hostapi") or "").casefold()):
+                choices[key] = option
+        return sorted(choices.values(), key=lambda item: str(item.get("name") or "").casefold())
 
     def _input_device_details(self) -> Tuple[int, str, str, str]:
         if sd is None:
@@ -2615,6 +2647,8 @@ class DesktopAudioAgent:
         self.command_asr_provider = _normalize_command_asr_provider(
             _env("VOICE_COMMAND_ASR_PROVIDER", self.command_asr_provider or DEFAULT_COMMAND_ASR_PROVIDER)
         )
+        self.preferred_input_device_name = _env("VOICE_AGENT_INPUT_DEVICE_NAME", "")
+        self.preferred_input_device_index = _env("VOICE_AGENT_INPUT_DEVICE_INDEX", "")
         self._speaker_id.reload_from_env(memory_path=_env("DIALOG_USER_MEMORY_PATH", ""))
 
     def _close_gemini_live_output(self, *, clear_player: bool) -> None:

@@ -529,6 +529,11 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
     openai_transcribe_prompt = str(openai_obj.get("transcribe_prompt") or _env("OPENAI_TRANSCRIBE_PROMPT", "")).strip()
     gemini_api_key = str(gemini_obj.get("api_key") or _gemini_api_key_from_env()).strip()
     google_cloud_tts_api_key = str(env_obj.get("GOOGLE_CLOUD_TTS_API_KEY") or _env("GOOGLE_CLOUD_TTS_API_KEY", "")).strip()
+    input_device_name = str(
+        env_obj["VOICE_AGENT_INPUT_DEVICE_NAME"]
+        if "VOICE_AGENT_INPUT_DEVICE_NAME" in env_obj
+        else _env("VOICE_AGENT_INPUT_DEVICE_NAME", "")
+    ).strip()
     gemini_live_model = str(
         env_obj.get("GEMINI_LIVE_MODEL")
         or DEFAULT_GEMINI_LIVE_MODEL
@@ -570,6 +575,7 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
         "gemini_api_key_set": bool(gemini_api_key),
         "google_cloud_tts_api_key": google_cloud_tts_api_key,
         "google_cloud_tts_api_key_set": bool(google_cloud_tts_api_key),
+        "input_device_name": input_device_name,
         "gemini_live_model": gemini_live_model,
         "gemini_response_model": gemini_response_model,
         "gemini_live_voice": gemini_live_voice,
@@ -615,6 +621,34 @@ def _save_game_manifest(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _unity_data_folder_status(executable: str) -> Tuple[str, str]:
+    """Return the expected Unity data directory and an actionable mismatch error."""
+    raw = str(executable or "").strip()
+    if not raw or all(marker not in raw for marker in ("\\", "/", ":")):
+        return "", ""
+    executable_path = Path(raw)
+    if executable_path.suffix.lower() != ".exe" or not executable_path.is_file():
+        return "", ""
+    expected = executable_path.with_name(f"{executable_path.stem}_Data")
+    if expected.is_dir():
+        return str(expected), ""
+    try:
+        discovered = sorted(
+            (child for child in executable_path.parent.iterdir() if child.is_dir() and child.name.lower().endswith("_data")),
+            key=lambda child: child.name.casefold(),
+        )
+    except OSError:
+        discovered = []
+    looks_like_unity = (executable_path.parent / "UnityPlayer.dll").is_file() or bool(discovered)
+    if not looks_like_unity:
+        return "", ""
+    detail = f"Unity data folder missing: {expected}"
+    if discovered:
+        detail += "; found instead: " + ", ".join(str(path) for path in discovered)
+    detail += ". Select the matching game executable and keep the .exe, UnityPlayer.dll, and <GameName>_Data folder together."
+    return str(expected), detail
+
+
 def _manifest_status_payload(path: Path) -> Dict[str, Any]:
     root = _load_game_manifest(path)
     games_out: List[Dict[str, Any]] = []
@@ -633,14 +667,20 @@ def _manifest_status_payload(path: Path) -> Dict[str, Any]:
             if any(marker in expanded_exec for marker in ("\\", "/", ":"))
             else bool(shutil.which(expanded_exec))
         )
-        workdir_exists = not expanded_workdir or Path(expanded_workdir).is_dir()
+        effective_workdir = expanded_workdir
+        if not effective_workdir and executable_exists and any(marker in expanded_exec for marker in ("\\", "/", ":")):
+            effective_workdir = str(Path(expanded_exec).parent)
+        workdir_exists = not effective_workdir or Path(effective_workdir).is_dir()
+        unity_data_path, unity_data_error = _unity_data_folder_status(expanded_exec if executable_exists else "")
         path_errors: List[str] = []
         if not expanded_exec:
             path_errors.append("Executable path is not configured")
         elif not executable_exists:
             path_errors.append(f"Executable not found: {exec_path}")
-        if expanded_workdir and not workdir_exists:
+        if effective_workdir and not workdir_exists:
             path_errors.append(f"Working directory not found: {workdir}")
+        if unity_data_error:
+            path_errors.append(unity_data_error)
         if path_errors:
             unresolved += len(path_errors)
         games_out.append(
@@ -650,7 +690,9 @@ def _manifest_status_payload(path: Path) -> Dict[str, Any]:
                 "keywords": [str(value).strip() for value in item.get("synonyms", []) or [] if str(value).strip()],
                 "exec": exec_path,
                 "workdir": workdir,
-                "launch_ready": bool(executable_exists and workdir_exists),
+                "effective_workdir": effective_workdir,
+                "unity_data_path": unity_data_path,
+                "launch_ready": bool(executable_exists and workdir_exists and not unity_data_error),
                 "path_error": "; ".join(path_errors),
                 "description": str(item.get("description") or "").strip(),
                 "how_to_play": str(item.get("how_to_play") or "").strip(),
@@ -1390,6 +1432,10 @@ async def _apply_runtime_live(merged: Dict[str, Any]) -> str:
     os.environ["VOICE_ASR_HOTWORD_STRATEGY"] = runtime["asr_hotword_strategy"]
     os.environ["VOICE_ASR_STABLE_PARTIAL_REPEATS"] = str(runtime["asr_stable_partial_repeats"])
     os.environ["VOICE_CLOUD_RESPONSE_PROVIDER"] = runtime["cloud_response_provider"]
+    if runtime["input_device_name"]:
+        os.environ["VOICE_AGENT_INPUT_DEVICE_NAME"] = runtime["input_device_name"]
+    else:
+        os.environ.pop("VOICE_AGENT_INPUT_DEVICE_NAME", None)
     os.environ["VOICE_AGENT_TTS_BACKEND"] = runtime["tts_backend"]
     os.environ["KOKORO_TTS_VOICE"] = runtime["kokoro_voice"]
     os.environ["KOKORO_TTS_LANG_CODE"] = runtime["kokoro_lang_code"]
@@ -1768,11 +1814,13 @@ async def _build_asr_status_payload() -> Dict[str, Any]:
         "active_user_id": str(getattr(status, "active_user_id", "") or ""),
         "last_speaker_match": dict(getattr(status, "last_speaker_match", {}) or {}),
         "live_capture_enabled": bool(getattr(status, "live_capture_enabled", False)),
+        "sounddevice_available": bool(getattr(status, "sounddevice_available", False)),
         "input_device_index": int(getattr(status, "input_device_index", -1) or -1),
         "input_device_name": str(getattr(status, "input_device_name", "") or ""),
         "input_device_hostapi": str(getattr(status, "input_device_hostapi", "") or ""),
         "input_device_source": str(getattr(status, "input_device_source", "") or ""),
         "input_device_sample_rate": _safe_json_float(getattr(status, "input_device_sample_rate", 0.0), 0.0),
+        "input_devices": getattr(audio_agent, "input_device_options", lambda: [])(),
     }
     try:
         speaker_status = await audio_agent.speaker_profiles_status()
@@ -2018,6 +2066,8 @@ async def api_runtime_config_post(request: Request) -> Dict[str, Any]:
         gemini_obj["api_key"] = str(payload.get("gemini_api_key") or "").strip()
     if "google_cloud_tts_api_key" in payload:
         env_obj["GOOGLE_CLOUD_TTS_API_KEY"] = str(payload.get("google_cloud_tts_api_key") or "").strip()
+    if "input_device_name" in payload:
+        env_obj["VOICE_AGENT_INPUT_DEVICE_NAME"] = str(payload.get("input_device_name") or "").strip()
     if "ollama_model" in payload:
         env_obj["OLLAMA_MODEL"] = str(payload.get("ollama_model") or "").strip()
     if "conversation_pipeline_mode" in payload:

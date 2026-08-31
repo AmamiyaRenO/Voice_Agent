@@ -84,6 +84,31 @@ def _expand(value: str) -> str:
     return expanded
 
 
+def _unity_data_folder_error(executable: str) -> str:
+    raw = _expand(executable)
+    if not raw or all(marker not in raw for marker in ("\\", "/", ":")):
+        return ""
+    executable_path = Path(raw)
+    if executable_path.suffix.lower() != ".exe" or not executable_path.is_file():
+        return ""
+    expected = executable_path.with_name(f"{executable_path.stem}_Data")
+    if expected.is_dir():
+        return ""
+    try:
+        discovered = sorted(
+            (child for child in executable_path.parent.iterdir() if child.is_dir() and child.name.lower().endswith("_data")),
+            key=lambda child: child.name.casefold(),
+        )
+    except OSError:
+        discovered = []
+    if not (executable_path.parent / "UnityPlayer.dll").is_file() and not discovered:
+        return ""
+    detail = f"Unity data folder missing: {expected}"
+    if discovered:
+        detail += "; found instead: " + ", ".join(str(path) for path in discovered)
+    return detail
+
+
 def _apply_file_config(cfg: Config, cfg_path: Path) -> Config:
     data = load_yaml_file(cfg_path)
     mqtt_cfg = data.get("mqtt", {})
@@ -383,10 +408,17 @@ class GameLauncherService:
             self._publish_state("ERROR", detail, game_id=game.id)
             return
 
+        unity_data_error = _unity_data_folder_error(game.exec)
+        if unity_data_error:
+            detail = f"game '{game.id}' is not a complete Unity build: {unity_data_error}"
+            print(f"[launcher] {detail}")
+            self._publish_state("ERROR", detail, game_id=game.id)
+            return
+
         self._publish_state("STARTING", game_id=game.id)
         error = self.process.start(game, spec)
         if error is None:
-            print(f"[launcher] started {game.id}: {spec.display_command}")
+            print(f"[launcher] started {game.id}: {spec.display_command} (cwd={spec.cwd or '<inherit>'})")
             self._publish_state("RUNNING", game_id=game.id)
             return
 

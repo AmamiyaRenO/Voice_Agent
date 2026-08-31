@@ -15,7 +15,7 @@
     return Number.isFinite(count) && count > 0 ? { min: Math.trunc(count), max: Math.trunc(count) } : { min: 1, max: 4 };
   }
   function normalize(game) {
-    return { id: String(game.id || ""), name: String(game.name || ""), exec: String(game.exec || ""), workdir: String(game.workdir || ""), keywords_text: Array.isArray(game.keywords) ? game.keywords.join(", ") : String(game.keywords_text || ""), description: String(game.description || ""), how_to_play: String(game.how_to_play || ""), players_text: game.players_text || `${game.players_min || 1}-${game.players_max || 4}`, tags_text: Array.isArray(game.tags) ? game.tags.join(", ") : String(game.tags_text || ""), activity_level: String(game.activity_level || ""), recommendation_weight: String(game.recommendation_weight ?? "0.5"), launch_ready: game.launch_ready !== false && !game.path_error, path_error: String(game.path_error || "") };
+    return { id: String(game.id || ""), name: String(game.name || ""), exec: String(game.exec || ""), workdir: String(game.workdir || ""), effective_workdir: String(game.effective_workdir || ""), unity_data_path: String(game.unity_data_path || ""), keywords_text: Array.isArray(game.keywords) ? game.keywords.join(", ") : String(game.keywords_text || ""), description: String(game.description || ""), how_to_play: String(game.how_to_play || ""), players_text: game.players_text || `${game.players_min || 1}-${game.players_max || 4}`, tags_text: Array.isArray(game.tags) ? game.tags.join(", ") : String(game.tags_text || ""), activity_level: String(game.activity_level || ""), recommendation_weight: String(game.recommendation_weight ?? "0.5"), launch_ready: game.launch_ready !== false && !game.path_error, path_error: String(game.path_error || "") };
   }
   function filteredIndexes() {
     const query = $("activity-search").value.trim().toLowerCase();
@@ -40,6 +40,8 @@
     Object.entries(fields).forEach(([key, id]) => { $(id).value = game[key] ?? ""; });
     $("editor-title").textContent = game.name || "Untitled game";
     $("manifest-path").textContent = manifestPath ? `Manifest: ${manifestPath}` : "";
+    $("activity-status").textContent = game.path_error || (game.effective_workdir ? `Launch folder: ${game.effective_workdir}${game.unity_data_path ? ` | Unity data: ${game.unity_data_path}` : ""}` : "Save writes these changes to the local manifest.");
+    $("activity-status").className = `notice${game.path_error ? " error" : ""}`;
     document.body.classList.add("drawer-open"); renderList();
   }
   function closeEditor() { document.body.classList.remove("drawer-open"); }
