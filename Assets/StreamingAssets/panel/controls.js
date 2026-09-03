@@ -42,8 +42,24 @@
     return (payload && (payload.voices || payload.options || payload.available)) || voiceOptions.kokoroVoices || [];
   }
 
+  function setCommandBusy(control, busy) {
+    if (!control || !["SELECT", "INPUT", "TEXTAREA"].includes(control.tagName)) {
+      ui.setBusy(control, busy, "Sending...");
+      return;
+    }
+    if (busy) {
+      control.dataset.commandWasDisabled = String(Boolean(control.disabled));
+      control.disabled = true;
+      control.setAttribute("aria-busy", "true");
+      return;
+    }
+    control.disabled = control.dataset.commandWasDisabled === "true";
+    delete control.dataset.commandWasDisabled;
+    control.removeAttribute("aria-busy");
+  }
+
   async function sendCommand(endpoint, body, button, successMessage) {
-    ui.setBusy(button, true, "Sending...");
+    setCommandBusy(button, true);
     try {
       const payload = await ui.api(endpoint, { method: "POST", body });
       ui.toast(payload.message || successMessage || "Command sent", "success");
@@ -52,7 +68,7 @@
       ui.toast(`${successMessage || "Command"} failed: ${error.message}`, "error");
       return null;
     } finally {
-      ui.setBusy(button, false);
+      setCommandBusy(button, false);
     }
   }
 
@@ -155,11 +171,16 @@
     } else {
       selectOptions($("tts-voice"), voiceOptions.voices || [], voiceOptions.current);
     }
+    const note = $("voice-option-note");
+    const hiddenCount = Number(voiceOptions.googleCloudRestrictedVoiceCount || 0);
+    note.hidden = backend !== "google-cloud" || hiddenCount <= 0;
+    note.textContent = hiddenCount > 0 ? `${hiddenCount} additional Vertex voice${hiddenCount === 1 ? " is" : "s are"} hidden until lab credentials are available.` : "";
   }
 
   async function applyBackend() {
     const backend = $("tts-backend").value;
-    await sendCommand("/api/voice", { action: "set_backend", backend }, $("tts-backend"), "TTS backend updated");
+    const result = await sendCommand("/api/voice", { action: "set_backend", backend }, $("tts-backend"), "TTS backend updated");
+    if (result) voiceOptions.backendCurrent = backend;
     await refreshVoicesForBackend();
   }
 
@@ -167,7 +188,18 @@
     const backend = $("tts-backend").value;
     const voice = $("tts-voice").value;
     const action = backend === "kokoro" ? "set_kokoro_voice" : backend === "google-cloud" ? "set_google_cloud_voice" : "set";
-    if (voice) await sendCommand("/api/voice", { action, voice }, $("tts-voice"), "Voice updated");
+    if (!voice) return;
+    const result = await sendCommand("/api/voice", { action, voice }, $("tts-voice"), "Voice updated");
+    if (!result) return;
+    if (backend === "kokoro") voiceOptions.kokoroVoiceCurrent = voice;
+    else if (backend === "google-cloud") voiceOptions.googleCloudVoiceCurrent = voice;
+    else voiceOptions.current = voice;
+  }
+
+  async function applyModel(event) {
+    const model = event.target.value;
+    const result = await sendCommand("/api/voice", { action: "set_model", model }, event.target, "TTS model updated");
+    if (result) voiceOptions.modelCurrent = model;
   }
 
   async function speak() {
@@ -279,7 +311,7 @@
   $("refresh-controls").addEventListener("click", () => refreshVoices(true));
   $("tts-backend").addEventListener("change", applyBackend);
   $("tts-voice").addEventListener("change", applyVoice);
-  $("tts-model").addEventListener("change", (event) => sendCommand("/api/voice", { action: "set_model", model: event.target.value }, event.target, "TTS model updated"));
+  $("tts-model").addEventListener("change", applyModel);
   $("voice-volume").addEventListener("input", updateVolumeOutput);
   $("speak-now").addEventListener("click", speak);
   $("send-custom-face").addEventListener("click", () => sendFace(customFaceValue(), $("send-custom-face")));

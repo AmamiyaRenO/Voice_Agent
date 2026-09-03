@@ -185,6 +185,7 @@ flowchart LR
 
 1. Configure `scripts/local_services.user.json` if you need custom paths or models.
 2. Run `.\helper.bat` from the repo root.
+   On Windows, the helper opens `http://127.0.0.1:8787/index.html` after the health check succeeds. Set `VOICE_AGENT_OPEN_PANEL=0` before launching to suppress this behavior.
 3. Open `http://127.0.0.1:8787`.
 4. Use `/runtime` to switch `local` / `cloud`, ASR mode, and model/runtime settings.
 5. Use `/setup`, `/memory`, `/games`, and `/sdk` for first-run checks, memory inspection, manifest editing, and API testing.

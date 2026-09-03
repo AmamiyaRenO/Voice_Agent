@@ -6,7 +6,9 @@ set "PANEL_HEALTH_URL=http://127.0.0.1:8787/healthz"
 set "PANEL_URL=http://127.0.0.1:8787/index.html"
 
 echo [voice-agent] starting helper/services...
+set "VOICE_AGENT_OPEN_PANEL=0"
 start "" "%CD%\helper.bat"
+set "VOICE_AGENT_OPEN_PANEL="
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$root = [System.IO.Path]::GetFullPath('%CD%');" ^

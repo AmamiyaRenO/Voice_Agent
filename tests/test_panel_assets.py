@@ -208,3 +208,24 @@ def test_runtime_payload_can_clear_a_previously_selected_microphone(monkeypatch:
     )
 
     assert payload["input_device_name"] == ""
+
+
+def test_operator_google_cloud_voices_hide_vertex_only_names():
+    runtime = _runtime_module()
+
+    voices = runtime._operator_google_cloud_voices(
+        ["Achernar", "en-US-Neural2-F", "en-US-Studio-O", "Kore"]
+    )
+
+    assert voices == ["en-US-Neural2-F", "en-US-Studio-O"]
+
+
+def test_helper_opens_console_after_health_check():
+    root = Path(__file__).resolve().parents[1]
+    helper = (root / "helper.bat").read_text(encoding="utf-8")
+    wrapper = (root / "start_helper_unity_panel.bat").read_text(encoding="utf-8")
+
+    assert "VOICE_AGENT_OPEN_PANEL" in helper
+    assert "http://127.0.0.1:8787/healthz" in helper
+    assert "http://127.0.0.1:8787/index.html" in helper
+    assert 'set "VOICE_AGENT_OPEN_PANEL=0"' in wrapper

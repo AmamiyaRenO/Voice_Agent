@@ -5,7 +5,7 @@
   <title>Controls | Rachel Console</title>
   <script src="/panel-assets/theme.js?v=2"></script>
   <link rel="stylesheet" href="/panel-assets/app.css?v=4">
-  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=5"></script><script defer src="/panel-assets/controls.js?v=4"></script>
+  <script defer src="/panel-assets/lucide.min.js"></script><script defer src="/panel-assets/shell.js?v=5"></script><script defer src="/panel-assets/controls.js?v=5"></script>
 </head>
 <body data-page="controls">
   <section data-page-content>
@@ -25,7 +25,7 @@
     <div class="controller-stack" id="controller-view">
       <section class="panel controller-section" aria-labelledby="voice-heading">
         <div class="panel-head"><div><h2 class="panel-title" id="voice-heading"><i data-lucide="audio-lines"></i>Voice and TTS</h2><p class="panel-note">Select the active synthesis backend and audition a phrase.</p></div><div class="header-actions"><span class="status-badge" id="voice-status">Loading</span><button class="icon-button" id="refresh-controls" type="button" aria-label="Refresh voice options" title="Refresh voices"><i data-lucide="refresh-cw"></i></button></div></div>
-        <div class="form-grid three"><div class="field"><label for="tts-backend">Backend</label><select id="tts-backend"></select></div><div class="field"><label for="tts-voice">Voice</label><select id="tts-voice"></select></div><div class="field"><label for="tts-model">Piper model</label><select id="tts-model"></select></div><div class="field"><label for="voice-speed">Speed</label><input id="voice-speed" type="number" min="0.5" max="2" step="0.1" value="1"></div><div class="field"><label for="voice-volume">Volume</label><div class="range-control"><input id="voice-volume" type="range" min="0.2" max="1.5" step="0.1" value="1"><output id="voice-volume-value" for="voice-volume">1.0</output></div></div><div class="field full"><label for="speak-text">Speak text</label><textarea id="speak-text" rows="3">Good morning. It is time for your program.</textarea></div></div>
+        <div class="form-grid three"><div class="field"><label for="tts-backend">Backend</label><select id="tts-backend"></select></div><div class="field"><label for="tts-voice">Voice</label><select id="tts-voice"></select><span class="field-help" id="voice-option-note" hidden></span></div><div class="field"><label for="tts-model">Piper model</label><select id="tts-model"></select></div><div class="field"><label for="voice-speed">Speed</label><input id="voice-speed" type="number" min="0.5" max="2" step="0.1" value="1"></div><div class="field"><label for="voice-volume">Volume</label><div class="range-control"><input id="voice-volume" type="range" min="0.2" max="1.5" step="0.1" value="1"><output id="voice-volume-value" for="voice-volume">1.0</output></div></div><div class="field full"><label for="speak-text">Speak text</label><textarea id="speak-text" rows="3">Good morning. It is time for your program.</textarea></div></div>
         <div class="toolbar" style="margin-top:14px"><button class="primary" id="speak-now" type="button"><i data-lucide="volume-2"></i>Speak</button></div>
       </section>
       <section class="panel controller-section" aria-labelledby="camera-heading">

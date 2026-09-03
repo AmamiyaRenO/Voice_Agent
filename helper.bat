@@ -63,6 +63,16 @@ if exist "%ASR_VENV_PY%" (
   set "VOICE_AGENT_DESKTOP_RUNTIME_CWD=%CD%\python_voice_service"
 )
 
+if /I "%VOICE_AGENT_OPEN_PANEL%"=="0" goto :skip_panel_open
+echo [voice-agent] the Rachel Console will open when http://127.0.0.1:8787 is ready.
+start "" /b powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command ^
+  "$deadline = (Get-Date).AddSeconds(90);" ^
+  "while ((Get-Date) -lt $deadline) {" ^
+  "  try { $response = Invoke-WebRequest -Uri 'http://127.0.0.1:8787/healthz' -UseBasicParsing -TimeoutSec 2; if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) { Start-Process 'http://127.0.0.1:8787/index.html'; exit 0 } } catch {};" ^
+  "  Start-Sleep -Milliseconds 700" ^
+  "}; exit 0"
+:skip_panel_open
+
 if exist "%ASR_VENV_PY%" (
   "%ASR_VENV_PY%" scripts\start_local_services.py %VOICE_AGENT_LAUNCH_ARGS%
   exit /b %errorlevel%

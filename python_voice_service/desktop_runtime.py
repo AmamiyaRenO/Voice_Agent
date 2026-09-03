@@ -424,6 +424,15 @@ def _normalize_tts_backend(value: Optional[str]) -> str:
     return "piper"
 
 
+def _operator_google_cloud_voices(values: Any) -> List[str]:
+    """Keep the operator list on standard en-US Cloud TTS voices for now."""
+    return [
+        str(value).strip()
+        for value in values or []
+        if str(value).strip().casefold().startswith("en-us")
+    ]
+
+
 def _normalize_operator_asr_mode(value: Optional[str]) -> str:
     normalized = normalize_streaming_asr_mode(value)
     if normalized not in OPERATOR_ASR_MODES:
@@ -1658,6 +1667,11 @@ async def api_voice_options(request: Request) -> Dict[str, Any]:
     google_cloud = await audio_agent.get_google_cloud_voice_options(
         request.headers.get("X-Google-Cloud-TTS-Api-Key", "")
     )
+    google_cloud_all_voices = list(google_cloud["voices"] or [])
+    google_cloud_voices = _operator_google_cloud_voices(google_cloud_all_voices)
+    google_cloud_current = str(google_cloud["current"] or "").strip()
+    if google_cloud_current not in google_cloud_voices:
+        google_cloud_current = ""
     return {
         "voices": ["en_US"],
         "current": audio_agent.active_voice_code,
@@ -1666,8 +1680,9 @@ async def api_voice_options(request: Request) -> Dict[str, Any]:
         "backends": ["piper", "kokoro", "google-cloud"],
         "backendCurrent": audio_agent.active_tts_backend,
         "kokoroVoiceCurrent": audio_agent.active_kokoro_voice,
-        "googleCloudVoices": google_cloud["voices"],
-        "googleCloudVoiceCurrent": google_cloud["current"],
+        "googleCloudVoices": google_cloud_voices,
+        "googleCloudVoiceCurrent": google_cloud_current,
+        "googleCloudRestrictedVoiceCount": max(0, len(google_cloud_all_voices) - len(google_cloud_voices)),
         "googleCloudLanguageCode": google_cloud["languageCode"],
         "googleCloudReady": google_cloud["ready"],
         "googleCloudError": google_cloud["error"],
