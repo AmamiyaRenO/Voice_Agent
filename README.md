@@ -17,7 +17,7 @@ The repository also includes:
 | Keep Unity in the loop for avatar/gameplay/camera UI | Start services first, then open the Unity project | Unity acts as an optional shell around the desktop runtime and MQTT actions |
 | Work on Raspberry Pi display / LED / servo control | [`Firmware/README.md`](Firmware/README.md) | Live Pi-synced scripts, MQTT topics, and current hardware runtime notes |
 
-**Deploying a new Rachel station?** Follow the linear [Windows mini PC + Raspberry Pi setup checklist](docs/FRESH_MACHINE_SETUP.md). It is the recommended handoff document for a fresh machine.
+**Deploying a new Rachel station?** Follow the [complete Windows mini PC + Raspberry Pi 5 setup guide](docs/RACHEL_STATION_SETUP.md). A shorter [fresh-machine checklist](docs/FRESH_MACHINE_SETUP.md) is also available for experienced maintainers.
 
 ### Default runtime ports
 
