@@ -137,6 +137,16 @@ def test_google_cloud_manual_speak_propagates_error_without_local_fallback():
     agent._play_tts_text.assert_not_called()
 
 
+def test_piper_manual_speak_waits_for_synthesis_and_propagates_error():
+    agent = _agent()
+    agent._play_tts_text = AsyncMock(side_effect=RuntimeError("piper model missing"))
+
+    with pytest.raises(RuntimeError, match="piper model missing"):
+        asyncio.run(agent.manual_speak(text="Hello", backend="piper"))
+
+    assert agent._manual_task is None
+
+
 def test_google_cloud_client_prefers_api_key(monkeypatch):
     agent = _agent()
     captured = {}
@@ -241,3 +251,22 @@ def test_google_cloud_api_speak_exposes_provider_error(monkeypatch):
 
     assert error.value.status_code == 502
     assert error.value.detail == "Google Cloud TTS failed: quota exceeded"
+
+
+def test_piper_api_speak_exposes_provider_error(monkeypatch):
+    runtime_agent = SimpleNamespace(
+        active_tts_backend="piper",
+        active_tts_model="",
+        manual_speak=AsyncMock(side_effect=RuntimeError("audio output unavailable")),
+    )
+    monkeypatch.setattr(desktop_runtime, "audio_agent", runtime_agent)
+
+    class _Request:
+        async def json(self):
+            return {"text": "Hello", "backend": "piper"}
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(desktop_runtime.api_speak(_Request()))
+
+    assert error.value.status_code == 502
+    assert error.value.detail == "piper TTS failed: audio output unavailable"

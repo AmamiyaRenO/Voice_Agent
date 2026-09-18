@@ -29,6 +29,19 @@
     $("microphone-detail").textContent = error || (asr && asr.input_device_name ? `Active: ${asr.input_device_name}; level ${Number(asr.input_level_dbfs || -96).toFixed(1)} dBFS.${geminiState}` : mode === "live-captions" ? "Windows Captions supplies transcripts through the external listener." : `Choose the microphone Rachel should capture.${geminiState}`);
   }
 
+  function loadSpeakers(asr, configured) {
+    const select = $("speaker-output");
+    const devices = Array.isArray(asr && asr.output_devices) ? asr.output_devices : [];
+    const names = new Set(devices.map((device) => String(device.name || "")).filter(Boolean));
+    const options = [{ value: "", label: "Windows default speaker" }].concat(devices.map((device) => ({ value: String(device.name || ""), label: `${device.name || "Output"}${device.hostapi ? ` (${device.hostapi})` : ""}` })));
+    if (configured && !names.has(configured)) options.push({ value: configured, label: `${configured} (not currently detected)` });
+    select.innerHTML = options.map((option) => `<option value="${ui.escapeHtml(option.value)}">${ui.escapeHtml(option.label)}</option>`).join("");
+    select.value = configured || "";
+    const error = String(asr && asr.output_error || "");
+    const rate = Number(asr && asr.output_device_sample_rate || 0);
+    $("speaker-detail").textContent = error || (asr && asr.output_ready ? `Active: ${asr.output_device_name || "Windows default"}${rate ? ` at ${Math.round(rate)} Hz` : ""}.` : "Choose the Windows speaker used for Piper playback.");
+  }
+
   function recognitionProvider(data) {
     const values = [data.local_streaming_asr_mode, data.cloud_streaming_asr_mode];
     if (values.includes("gemini-live") || data.cloud_response_provider === "gemini" && data.conversation_profile === "cloud") return "gemini-live";
@@ -52,6 +65,7 @@
     $("privacy-status").textContent = $("voice-id-switch").checked ? "On: voice matching and automatic learning are enabled." : "Off: voice matching and automatic learning are disabled.";
     $("runtime-path").textContent = `Config: ${data.path || "unknown"}`;
     loadMicrophones(latestAsr || {}, data.input_device_name || "");
+    loadSpeakers(latestAsr || {}, data.output_device_name || "");
   }
 
   async function loadPrompt() {
@@ -83,6 +97,7 @@
     payload.speaker_id_enabled = $("voice-id-switch").checked;
     payload.speaker_auto_learning_enabled = $("voice-id-switch").checked;
     payload.input_device_name = $("microphone-input").value;
+    payload.output_device_name = $("speaker-output").value;
     return Object.assign(payload, recognitionPayload($("recognition-provider").value));
   }
 

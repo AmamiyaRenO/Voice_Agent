@@ -146,6 +146,7 @@ def test_figma_console_suggestions_are_present_in_shared_pages():
     assert 'id="voice-volume" type="range"' in controls
     assert 'id="face-custom-avatar"' in controls
     assert 'id="google-cloud-tts-key"' in settings
+    assert 'id="speaker-output"' in settings
     assert "When off, speech recognition still works" in settings
     assert "How participant profiles work" in participants
 
@@ -208,6 +209,20 @@ def test_runtime_payload_can_clear_a_previously_selected_microphone(monkeypatch:
     )
 
     assert payload["input_device_name"] == ""
+
+
+def test_runtime_payload_can_clear_a_previously_selected_speaker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    runtime = _runtime_module()
+    monkeypatch.setenv("VOICE_AGENT_OUTPUT_DEVICE_NAME", "Old speaker")
+
+    payload = runtime._build_runtime_payload(
+        {"env": {"VOICE_AGENT_OUTPUT_DEVICE_NAME": ""}},
+        user_path=tmp_path / "user.json",
+        default_path=tmp_path / "default.json",
+        message="test",
+    )
+
+    assert payload["output_device_name"] == ""
 
 
 def test_operator_google_cloud_voices_hide_vertex_only_names():

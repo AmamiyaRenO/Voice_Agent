@@ -543,6 +543,11 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
         if "VOICE_AGENT_INPUT_DEVICE_NAME" in env_obj
         else _env("VOICE_AGENT_INPUT_DEVICE_NAME", "")
     ).strip()
+    output_device_name = str(
+        env_obj["VOICE_AGENT_OUTPUT_DEVICE_NAME"]
+        if "VOICE_AGENT_OUTPUT_DEVICE_NAME" in env_obj
+        else _env("VOICE_AGENT_OUTPUT_DEVICE_NAME", "")
+    ).strip()
     gemini_live_model = str(
         env_obj.get("GEMINI_LIVE_MODEL")
         or DEFAULT_GEMINI_LIVE_MODEL
@@ -585,6 +590,7 @@ def _build_runtime_payload(merged: Dict[str, Any], *, user_path: Path, default_p
         "google_cloud_tts_api_key": google_cloud_tts_api_key,
         "google_cloud_tts_api_key_set": bool(google_cloud_tts_api_key),
         "input_device_name": input_device_name,
+        "output_device_name": output_device_name,
         "gemini_live_model": gemini_live_model,
         "gemini_response_model": gemini_response_model,
         "gemini_live_voice": gemini_live_voice,
@@ -1445,6 +1451,10 @@ async def _apply_runtime_live(merged: Dict[str, Any]) -> str:
         os.environ["VOICE_AGENT_INPUT_DEVICE_NAME"] = runtime["input_device_name"]
     else:
         os.environ.pop("VOICE_AGENT_INPUT_DEVICE_NAME", None)
+    if runtime["output_device_name"]:
+        os.environ["VOICE_AGENT_OUTPUT_DEVICE_NAME"] = runtime["output_device_name"]
+    else:
+        os.environ.pop("VOICE_AGENT_OUTPUT_DEVICE_NAME", None)
     os.environ["VOICE_AGENT_TTS_BACKEND"] = runtime["tts_backend"]
     os.environ["KOKORO_TTS_VOICE"] = runtime["kokoro_voice"]
     os.environ["KOKORO_TTS_LANG_CODE"] = runtime["kokoro_lang_code"]
@@ -1757,10 +1767,9 @@ async def api_speak(request: Request) -> Dict[str, Any]:
             source="tester_panel",
         )
     except Exception as exc:
-        if backend == "google-cloud":
-            raise HTTPException(status_code=502, detail=f"Google Cloud TTS failed: {exc}") from exc
-        raise
-    return {"status": "ok", "message": f"speech started ({backend})"}
+        label = "Google Cloud" if backend == "google-cloud" else backend
+        raise HTTPException(status_code=502, detail=f"{label} TTS failed: {exc}") from exc
+    return {"status": "ok", "message": f"speech queued ({backend})"}
 
 
 @app.post("/api/kokoro/speak")
@@ -1833,12 +1842,20 @@ async def _build_asr_status_payload() -> Dict[str, Any]:
         "last_speaker_match": dict(getattr(status, "last_speaker_match", {}) or {}),
         "live_capture_enabled": bool(getattr(status, "live_capture_enabled", False)),
         "sounddevice_available": bool(getattr(status, "sounddevice_available", False)),
-        "input_device_index": int(getattr(status, "input_device_index", -1) or -1),
+        "input_device_index": int(getattr(status, "input_device_index", -1)),
         "input_device_name": str(getattr(status, "input_device_name", "") or ""),
         "input_device_hostapi": str(getattr(status, "input_device_hostapi", "") or ""),
         "input_device_source": str(getattr(status, "input_device_source", "") or ""),
         "input_device_sample_rate": _safe_json_float(getattr(status, "input_device_sample_rate", 0.0), 0.0),
         "input_devices": getattr(audio_agent, "input_device_options", lambda: [])(),
+        "output_ready": bool(getattr(status, "output_ready", False)),
+        "output_device_index": int(getattr(status, "output_device_index", -1)),
+        "output_device_name": str(getattr(status, "output_device_name", "") or ""),
+        "output_device_hostapi": str(getattr(status, "output_device_hostapi", "") or ""),
+        "output_device_source": str(getattr(status, "output_device_source", "") or ""),
+        "output_device_sample_rate": _safe_json_float(getattr(status, "output_device_sample_rate", 0.0), 0.0),
+        "output_error": str(getattr(status, "output_error", "") or ""),
+        "output_devices": getattr(audio_agent, "output_device_options", lambda: [])(),
     }
     try:
         speaker_status = await audio_agent.speaker_profiles_status()
@@ -2086,6 +2103,8 @@ async def api_runtime_config_post(request: Request) -> Dict[str, Any]:
         env_obj["GOOGLE_CLOUD_TTS_API_KEY"] = str(payload.get("google_cloud_tts_api_key") or "").strip()
     if "input_device_name" in payload:
         env_obj["VOICE_AGENT_INPUT_DEVICE_NAME"] = str(payload.get("input_device_name") or "").strip()
+    if "output_device_name" in payload:
+        env_obj["VOICE_AGENT_OUTPUT_DEVICE_NAME"] = str(payload.get("output_device_name") or "").strip()
     if "ollama_model" in payload:
         env_obj["OLLAMA_MODEL"] = str(payload.get("ollama_model") or "").strip()
     if "conversation_pipeline_mode" in payload:

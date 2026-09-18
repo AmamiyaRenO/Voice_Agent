@@ -199,7 +199,7 @@ Invoke-WebRequest "http://127.0.0.1:5005/speak?text=Hello" `
 Start-Process "$env:TEMP\piper-test.wav"
 ```
 
-If the WAV plays, Piper is working and Windows is using the wrong default output device. Select the intended speaker in Windows and restart `helper.bat`.
+If the WAV plays, Piper is working and the desktop runtime is using the wrong output device. Open **Settings > Advanced Configuration > Provider and Recognition**, choose the intended **Speaker output**, and click **Save Configuration**. The runtime applies the change immediately; restart `helper.bat` only if Windows has just installed or removed the audio device.
 
 #### Google Cloud TTS
 

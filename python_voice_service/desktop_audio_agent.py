@@ -983,12 +983,17 @@ class PcmPlayer:
     def available(self) -> bool:
         return sd is not None
 
-    def start(self) -> None:
+    @property
+    def ready(self) -> bool:
+        return self._stream is not None
+
+    def start(self, *, device: Optional[int] = None) -> None:
         if sd is None:
             raise RuntimeError("sounddevice is not installed")
         if self._stream is not None:
             return
         self._stream = sd.OutputStream(
+            device=device,
             samplerate=self.output_sample_rate,
             blocksize=max(0, int(DEFAULT_OUTPUT_BLOCKSIZE)),
             channels=1,
@@ -1637,6 +1642,13 @@ class AudioAgentStatus:
     input_device_hostapi: str = ""
     input_device_source: str = ""
     input_device_sample_rate: float = 0.0
+    output_ready: bool = False
+    output_device_name: str = ""
+    output_device_index: int = -1
+    output_device_hostapi: str = ""
+    output_device_source: str = ""
+    output_device_sample_rate: float = 0.0
+    output_error: str = ""
 
 
 @dataclass
@@ -1669,6 +1681,8 @@ class DesktopAudioAgent:
         self.input_blocksize = DEFAULT_INPUT_BLOCKSIZE
         self.preferred_input_device_name = _env("VOICE_AGENT_INPUT_DEVICE_NAME", DEFAULT_INPUT_DEVICE_NAME)
         self.preferred_input_device_index = _env("VOICE_AGENT_INPUT_DEVICE_INDEX", DEFAULT_INPUT_DEVICE_INDEX)
+        self.preferred_output_device_name = _env("VOICE_AGENT_OUTPUT_DEVICE_NAME", "")
+        self.preferred_output_device_index = _env("VOICE_AGENT_OUTPUT_DEVICE_INDEX", "")
         self.pipeline_mode = _normalize_pipeline_mode(_env("VOICE_PIPELINE_MODE", PIPELINE_MODE_DIRECT_UNIFIED))
         self.profile = _normalize_profile(_env("VOICE_CONVERSATION_PROFILE", CONVERSATION_PROFILE_LOCAL))
         self.cloud_response_provider = _normalize_cloud_response_provider(
@@ -1809,6 +1823,12 @@ class DesktopAudioAgent:
         self._selected_input_device_source = ""
         self._selected_input_device_sample_rate = 0.0
         self._input_stream_sample_rate = float(self.capture_sample_rate)
+        self._selected_output_device_index = -1
+        self._selected_output_device_name = ""
+        self._selected_output_device_hostapi = ""
+        self._selected_output_device_source = ""
+        self._selected_output_device_sample_rate = 0.0
+        self._output_error = ""
         self._capture_worker_stop = threading.Event()
         self._capture_worker_thread: Optional[threading.Thread] = None
         self._live_captions_source = LiveCaptionsTranscriptSource(
@@ -2341,6 +2361,146 @@ class DesktopAudioAgent:
                 choices[key] = option
         return sorted(choices.values(), key=lambda item: str(item.get("name") or "").casefold())
 
+    def _resolve_preferred_output_device(self) -> Tuple[int, str, str, str]:
+        if sd is None:
+            return -1, "", "", ""
+        env_index_raw = str(getattr(self, "preferred_output_device_index", "") or "").strip()
+        if env_index_raw:
+            try:
+                env_index = int(env_index_raw)
+                device_info = sd.query_devices(env_index)
+            except Exception:
+                env_index = -1
+                device_info = None
+            if env_index >= 0 and isinstance(device_info, dict) and int(device_info.get("max_output_channels") or 0) > 0:
+                resolved_index, name, hostapi, _sample_rate = self._device_details_for_index(env_index)
+                return resolved_index, name, hostapi, "env_index"
+
+        env_name = self._normalize_audio_device_name(getattr(self, "preferred_output_device_name", ""))
+        if env_name:
+            try:
+                devices = list(sd.query_devices() or [])
+            except Exception:
+                devices = []
+            best_match: Tuple[int, str, str, int] = (-1, "", "", 999)
+            for index, device_info in enumerate(devices):
+                if not isinstance(device_info, dict) or int(device_info.get("max_output_channels") or 0) <= 0:
+                    continue
+                device_name = str(device_info.get("name") or "")
+                normalized_name = self._normalize_audio_device_name(device_name)
+                if not normalized_name:
+                    continue
+                name_rank = 99
+                if normalized_name == env_name:
+                    name_rank = 0
+                elif env_name in normalized_name:
+                    name_rank = 1
+                elif normalized_name in env_name:
+                    name_rank = 2
+                if name_rank == 99:
+                    continue
+                hostapi_name = self._sounddevice_hostapi_name(device_info.get("hostapi"))
+                api_rank = 0 if "wasapi" in hostapi_name.casefold() else 1
+                rank = (name_rank * 10) + api_rank
+                if rank < best_match[3]:
+                    best_match = (index, device_name, hostapi_name, rank)
+            if best_match[0] >= 0:
+                return best_match[0], best_match[1], best_match[2], "env_name"
+
+        if os.name == "nt":
+            try:
+                hostapis = list(sd.query_hostapis() or [])
+            except Exception:
+                hostapis = []
+            for hostapi in hostapis:
+                if not isinstance(hostapi, dict):
+                    continue
+                hostapi_name = str(hostapi.get("name") or "")
+                if "wasapi" not in hostapi_name.casefold():
+                    continue
+                raw_default_output = hostapi.get("default_output_device")
+                default_output = int(raw_default_output) if raw_default_output is not None else -1
+                if default_output >= 0:
+                    resolved_index, name, resolved_hostapi, _sample_rate = self._device_details_for_index(default_output)
+                    if resolved_index >= 0:
+                        return resolved_index, name, resolved_hostapi or hostapi_name, "windows_default_wasapi"
+
+        try:
+            default_device = getattr(getattr(sd, "default", None), "device", None)
+            if isinstance(default_device, (list, tuple)) and len(default_device) > 1:
+                default_output = default_device[1]
+            else:
+                default_output = default_device
+            resolved_index, name, hostapi, _sample_rate = self._device_details_for_index(default_output)
+            if resolved_index >= 0:
+                return resolved_index, name, hostapi, "sounddevice_default"
+        except Exception:
+            pass
+        return -1, "", "", ""
+
+    def output_device_options(self) -> List[Dict[str, Any]]:
+        if sd is None:
+            return []
+        try:
+            devices = list(sd.query_devices() or [])
+        except Exception:
+            return []
+        choices: Dict[str, Dict[str, Any]] = {}
+        for index, device_info in enumerate(devices):
+            if not isinstance(device_info, dict) or int(device_info.get("max_output_channels") or 0) <= 0:
+                continue
+            name = str(device_info.get("name") or f"Output {index}")
+            hostapi = self._sounddevice_hostapi_name(device_info.get("hostapi"))
+            option = {
+                "index": index,
+                "name": name,
+                "hostapi": hostapi,
+                "sample_rate": float(device_info.get("default_samplerate") or 0.0),
+            }
+            key = self._normalize_audio_device_name(name)
+            current = choices.get(key)
+            if current is None or ("wasapi" in hostapi.casefold() and "wasapi" not in str(current.get("hostapi") or "").casefold()):
+                choices[key] = option
+        return sorted(choices.values(), key=lambda item: str(item.get("name") or "").casefold())
+
+    def _output_device_details(self) -> Tuple[int, str, str, str, float]:
+        return (
+            int(self._selected_output_device_index),
+            str(self._selected_output_device_name or ""),
+            str(self._selected_output_device_hostapi or ""),
+            str(self._selected_output_device_source or ""),
+            float(self._selected_output_device_sample_rate or 0.0),
+        )
+
+    def _start_output_stream(self) -> None:
+        output_index, output_name, output_hostapi, output_source = self._resolve_preferred_output_device()
+        if output_index < 0:
+            raise RuntimeError("no Windows audio output device is available")
+        _index, _name, _hostapi, device_sample_rate = self._device_details_for_index(output_index)
+        stream_sample_rate = int(round(device_sample_rate)) if device_sample_rate > 0 else DEFAULT_OUTPUT_SAMPLE_RATE
+        self.output_sample_rate = stream_sample_rate
+        self._player.output_sample_rate = stream_sample_rate
+        self._player.start(device=output_index)
+        self._selected_output_device_index = output_index
+        self._selected_output_device_name = output_name
+        self._selected_output_device_hostapi = output_hostapi
+        self._selected_output_device_source = output_source
+        self._selected_output_device_sample_rate = float(stream_sample_rate)
+        self._output_error = ""
+
+    def _restart_output_stream(self) -> None:
+        self._player.stop()
+        self._selected_output_device_index = -1
+        self._selected_output_device_name = ""
+        self._selected_output_device_hostapi = ""
+        self._selected_output_device_source = ""
+        self._selected_output_device_sample_rate = 0.0
+        try:
+            self._start_output_stream()
+        except Exception as exc:
+            self._output_error = f"audio output start failed: {exc}"
+            raise RuntimeError(self._output_error) from exc
+
     def _input_device_details(self) -> Tuple[int, str, str, str]:
         if sd is None:
             return -1, "", "", ""
@@ -2622,6 +2782,10 @@ class DesktopAudioAgent:
         self.active_tts_backend = _normalize_tts_backend(_env("VOICE_AGENT_TTS_BACKEND", self.active_tts_backend))
         self.active_kokoro_voice = _env("KOKORO_TTS_VOICE", self.active_kokoro_voice)
         self.active_google_cloud_voice = _env("GOOGLE_CLOUD_TTS_VOICE", self.active_google_cloud_voice)
+        self.preferred_input_device_name = _env("VOICE_AGENT_INPUT_DEVICE_NAME", "")
+        self.preferred_input_device_index = _env("VOICE_AGENT_INPUT_DEVICE_INDEX", "")
+        self.preferred_output_device_name = _env("VOICE_AGENT_OUTPUT_DEVICE_NAME", "")
+        self.preferred_output_device_index = _env("VOICE_AGENT_OUTPUT_DEVICE_INDEX", "")
         self.google_cloud_tts_language_code = _env(
             "GOOGLE_CLOUD_TTS_LANGUAGE_CODE",
             self.google_cloud_tts_language_code,
@@ -3923,9 +4087,10 @@ class DesktopAudioAgent:
         self._rebuild_asr_backend()
         self._start_input_stream()
         try:
-            self._player.start()
+            self._start_output_stream()
         except Exception as exc:
-            self._last_error = f"audio output start failed: {exc}"
+            self._output_error = f"audio output start failed: {exc}"
+            self._last_error = self._output_error
         self.log_store.add("system", "desktop audio agent started", source="desktop_runtime")
 
     async def stop(self) -> None:
@@ -4045,6 +4210,13 @@ class DesktopAudioAgent:
         frontend = self._frontend.status()
         input_device_index, input_device_name, input_device_hostapi, input_device_source = self._input_device_details()
         input_device_sample_rate = float(self._selected_input_device_sample_rate or self._input_stream_sample_rate or 0.0)
+        (
+            output_device_index,
+            output_device_name,
+            output_device_hostapi,
+            output_device_source,
+            output_device_sample_rate,
+        ) = self._output_device_details()
         streaming_backend = backend.backend_name if backend is not None else ""
         if self.current_asr_mode == STREAMING_ASR_MODE_LIVE_CAPTIONS:
             streaming_backend = "live-captions"
@@ -4121,6 +4293,13 @@ class DesktopAudioAgent:
             input_device_hostapi=input_device_hostapi,
             input_device_source=input_device_source,
             input_device_sample_rate=input_device_sample_rate,
+            output_ready=self._player.ready,
+            output_device_name=output_device_name,
+            output_device_index=output_device_index,
+            output_device_hostapi=output_device_hostapi,
+            output_device_source=output_device_source,
+            output_device_sample_rate=output_device_sample_rate,
+            output_error=self._output_error,
         )
 
     def is_assistant_speaking(self) -> bool:
@@ -4461,6 +4640,8 @@ class DesktopAudioAgent:
         hotword_strategy: Optional[str] = None,
         stable_partial_repeats: Optional[int] = None,
     ) -> None:
+        previous_output_name = self.preferred_output_device_name
+        previous_output_index = self.preferred_output_device_index
         self._reload_provider_settings_from_env()
         self.pipeline_mode = _normalize_pipeline_mode(pipeline_mode)
         self.profile = _normalize_profile(profile)
@@ -4484,6 +4665,12 @@ class DesktopAudioAgent:
         finally:
             if restart_input:
                 self._start_input_stream()
+        if self._running and (
+            self.preferred_output_device_name != previous_output_name
+            or self.preferred_output_device_index != previous_output_index
+            or not self._player.ready
+        ):
+            self._restart_output_stream()
 
     async def set_tts_options(
         self,
@@ -4534,6 +4721,8 @@ class DesktopAudioAgent:
         normalized_text = str(text or "").strip()
         if not normalized_text:
             return
+        if not getattr(self._player, "ready", True):
+            raise RuntimeError(getattr(self, "_output_error", "") or "Windows audio output is unavailable")
         log_role = "coach" if str(source or "").strip() == "auto_identity" else "wizard"
         self.log_store.add(log_role, normalized_text, speaker=speaker_label, source=source)
         selected_backend = _normalize_tts_backend(backend or self.active_tts_backend)
@@ -4547,7 +4736,7 @@ class DesktopAudioAgent:
                 api_key=google_cloud_api_key,
             )
             return
-        self._manual_task = asyncio.create_task(
+        task = asyncio.create_task(
             self._play_tts_text(
                 text=normalized_text,
                 backend=selected_backend,
@@ -4556,8 +4745,15 @@ class DesktopAudioAgent:
                 instruct=instruct,
                 source=source,
                 log_message=False,
+                wait_for_drain=False,
             )
         )
+        self._manual_task = task
+        try:
+            await task
+        finally:
+            if self._manual_task is task:
+                self._manual_task = None
 
     async def handle_panel_game_intent(self, *, action: str, name: str = "", source: str = "desktop_panel") -> None:
         normalized = str(action or "").strip().lower()
