@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pytest
 
+WINDOWS_LAUNCHER_ONLY = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="start_local_services.py is the Windows launcher behind helper.bat (Scripts/python.exe venvs)",
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON_VOICE_DIR = ROOT / "python_voice_service"
@@ -187,6 +192,7 @@ def test_smoke_intent_identity_passthrough():
     assert node.get("speaker_id") == 42
 
 
+@WINDOWS_LAUNCHER_ONLY
 def test_start_local_services_normalizes_bare_uvicorn_env_overrides(monkeypatch):
     module = _load_module("smoke_start_local_services", SCRIPTS_DIR / "start_local_services.py")
 
@@ -206,6 +212,7 @@ def test_start_local_services_normalizes_bare_uvicorn_env_overrides(monkeypatch)
     )
 
 
+@WINDOWS_LAUNCHER_ONLY
 def test_start_local_services_selects_repo_service_roots_for_cleanup():
     module = _load_module("smoke_start_local_services_cleanup", SCRIPTS_DIR / "start_local_services.py")
     defaults = module._build_defaults(ROOT)
@@ -244,6 +251,7 @@ def test_start_local_services_selects_repo_service_roots_for_cleanup():
     assert pids == [101, 301]
 
 
+@WINDOWS_LAUNCHER_ONLY
 def test_start_local_services_doc_rag_preflight_requires_ready_embedder(monkeypatch, tmp_path: Path):
     module = _load_module("smoke_start_local_services_preflight", SCRIPTS_DIR / "start_local_services.py")
     defaults = module._build_defaults(ROOT)
@@ -263,6 +271,7 @@ def test_start_local_services_doc_rag_preflight_requires_ready_embedder(monkeypa
     assert error == "embedder unavailable"
 
 
+@WINDOWS_LAUNCHER_ONLY
 def test_start_local_services_doc_rag_preflight_accepts_direct_repo_tracked_doc_root(monkeypatch, tmp_path: Path):
     module = _load_module("smoke_start_local_services_preflight_direct_root", SCRIPTS_DIR / "start_local_services.py")
     defaults = module._build_defaults(ROOT)

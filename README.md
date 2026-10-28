@@ -1,12 +1,62 @@
-# Voice Agent (Desktop Runtime + Python Services + Optional Unity Shell)
+# Voice Agent
 
-Voice Agent is a local-first voice interaction stack for rehabilitation and exercise-game scenarios.
-The maintained fast path is now a standalone desktop runtime on `127.0.0.1:8787` plus Python services for ASR, grounded dialog, memory, TTS, and game launching. Unity is optional and currently treated as a shell layer for avatar/UI/game integration instead of the primary conversation orchestrator.
+**A local-first voice AI agent for a rehabilitation robot.** It listens, decides whether you asked for an action, a fact or a conversation, answers from its own documents instead of guessing, and drives the robot's face, servo and LEDs. It runs offline on a Windows mini PC + Raspberry Pi 5, or switches to cloud models at runtime.
 
-The repository also includes:
-- A Python voice service (`python_voice_service/`) for ASR, grounded dialog, speaker ID, TTS wrappers, and desktop runtime APIs.
-- A Python SDK (`python_sdk/`) for non-Unity control and automation.
-- Local orchestration scripts for multi-process development.
+Built at the BioAdaptive Interface Lab, Wilfrid Laurier University, where it runs on the lab's "Rachel" robot stations.
+
+[![CI](https://github.com/AmamiyaRenO/Voice_Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/AmamiyaRenO/Voice_Agent/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+<!-- Demo: drop a 10–20 s GIF here, e.g. docs/media/demo.gif, showing one spoken question → grounded answer → robot reaction. -->
+
+## What makes it interesting
+
+- **Streaming conversation loop.** One endpoint (`/conversation/turn/stream`) runs ASR → routing → grounding → reply → TTS and streams partial results back. Local (Ollama) and cloud (OpenAI) profiles hot-swap at runtime without a restart.
+- **Layered intent router.** Exact alias → fuzzy/phonetic match → embedding matcher → LLM classifier. Cheap deterministic layers handle most commands; the LLM is only asked when they can't decide.
+- **Grounded answers, not freeform guesses.** A local doc-RAG pipeline routes every knowledge question to `doc_answer`, `doc_clarify` or `no_evidence`. An ASR-tolerant entity resolver fixes misheard names before retrieval, and answers go through retrieve → local summary → spoken render.
+- **Conversation memory that follows references.** Structured memory keeps facts, episodes and the last referenced item, so "Open it." or "his lab" resolves to the right target. Speaker ID uses closed-set matching and falls back to anonymous rather than guessing who is talking.
+- **Pluggable speech stack.** ASR: Whisper large-v3, Moonshine small/medium or a cloud API, switchable at runtime. TTS: a persistent Piper worker for low latency, with Kokoro as an alternative backend.
+- **Tested like a product.** Transcript-level dialogue regression suites write machine- and human-readable reports to `runtime/evals/`, alongside pytest suites for RAG rendering, speaker identity, the SDK and the operator panel.
+- **Real hardware.** An MQTT bridge drives the Raspberry Pi face display, servo and LEDs; a Python SDK and a browser-based SDK Visualizer let non-Unity users script the robot.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Mic["Microphone"] --> Runtime["Desktop runtime + operator panel<br/>:8787"]
+    Runtime --> Voice["Voice service (FastAPI)<br/>:8000"]
+    Voice --> ASR["ASR<br/>Whisper / Moonshine / API"]
+    Voice --> Router["Intent router<br/>alias → fuzzy → embedding → LLM"]
+    Router --> RAG["Grounded doc-RAG<br/>answer / clarify / no_evidence"]
+    Router --> Memory["Structured memory<br/>+ speaker ID"]
+    Router --> LLM["Reply model<br/>Ollama (local) / OpenAI (cloud)"]
+    Runtime --> TTS["TTS<br/>Piper / Kokoro"]
+    Runtime --> MQTT["MQTT bridge"] --> Pi["Raspberry Pi 5<br/>face / servo / LED"]
+```
+
+## Tech stack
+
+| Area | Tools |
+|---|---|
+| Services | Python, FastAPI, Uvicorn, MQTT (paho) |
+| Speech | faster-whisper, Moonshine, Piper, Kokoro, Google Cloud TTS |
+| LLM | Ollama (local), OpenAI / Gemini APIs (cloud) |
+| Retrieval | Local document index, entity resolver, facet-aware summarization |
+| Hardware | Windows mini PC, Raspberry Pi 5, LCD face, servo, LEDs |
+| Shell (optional) | Unity for avatar, subtitles and games |
+| Quality | pytest, GitHub Actions, transcript-level dialogue regression |
+
+## Quick start
+
+```powershell
+.\helper.bat          # starts all services and opens the operator panel
+# then open http://127.0.0.1:8787
+```
+
+Full setup, hardware deployment and API details are below. New lab station? Follow the [Rachel station setup guide](docs/RACHEL_STATION_SETUP.md).
+
+---
 
 ## At a Glance
 
@@ -30,7 +80,8 @@ The repository also includes:
 | Telemetry service | `8101` | Exercise/usage metrics aggregation |
 | MQTT broker | `1883` | Robot, dialog, intent, and telemetry messaging |
 
-## Recent Updates
+<details>
+<summary><b>Recent updates</b></summary>
 
 - Standalone desktop runtime + panel can now run the full local/cloud conversation loop without Unity Play Mode.
 - Direct unified conversation flow is available on `/conversation/turn/stream` with runtime profile switching between `local` and `cloud`.
@@ -47,6 +98,8 @@ The repository also includes:
 - Pi-side servo handling now uses the synced `servoScript.py`, which preserves last-angle state and supports hold / slow / center motions for more predictable flower control.
 - The source launcher now auto-bootstraps/detects `.venv_asr` and `.venv_tts`, validates the local doc-rag embedder before startup, clears stale repo-owned service trees, and reuses an existing MQTT broker on `1883`.
 - Repeatable regression now includes transcript-level dialogue cases with machine-readable and human-readable reports under `runtime/evals/`.
+
+</details>
 
 ## SDK Spotlight (Start Here for Integration)
 
